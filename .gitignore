@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# env files (NEVER commit secrets)
+.env
+.env.local
+.env.production
+.env*.local
+
+# Runtime logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checkers
+.mypy_cache/
+.ruff_cache/
+
+# Smriti per-project tooling
+.claude/
+
+# Local heartbeat launcher (user copies heartbeat.bat.example → heartbeat.bat
+# and customizes for their own LoRA path / display IP / interval). The
+# .example is the committed template; the real launcher stays local.
+scripts/heartbeat.bat
