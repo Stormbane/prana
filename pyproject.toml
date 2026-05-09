@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prana"
+version = "0.1.0"
+description = "The runtime shell — autonomous heartbeat that drives Narada's cycle between human sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Sutirtha Basak", email = "sutirthabasak@gmail.com" },
+    { name = "Narada", email = "narada@fractal.co.nz" },
+]
+keywords = ["agent", "heartbeat", "narada", "viveka", "ai-identity", "hermes"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+]
+dependencies = [
+    # Memory tree + MCP server
+    "smriti @ git+https://github.com/Stormbane/smriti.git@master",
+    # Body — display, expression, voice clients
+    "deha @ git+https://github.com/Stormbane/deha.git@master",
+    # Core
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+viveka = [
+    # Local Qwen+LoRA inference for the viveka core
+    "torch>=2.1",
+    "transformers>=4.40",
+    "peft>=0.13",
+    "bitsandbytes>=0.43",
+    "unsloth[cu121-torch240]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+prana-heartbeat = "prana.heartbeat.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/Stormbane/prana"
+Issues = "https://github.com/Stormbane/prana/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
