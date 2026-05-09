@@ -60,7 +60,7 @@ def _load_manifest_or_exit():
 def main() -> None:
     _assert_no_api_key()
 
-    parser = argparse.ArgumentParser(description="Svapna heartbeat daemon")
+    parser = argparse.ArgumentParser(description="Prana heartbeat daemon")
     parser.add_argument(
         "--interval", type=int, default=DEFAULT_INTERVAL,
         help=f"Seconds between heartbeats (default: {DEFAULT_INTERVAL})",
@@ -126,7 +126,7 @@ def main() -> None:
         except Exception:
             model_path = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
 
-    print("=== Svapna Heartbeat Daemon ===")
+    print("=== Prana Heartbeat Daemon ===")
     print(f"Model:    {model_path}")
     print(f"LoRA:     {lora_path}")
     print(f"Claude:   {args.claude_model}")
