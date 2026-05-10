@@ -22,6 +22,11 @@ from prana.state.utterance_queue import (
     pending_utterances,
 )
 from prana.state.proximity import is_at_pc, idle_seconds
+from prana.state.presence import (
+    is_present,
+    body_sees_someone,
+    presence_snapshot,
+)
 from prana.state.router import route_utterance, RouteResult
 
 __all__ = [
@@ -35,6 +40,9 @@ __all__ = [
     "pending_utterances",
     "is_at_pc",
     "idle_seconds",
+    "is_present",
+    "body_sees_someone",
+    "presence_snapshot",
     "route_utterance",
     "RouteResult",
 ]
