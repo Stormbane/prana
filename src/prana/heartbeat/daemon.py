@@ -330,6 +330,8 @@ class HeartbeatDaemon:
                 return self._handle_sleep(desire, now, t_cycle_start)
             if desire.action == Action.CHECK_IN:
                 return self._handle_check_in(desire, now, t_cycle_start)
+            if desire.action == Action.SPEAK:
+                return self._handle_speak(desire, now, t_cycle_start)
             # REST (and any other non-capability action) — log and yield
             self.display.show_resting()
             self._log_cycle(
@@ -571,6 +573,97 @@ class HeartbeatDaemon:
             "approved": True,
             "result": str(message_path),
             "email_sent": email_sent,
+        }
+
+    def _handle_speak(
+        self, desire: Desire, now: datetime, t_cycle_start: float
+    ) -> dict:
+        """Send the SPEAK content out the BOX-3 via deha's /utter endpoint.
+
+        Like CHECK_IN, the desire.reason IS the spoken text — viveka's
+        own words, not rewritten by the frontier model. Routes through
+        deha's voice mediator so it serializes against other utterances
+        and uses the production voice.
+
+        Failure to reach deha is non-fatal: the cycle still completes
+        and the desire is logged.
+        """
+        import urllib.error
+        import urllib.request
+        import json as _json
+
+        text = (desire.reason or "").strip()
+        if not text:
+            logger.info("SPEAK: empty reason, skipping")
+            self._log_cycle(
+                CycleRecord(
+                    started=now.isoformat(),
+                    action=desire.action.value,
+                    topic=desire.topic,
+                    reason=desire.reason,
+                    approved=False,
+                    duration_s=time.monotonic() - t_cycle_start,
+                    desire_raw=desire.raw_response,
+                    result_summary="skipped: empty reason",
+                ),
+                now=now,
+            )
+            return {
+                "action": desire.action.value,
+                "topic": desire.topic,
+                "approved": False,
+                "result": "empty reason",
+            }
+
+        body = _json.dumps({
+            "text": text,
+            "source": f"prana-heartbeat:{desire.topic[:32] or 'speak'}",
+            "priority": 1,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:8765/utter",
+            data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        result_summary: str
+        approved: bool
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                resp = _json.loads(r.read().decode("utf-8"))
+            if resp.get("ok"):
+                rid = resp.get("request_id", "?")
+                logger.info("SPEAK: queued id=%s text=%r", rid, text[:80])
+                result_summary = f"queued id={rid}"
+                approved = True
+            else:
+                err = resp.get("error", "unknown")
+                logger.warning("SPEAK: deha rejected: %s", err)
+                result_summary = f"deha rejected: {err}"
+                approved = False
+        except (urllib.error.URLError, OSError) as exc:
+            logger.warning("SPEAK: deha unreachable: %s", exc)
+            result_summary = f"deha unreachable: {exc}"
+            approved = False
+
+        self.display.set_status("spoke")
+        self._log_cycle(
+            CycleRecord(
+                started=now.isoformat(),
+                action=desire.action.value,
+                topic=desire.topic,
+                reason=desire.reason,
+                approved=approved,
+                duration_s=time.monotonic() - t_cycle_start,
+                desire_raw=desire.raw_response,
+                result_summary=result_summary,
+            ),
+            now=now,
+        )
+        return {
+            "action": desire.action.value,
+            "topic": desire.topic,
+            "approved": approved,
+            "result": result_summary,
         }
 
     def run(self) -> None:
