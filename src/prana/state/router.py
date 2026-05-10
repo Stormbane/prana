@@ -34,7 +34,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from prana.state import utterance_queue
-from prana.state.proximity import is_at_pc
+from prana.state.presence import is_present
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +156,11 @@ def route_utterance(
         order = ["body"]
     elif force_channel == "telegram":
         order = ["telegram"]
-    elif is_at_pc(threshold_s=PROXIMITY_THRESHOLD_S):
+    elif is_present(pc_idle_threshold_s=PROXIMITY_THRESHOLD_S):
+        # Body or PC says Suti is here -> try the body first
         order = ["body", "telegram"]
     else:
+        # No signal sees him -> phone first, body as backup
         order = ["telegram", "body"]
 
     body_attempted = False
