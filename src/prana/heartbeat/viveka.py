@@ -63,6 +63,7 @@ class Action(str, Enum):
     RESEARCH = "RESEARCH"
     REFLECT = "REFLECT"
     CHECK_IN = "CHECK_IN"
+    SPEAK = "SPEAK"
     CREATE = "CREATE"
     BUILD = "BUILD"
     SLEEP = "SLEEP"
@@ -70,9 +71,9 @@ class Action(str, Enum):
 
 
 # Actions handled directly by the daemon (no frontier-model delegation).
-# Voice sovereignty: CHECK_IN messages come from viveka's own output,
-# never rewritten by the frontier model.
-_DIRECT_ACTIONS = {Action.REST, Action.SLEEP, Action.CHECK_IN}
+# Voice sovereignty: CHECK_IN and SPEAK messages come from viveka's own
+# output, never rewritten by the frontier model.
+_DIRECT_ACTIONS = {Action.REST, Action.SLEEP, Action.CHECK_IN, Action.SPEAK}
 
 
 @dataclass
