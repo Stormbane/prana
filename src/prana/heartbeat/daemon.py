@@ -536,8 +536,30 @@ class HeartbeatDaemon:
         logger.info("CHECK_IN: wrote %s", message_path.name)
         self.display.set_status("messaged Suti")
 
-        # Also send as email. Subject = topic; body = reason + a tail
-        # pointer to the audit file so Suti can trace where it came from.
+        # Route through prana.state.router so the message reaches Suti
+        # via body (if at PC) or Telegram (if away). Audit file above is
+        # kept either way.
+        from prana.state.router import route_utterance
+
+        route_text = (
+            f"{desire.reason}"
+            if not desire.topic
+            else f"{desire.topic}\n\n{desire.reason}"
+        )
+        route_result = route_utterance(
+            route_text,
+            source="heartbeat-check-in",
+            topic=desire.topic,
+            priority=2,  # check-ins are higher priority than ambient speak
+        )
+        if route_result.ok:
+            logger.info("CHECK_IN: routed to %s (uid=%d)",
+                        route_result.delivered_to, route_result.utterance_id)
+        else:
+            logger.warning("CHECK_IN: routing failed — %s",
+                           route_result.skipped_reason)
+
+        # Also send as email (legacy path, still useful for archival).
         subject = f"[Narada] {desire.topic}" if desire.topic else "[Narada] check-in"
         email_body = (
             f"{desire.reason}\n\n"
@@ -562,6 +584,7 @@ class HeartbeatDaemon:
                 desire_raw=desire.raw_response,
                 result_summary=(
                     f"message written: {message_path.name}"
+                    f" | route: {route_result.delivered_to or 'failed'}"
                     f" | email: {'sent' if email_sent else 'skipped'}"
                 ),
             ),
@@ -615,35 +638,23 @@ class HeartbeatDaemon:
                 "result": "empty reason",
             }
 
-        body = _json.dumps({
-            "text": text,
-            "source": f"prana-heartbeat:{desire.topic[:32] or 'speak'}",
-            "priority": 1,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "http://127.0.0.1:8765/utter",
-            data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+        # Route through prana.state.router — body if Suti is at his PC,
+        # Telegram if not, audited in state.db utterance_queue.
+        from prana.state.router import route_utterance
+
+        result = route_utterance(
+            text,
+            source=f"heartbeat-speak:{desire.topic[:32] or 'speak'}",
+            topic=desire.topic,
+            priority=1,
         )
-        result_summary: str
-        approved: bool
-        try:
-            with urllib.request.urlopen(req, timeout=5) as r:
-                resp = _json.loads(r.read().decode("utf-8"))
-            if resp.get("ok"):
-                rid = resp.get("request_id", "?")
-                logger.info("SPEAK: queued id=%s text=%r", rid, text[:80])
-                result_summary = f"queued id={rid}"
-                approved = True
-            else:
-                err = resp.get("error", "unknown")
-                logger.warning("SPEAK: deha rejected: %s", err)
-                result_summary = f"deha rejected: {err}"
-                approved = False
-        except (urllib.error.URLError, OSError) as exc:
-            logger.warning("SPEAK: deha unreachable: %s", exc)
-            result_summary = f"deha unreachable: {exc}"
-            approved = False
+        approved = result.ok
+        if approved:
+            result_summary = f"delivered_to={result.delivered_to} uid={result.utterance_id}"
+            logger.info("SPEAK: %s", result_summary)
+        else:
+            result_summary = f"all-channels-failed: {result.skipped_reason}"
+            logger.warning("SPEAK: %s", result_summary)
 
         self.display.set_status("spoke")
         self._log_cycle(
