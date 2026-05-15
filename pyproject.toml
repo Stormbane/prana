@@ -51,6 +51,7 @@ dev = [
 
 [project.scripts]
 prana-heartbeat = "prana.heartbeat.__main__:main"
+prana-host = "prana.host.cli:main"
 
 [project.urls]
 Repository = "https://github.com/Stormbane/prana"
