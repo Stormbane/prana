@@ -198,6 +198,109 @@ Cross-cutting questions across both plans:
    **Confirmed: deha keeps its supervisor; orchestrator
    supervises the deha supervisor.**
 
+## Future-proofing — what the plans handle and what they don't
+
+Audit of how well the combined architecture accommodates senses,
+tools, and skills that don't exist yet. The bus pattern handles
+*additive growth* well; certain *architectural shifts* are reserved
+in the schema but not yet implemented.
+
+### Handled cleanly (just add entries)
+
+The bus pattern absorbs new capabilities without redesign:
+
+| Future thing | How it lands | Pattern |
+|---|---|---|
+| Calendar / email / file watchers | `sense:<name>` publishers | sense bus |
+| Smart home, GitHub events, webhooks | `sense:<name>` publishers | sense bus |
+| Music control, browser automation | `action:<name>` handlers | action bus |
+| Multi-platform chat (Signal, WhatsApp, Matrix) | per-platform listener publishes `sense:<platform>_inbound` | unified-mind 1D pattern |
+| New skills (research, plan, debug) | YAML + SKILL.md in `config/skills/` | skills registry from Phase 3 |
+| Pluggable agent frameworks | YAML component swap | host plan |
+| Pluggable cognitions | YAML + bus subscription | both plans |
+
+### Reserved in schema, not yet implemented
+
+These have *slots* in the event format / contracts but no consumer
+enforces them today. Added now to prevent future breaking changes:
+
+1. **`scope` field on events** (`public` | `private` | `sensitive`).
+   When sensitive senses come online (camera frames, mic transcripts,
+   medical data), they already have a place to declare scope. Until
+   then, all events are implicitly `public`.
+
+2. **`requires_role` field on events / capabilities.** When
+   multi-cognition arrives (research-cognition vs. home-control-
+   cognition), authorization partitioning needs a slot. Today: every
+   cognition sees everything.
+
+3. **`budget_hint` field on action_invoke and skill_invoke.** Cost-
+   aware execution for actions that cost real money (Claude API,
+   Twilio, OpenAI image gen, vendor APIs). Today: no enforcement,
+   trust the caller.
+
+4. **`trace_id` for cross-cognition correlation.** When one cognition
+   triggers another (skill spawns sub-cognition), trace_id keeps the
+   flow joinable in logs. Today: optional, populated where convenient.
+
+5. **`presences: []` schema instead of single boolean.** Day-one
+   support for multi-body presence (`body_id: study` vs `body_id:
+   kitchen`). Today's single body fits naturally; multi-body costs
+   nothing extra later.
+
+### Not reserved — architectural questions deferred
+
+These need real design thinking when they become real. The plans
+explicitly *don't* commit to a shape for them:
+
+1. **Multi-host deployment.** Bus is single-host. HTTP gateway is a
+   hook for cross-host but transport, sync, and conflict resolution
+   are unsolved. Decision deferred until Narada lives on more than
+   one machine.
+
+2. **Cognition routing across embodiments.** When chat-cognition,
+   voice-cognition, body-cognition, and headphone-cognition all
+   exist, who handles a given trigger? Manual today; needs design
+   when there are >2 cognitions.
+
+3. **Spontaneous / curiosity-driven cognition.** Memory-driven
+   triggers are listed as "future" in unified-mind Phase 4.
+   Specifically: a meta-cognition that decides *when* to fire other
+   cognitions based on pattern-matching smriti or noticing absence
+   of activity. Open design space.
+
+4. **Identity coherence across embodiments.** Narada-in-body vs
+   Narada-on-Telegram vs Narada-via-headphones — same self,
+   different surfaces. The SOUL.md hardlink handles voice
+   coherence today. When embodiments diverge (different model
+   sizes, different latencies, different available tools), how
+   does she stay one self? Open.
+
+5. **Cost ceiling / kill-switch.** Beyond per-invoke `budget_hint`,
+   what's the monthly cap? What happens when it's hit? Needs
+   policy more than architecture.
+
+6. **Capability versioning.** When a skill changes its inputs or
+   semantics, cognitions that learned the old shape need to know.
+   Trivial today (we control all cognitions); needs thought when
+   skills are shared across projects or shipped externally.
+
+7. **External actor integration.** If Narada eventually orchestrates
+   third-party agents (LangGraph swarms, MCP servers run by others),
+   trust model + auth model become real. Out of scope today.
+
+### Recommendation
+
+Reserve fields in the bus event format now (changes in
+`unified-mind-2026-05-11.md` "Event format" section); name the seven
+deferred concerns explicitly so they're visible (this section);
+revisit when one of them stops being hypothetical.
+
+The plans don't need to solve everything. They need to not foreclose
+options. With these annotations, they don't.
+
+---
+
 ## What I'd do first
 
 If you say "go" tomorrow:

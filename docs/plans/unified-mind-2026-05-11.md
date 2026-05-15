@@ -87,6 +87,83 @@ On the same host, processes can either tail state.db directly (fastest) or
 go through the HTTP gateway (uniform). Default to direct state.db for
 performance-critical paths; use HTTP for everything else.
 
+## Three categories of bus citizen
+
+The architecture has three distinct kinds of capability, often conflated.
+Naming them apart matters because they have different lifecycles and
+different invocation semantics:
+
+- **Senses** — passive observations. Cognition pulls them (current state)
+  or subscribes (edge events). Examples: `presence`, `wake_word`,
+  `telegram_inbound`, `calendar_event`.
+
+- **Actions** — invoked side-effects with one entry, one outcome.
+  Cognition calls them and gets a result. Examples: `speak`,
+  `set_face`, `email_send`, `set_thermostat`. Either succeed or fail
+  cleanly; idempotent where possible.
+
+- **Skills** — named workflows that compose senses + actions + reasoning
+  into a multi-step capability. Cognition lists them (`what skills do I
+  have?`) and dispatches by name. Examples: `research-and-report`,
+  `plan-a-project`, `debug-iteratively`, `delegate-to-claude-code`.
+  Today these live as `config/skills/<name>/SKILL.md`; in the unified
+  mind they become discoverable bus citizens.
+
+Senses are observed. Actions are invoked. Skills are *practiced* —
+they're how cognition knows how to do non-trivial things.
+
+A skill in registry shape:
+
+```yaml
+# config/skills/research-and-report/SKILL.yaml
+name: research-and-report
+description: Multi-source research with cited synthesis
+inputs: {topic: str, depth: low|medium|high, budget_usd: float}
+returns: {summary: str, sources: list, confidence: float}
+composes:
+  senses: [web_search_results, smriti_recall]
+  actions: [web_fetch, remember]
+  cognitions: [claude_p]   # which cognition does the reasoning
+guide: SKILL.md            # the existing markdown guide
+```
+
+A skill's `SKILL.md` is still the load-bearing instruction file — the
+YAML is the discovery wrapper. `GET /skills` enumerates them.
+`POST /skills/<name>` invokes (or `cognition` invokes directly when it
+already knows which one it wants).
+
+## Event format — reserved fields for future use
+
+The canonical event shape on the bus:
+
+```json
+{
+  "id": 1234,
+  "ts": "2026-05-11T14:03:27.123Z",
+  "kind": "sense" | "sense_edge" | "action_invoke" | "action_result"
+        | "skill_invoke" | "skill_result"
+        | "cognition_trigger" | "cognition_result",
+  "name": "presence" | "speak" | "research-and-report" | ...,
+  "source": "deha-body" | "heartbeat-cron" | "chat-bridge" | ...,
+  "payload": { ... },
+
+  // Reserved fields — populated when meaningful, ignored when absent.
+  // Implementations should write them when they have something to say
+  // and tolerate their absence when they don't.
+  "scope":         "public" | "private" | "sensitive",   // privacy partition
+  "requires_role": "owner" | "trusted" | "guest" | null,  // who can consume
+  "budget_hint":   {"usd_max": 0.50, "time_max_s": 60},   // for actions/skills
+  "trace_id":      "uuid-of-the-cognition-that-spawned-this"
+}
+```
+
+These reserved fields are **named now to prevent future breaking
+changes**, even though no consumer enforces them today. When sensitive
+senses (camera, mic) come online, `scope=sensitive` already has a slot.
+When cost matters, `budget_hint` is already there. When multi-cognition
+arrives, `requires_role` partitions cleanly. When debugging cross-
+cognition flows, `trace_id` already correlates.
+
 ---
 
 ## Phase 0 — Contracts + transport (foundations)
@@ -97,16 +174,25 @@ existing code changes.
 **Deliverables:**
 
 1. `prana/docs/contracts/bus.md` — the bus pattern itself.
-   - Event format: `{id, ts, kind, name, payload, source}`
+   - Event format: see "Event format — reserved fields for future use"
+     section above. Reserved fields (`scope`, `requires_role`,
+     `budget_hint`, `trace_id`) declared now even though no consumer
+     enforces them yet.
    - kind ∈ {`sense`, `sense_edge`, `action_invoke`, `action_result`,
+     `skill_invoke`, `skill_result`,
      `cognition_trigger`, `cognition_result`}
-   - name = the specific sense/action (e.g. `presence`, `speak`)
+   - name = the specific sense / action / skill / cognition
    - HTTP endpoints exposed by the gateway:
      - `GET  /senses/<name>` — latest reading (pull)
      - `GET  /events?since=<id>&kinds=<csv>` — tail (long-poll)
      - `POST /senses/<name>` — publish a sense reading
      - `POST /actions/<name>` — invoke an action
-   - MCP tool surface mapping (each sense → MCP tool, each action → MCP tool)
+     - `POST /skills/<name>` — invoke a named skill
+     - `GET  /capabilities` — enumerate available senses, actions,
+       skills, cognitions. Lets cognition (or any caller) ask "what
+       can I do right now?" without hardcoding the surface.
+   - MCP tool surface mapping (each sense → MCP tool, each action →
+     MCP tool, each skill → MCP tool, plus a `list_capabilities` tool)
 
 2. `deha/docs/contracts/sense-pattern.md` — how a deha-side sense
    publishes to the bus. Generalizes the presence.md template already
@@ -180,6 +266,27 @@ prana:
 **Already 80% done** — `prana.state.presence.body_sees_someone()` is the
 pull path. Need: deha pushes edge events, prana publishes them to
 state.db, MCP tool wrapper.
+
+**Schema forward-compat note.** Today there is one body (BOX-3 in the
+study). The presence reading is a single boolean. When future bodies
+land (kitchen, bedroom, car, robot), the right question becomes *where*
+not *whether*. Change the contract from day one to:
+
+```json
+{
+  "presences": [
+    {"body_id": "study",   "present": true,  "last_seen": ..., "sources": {...}},
+    {"body_id": "kitchen", "present": false, "last_seen": ..., "sources": {...}}
+  ],
+  "primary_location": "study",
+  "any_present": true
+}
+```
+
+Single-body case fits naturally as `presences: [{body_id: "default",
+...}]`. `any_present` is the convenience field today's
+`is_present()` returns. Multi-body costs nothing extra; the schema
+just doesn't have to change later.
 
 ### 1C. speak: route_utterance becomes the action bus
 
@@ -292,6 +399,24 @@ wrapping is *additive* — keeps smriti MCP available, but also publishes
 audit events so we have a unified record of what cognition reached for.
 
 **Effort:** small — most of these are 30-60 LOC adapters.
+
+**Add a skills registry alongside.** This is the right phase to land
+the skills-as-first-class shape from the "Three categories of bus
+citizen" section above:
+
+- New: `config/skills/<name>/SKILL.yaml` next to each existing
+  `SKILL.md` declaring inputs / returns / composition.
+- New: `prana.bus.skills.registry` reads all SKILL.yaml files at
+  startup, exposes via `GET /skills` and `GET /capabilities`.
+- New: `POST /skills/<name>` invokes — most invocations just
+  delegate to the named cognition (claude_p) with the SKILL.md as
+  the system-prompt addition, but the wrapper handles input
+  validation + result publishing + audit.
+- Existing skills migrate: `heartbeat-tick`, `narada-chat` get
+  YAML wrappers. The .md files stay; the YAML is the discovery layer.
+
+This is where cognition gains the ability to ask "what can I do?"
+and dispatch by name — not just "what tools are in my prompt?".
 
 ---
 
