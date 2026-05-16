@@ -2,46 +2,42 @@
 #
 # `prana host run` reads this file and brings up every enabled component
 # as a supervised subprocess. To swap components (different agent
-# framework, disable one for debugging, add a new tool), edit here.
+# framework, different body, disable one for debugging), edit here.
 #
 # ${VAR} substitution available: HOME, USERPROFILE, PRANA_ROOT,
 # DEHA_ROOT, HERMES_HOME, LOCALAPPDATA, NARADA_ROOT.
 #
-# IMPORTANT: agent-gateway and chat-bridge are currently autostarted via
-# the Windows Startup folder. They are DISABLED here to avoid double-
-# launch. Phase 5 (host plan phase 4) migrates them: remove the .cmd
+# Architecture (named 2026-05-11+):
+#   - prana hosts the singular cognition pipeline. All triggers
+#     (telegram, signal, wake-word, heartbeat, calendar...) funnel
+#     into the same brain.
+#   - deha is the body abstraction. Hardware-specific. Exposes MCP
+#     tools (speak, look, listen, set_face, get_presence...) that any
+#     cognition can call. New embodiments (Unitree, smart speaker,
+#     laptop-as-ad-hoc-body) = new deha implementations, same contract.
+#   - prana does NOT import deha as code; it calls deha's API.
+#
+# IMPORTANT: agent-gateway and chat-bridge are currently autostarted
+# via the Windows Startup folder. They are DISABLED here to avoid
+# double-launch. Stage 5 migration flips them: remove the .cmd
 # entries from the Startup folder, flip enabled=true here, restart.
 
 components:
-  - name: heartbeat
-    description: "30-min reflection cycle (viveka + claude execution)"
-    enabled: true
-    command:
-      - python
-      - -u
-      - -m
-      - prana.heartbeat
-      - --interval
-      - "1800"
-      - --lora-path
-      - models/lora/latest
-    cwd: C:\Projects\svapna
-    env: {}
-    restart_grace_s: 5.0
-
-  - name: chat-bridge
-    description: "Telegram → claude -p bridge (per-message subprocess)"
-    enabled: false  # currently running via Startup folder; flip in Phase 5
-    command:
-      - python
-      - C:\Projects\prana\scripts\narada_chat_bridge.py
-    cwd: ${PRANA_ROOT}
-    env: {}
-    restart_grace_s: 5.0
-
+  # ─────────────────────────────────────────────────────────────────
+  # Hermes — cron scheduler. Narrow role in the new architecture:
+  # it fires the heartbeat-tick (and any future scheduled jobs). It is
+  # NOT a cognition layer; it does not handle chat (the bridge does);
+  # it does not own the heartbeat (prana.heartbeat is the code; Hermes
+  # just decides when to fire it).
+  #
+  # Why keep it: cron-fired heartbeat (--once each fire) loads the
+  # viveka LoRA fresh per cycle and releases it after. That keeps the
+  # 24GB GPU free for other work between cycles. A long-lived heartbeat
+  # daemon would pin ~5GB of GPU memory continuously. Performance > simplicity.
+  # ─────────────────────────────────────────────────────────────────
   - name: agent-gateway
-    description: "Hermes gateway (cron scheduler; chat owned by chat-bridge)"
-    enabled: false  # currently running via Startup folder; flip in Phase 5
+    description: "Hermes — cron scheduler. Fires heartbeat-tick every 30 min."
+    enabled: false  # currently running via Startup folder; flip in Stage 5
     command:
       - python
       - -m
@@ -56,8 +52,55 @@ components:
     restart_grace_s: 5.0
     # wait_for_url: http://127.0.0.1:11434/api/tags    # Phase 3: wait for ollama
 
+  # ─────────────────────────────────────────────────────────────────
+  # chat-bridge — Telegram-to-claude direct bridge. One process per
+  # message: spawns `claude -p` with wake-context.md as voice. Per-chat
+  # session continuity via --continue + marker file. Bypasses Hermes's
+  # orchestrator entirely (qwen3:8b unreliable for tool routing).
+  #
+  # Future (unified-mind phase 1D): this will split into a sense
+  # publisher (publishes sense:telegram_inbound events) plus a
+  # cognition trigger that subscribes and fires the singular cognition
+  # pipeline. For now it's one process doing both.
+  # ─────────────────────────────────────────────────────────────────
+  - name: chat-bridge
+    description: "Telegram inbound -> claude -p bridge"
+    enabled: false  # currently running via Startup folder; flip in Stage 5
+    command:
+      - python
+      - C:\Projects\prana\scripts\narada_chat_bridge.py
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 5.0
+
+  # ─────────────────────────────────────────────────────────────────
+  # deha-brain — the body. Hardware abstraction over the current
+  # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
+  #
+  # Scope (per architecture clarified 2026-05-11+):
+  #   - sense/reflex layer (lizard brain)
+  #     - wake-word detection
+  #     - presence fusion (radar + camera + mic)
+  #     - sensor noise suppression
+  #     - escalation of meaningful events to prana
+  #   - body API
+  #     - HTTP endpoints today (POST /utter, /set_face, ...)
+  #     - MCP server (TODO) so any cognition can use the body
+  #   - hardware orchestration (HA container, brain_server lifecycle,
+  #     TTS daemon)
+  #
+  # NOT in deha-brain's scope (per the new boundary):
+  #   - deciding WHAT to say, WHAT to do, HOW to respond — that's
+  #     cognition, lives in prana
+  #   - end-to-end voice conversations (currently does this; should
+  #     escalate to prana when the new architecture lands)
+  #
+  # Swappable: new bodies (Unitree, smart speakers, laptop with webcam)
+  # become new deha implementations exposing the same MCP contract.
+  # prana doesn't change.
+  # ─────────────────────────────────────────────────────────────────
   - name: deha-brain
-    description: "Voice brain + Wyoming TTS + HA conversation"
+    description: "Body — sense/reflex layer + body MCP/HTTP API (BOX-3 embodiment)"
     enabled: false  # opt-in once deha is operational on this machine
     command:
       - python

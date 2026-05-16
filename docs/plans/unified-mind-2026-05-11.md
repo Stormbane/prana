@@ -87,6 +87,42 @@ On the same host, processes can either tail state.db directly (fastest) or
 go through the HTTP gateway (uniform). Default to direct state.db for
 performance-critical paths; use HTTP for everything else.
 
+## The deha boundary (clarified 2026-05-11+)
+
+**deha is the body**, whatever the body is. Hardware abstraction layer.
+prana doesn't import deha as code; it calls deha's API. Swap the BOX-3
+for a Unitree robot, write a new deha implementation, expose the same
+contract — prana doesn't change.
+
+What lives in deha:
+- Sense/reflex layer (lizard brain): wake-word detection, presence
+  fusion, noise suppression, escalation to prana
+- Body API: HTTP endpoints (POST /utter etc) AND MCP server (TODO —
+  see "body MCP server" below)
+- Hardware orchestration: HA container, brain_server lifecycle,
+  TTS daemon, ESP32 firmware coordination
+
+What does NOT live in deha:
+- Deciding what to say or do — that's cognition, lives in prana
+- End-to-end voice conversations (deha currently does this; future
+  refactor: deha escalates to prana, prana decides response, prana
+  calls deha tools to deliver)
+
+Boundary check: "does this depend on the specific embodiment?" Yes
+→ deha. No → prana.
+
+**Body MCP server (deferred, deha-side work):** Today body actions
+are reachable only via HTTP on deha-brain. To unlock "any cognition
+can use the body" — Telegram session, this Claude Code session,
+wake-word-triggered session, all need MCP tool surface — deha needs
+an MCP server alongside its HTTP endpoints. Same underlying handlers,
+two exposure protocols. Once it lands:
+  - prana cognition's `claude -p` invocations add deha MCP via
+    `--mcp-config`
+  - Claude Code's `~/.claude.json` adds deha MCP
+  - Telegram bridge, heartbeat, all cognitions inherit body tools
+This is deha-side responsibility per the boundary.
+
 ## Three categories of bus citizen
 
 The architecture has three distinct kinds of capability, often conflated.
