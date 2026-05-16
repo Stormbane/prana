@@ -32,11 +32,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         return 3
 
+    config_path = args.config or COMPONENTS_YAML
     try:
-        components = load_components(COMPONENTS_YAML)
+        from pathlib import Path
+        components = load_components(Path(config_path))
     except FileNotFoundError:
         sys.stderr.write(
-            f"FATAL: components.yaml not found at {COMPONENTS_YAML}\n"
+            f"FATAL: components.yaml not found at {config_path}\n"
             f"Run `prana host install` (Phase 4) or create it from\n"
             f"prana/scripts/install/components.template.yaml.\n"
         )
@@ -107,6 +109,8 @@ def main() -> int:
     run.add_argument("-v", "--verbose", action="store_true", help="Tee logs to stderr.")
     run.add_argument("--replace", action="store_true",
                      help="Kill an existing orchestrator instance, then start.")
+    run.add_argument("--config", type=str, default=None,
+                     help=f"Path to components.yaml (default: {COMPONENTS_YAML}).")
     run.set_defaults(func=_cmd_run)
 
     status = sub.add_parser("status", help="Show whether the orchestrator is running.")

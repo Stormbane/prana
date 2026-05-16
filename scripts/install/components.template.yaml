@@ -1,0 +1,71 @@
+# Host orchestrator component registry.
+#
+# `prana host run` reads this file and brings up every enabled component
+# as a supervised subprocess. To swap components (different agent
+# framework, disable one for debugging, add a new tool), edit here.
+#
+# ${VAR} substitution available: HOME, USERPROFILE, PRANA_ROOT,
+# DEHA_ROOT, HERMES_HOME, LOCALAPPDATA, NARADA_ROOT.
+#
+# IMPORTANT: agent-gateway and chat-bridge are currently autostarted via
+# the Windows Startup folder. They are DISABLED here to avoid double-
+# launch. Phase 5 (host plan phase 4) migrates them: remove the .cmd
+# entries from the Startup folder, flip enabled=true here, restart.
+
+components:
+  - name: heartbeat
+    description: "30-min reflection cycle (viveka + claude execution)"
+    enabled: true
+    command:
+      - python
+      - -u
+      - -m
+      - prana.heartbeat
+      - --interval
+      - "1800"
+      - --lora-path
+      - models/lora/latest
+    cwd: C:\Projects\svapna
+    env: {}
+    restart_grace_s: 5.0
+
+  - name: chat-bridge
+    description: "Telegram → claude -p bridge (per-message subprocess)"
+    enabled: false  # currently running via Startup folder; flip in Phase 5
+    command:
+      - python
+      - C:\Projects\prana\scripts\narada_chat_bridge.py
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 5.0
+
+  - name: agent-gateway
+    description: "Hermes gateway (cron scheduler; chat owned by chat-bridge)"
+    enabled: false  # currently running via Startup folder; flip in Phase 5
+    command:
+      - python
+      - -m
+      - hermes_cli.main
+      - gateway
+      - run
+      - --replace
+    cwd: C:\Projects\hermes-spike\hermes-agent
+    env:
+      HERMES_HOME: ${HOME}\.hermes
+      PYTHONIOENCODING: utf-8
+    restart_grace_s: 5.0
+    # wait_for_url: http://127.0.0.1:11434/api/tags    # Phase 3: wait for ollama
+
+  - name: deha-brain
+    description: "Voice brain + Wyoming TTS + HA conversation"
+    enabled: false  # opt-in once deha is operational on this machine
+    command:
+      - python
+      - -m
+      - deha.voice.supervisor
+      - --voice
+      - am_michael:0.5,af_heart:0.5
+    cwd: ${DEHA_ROOT}
+    env: {}
+    restart_grace_s: 5.0
+    # health_url: http://127.0.0.1:8765/health     # Phase 3
