@@ -71,6 +71,56 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_install_script(name: str) -> "Path":
+    """Find install.ps1 / uninstall.ps1 in the installed prana package."""
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    # src/prana/host/cli.py → repo root → scripts/install/
+    candidate = here.parent.parent.parent.parent / "scripts" / "install" / name
+    if not candidate.exists():
+        sys.stderr.write(f"FATAL: install script not found at {candidate}\n")
+        sys.stderr.write("This usually means prana is installed without -e and the scripts/ dir wasn't included.\n")
+        raise SystemExit(5)
+    return candidate
+
+
+def _run_powershell(script_path: "Path", *args: str) -> int:
+    """Invoke a .ps1 via powershell.exe with the strictest sane policy."""
+    import subprocess as _sp
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", str(script_path),
+        *args,
+    ]
+    logger.info("running: %s", " ".join(cmd))
+    return _sp.call(cmd)
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
+    """Register the host orchestrator as a Windows scheduled task."""
+    if sys.platform != "win32":
+        sys.stderr.write("FATAL: install is currently Windows-only.\n")
+        return 5
+    script = _resolve_install_script("install.ps1")
+    ps_args: list[str] = []
+    if args.force:
+        ps_args.append("-Force")
+    if args.dry_run:
+        ps_args.append("-DryRun")
+    return _run_powershell(script, *ps_args)
+
+
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    """Remove the host orchestrator scheduled task."""
+    if sys.platform != "win32":
+        sys.stderr.write("FATAL: uninstall is currently Windows-only.\n")
+        return 5
+    script = _resolve_install_script("uninstall.ps1")
+    return _run_powershell(script)
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     """Report state of the running orchestrator + its components."""
     setup_logging(verbose=False)
@@ -115,6 +165,14 @@ def main() -> int:
 
     status = sub.add_parser("status", help="Show whether the orchestrator is running.")
     status.set_defaults(func=_cmd_status)
+
+    install = sub.add_parser("install", help="Register Narada Host as a Windows scheduled task (at logon).")
+    install.add_argument("--force", action="store_true", help="Re-register even if task exists.")
+    install.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything.")
+    install.set_defaults(func=_cmd_install)
+
+    uninstall = sub.add_parser("uninstall", help="Remove the Narada Host scheduled task.")
+    uninstall.set_defaults(func=_cmd_uninstall)
 
     args = parser.parse_args()
     return args.func(args)
