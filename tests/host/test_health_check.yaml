@@ -1,0 +1,17 @@
+# Test config: unreachable health_url exercises the 3-strikes-restart path.
+# Use:  prana host run --replace --config tests/host/test_health_check.yaml
+# Expect: log shows 3 failed health probes, then SIGTERM, then respawn.
+
+components:
+  - name: unhealthy
+    description: "long-sleep child with a bogus health URL"
+    command:
+      - python
+      - -u
+      - -c
+      - "import time; print('unhealthy alive'); time.sleep(300)"
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 1.0
+    health_url: http://127.0.0.1:65535/health
+    health_interval_s: 2.0
