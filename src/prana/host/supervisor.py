@@ -21,6 +21,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -34,6 +36,15 @@ RATE_LIMIT_WINDOW_S = 60.0
 RATE_LIMIT_MAX_EXITS = 3
 RATE_LIMIT_COOLDOWN_S = 300.0  # 5 min
 
+# Health check tunables
+HEALTH_PROBE_TIMEOUT_S = 3.0
+HEALTH_FAILURES_TO_RESTART = 3
+
+# wait_for_url gate
+WAIT_FOR_URL_TIMEOUT_S = 1.5
+WAIT_FOR_URL_POLL_INTERVAL_S = 2.0
+WAIT_FOR_URL_MAX_S = 300.0  # 5 min — refuse to wait longer than this
+
 
 @dataclass
 class ComponentState:
@@ -46,13 +57,22 @@ class ComponentState:
     restart_count: int = 0
     cooled_down_until: Optional[float] = None  # epoch; None if running normally
     recent_exits: deque = field(default_factory=lambda: deque(maxlen=RATE_LIMIT_MAX_EXITS))
+    # Health state (Phase 3)
+    health_consecutive_failures: int = 0
+    last_health_at: Optional[float] = None
+    last_health_ok: Optional[bool] = None
+    waiting_for_dependency: Optional[str] = None  # url being waited on, if any
 
     @property
     def status(self) -> str:
         now = time.time()
+        if self.waiting_for_dependency:
+            return "waiting-for-dependency"
         if self.cooled_down_until and now < self.cooled_down_until:
             return "cooled-down"
         if self.pid:
+            if self.last_health_ok is False:
+                return "running-but-unhealthy"
             return "running"
         if self.last_exit_code is not None:
             return "restarting"
@@ -123,12 +143,92 @@ class ComponentRunner:
             RATE_LIMIT_COOLDOWN_S,
         )
 
+    async def _wait_for_dependency(self) -> bool:
+        """If component declares wait_for_url, poll until reachable.
+
+        Returns True when ready (or no dependency declared). Returns
+        False if the deadline elapses; caller should treat that as a
+        spawn failure (will retry after restart_grace_s).
+        """
+        url = self.component.wait_for_url
+        if not url:
+            return True
+        self.state.waiting_for_dependency = url
+        self.logger.info("waiting for dependency: %s", url)
+        deadline = time.time() + WAIT_FOR_URL_MAX_S
+        while time.time() < deadline:
+            if await asyncio.to_thread(self._http_probe, url):
+                self.state.waiting_for_dependency = None
+                self.logger.info("dependency ready: %s", url)
+                return True
+            await asyncio.sleep(WAIT_FOR_URL_POLL_INTERVAL_S)
+        self.state.waiting_for_dependency = None
+        self.logger.error(
+            "dependency %s did not become ready within %ds — abandoning spawn",
+            url, WAIT_FOR_URL_MAX_S,
+        )
+        return False
+
+    @staticmethod
+    def _http_probe(url: str) -> bool:
+        """Synchronous HTTP HEAD/GET probe. True on 2xx, False otherwise."""
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=WAIT_FOR_URL_TIMEOUT_S) as r:
+                return 200 <= r.status < 300
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            return False
+
+    async def _health_loop(self) -> None:
+        """Periodic health check while the process is running.
+
+        Three consecutive failures → terminate the process (the main
+        wait loop will see it exit and respawn after restart_grace_s).
+        """
+        url = self.component.health_url
+        if not url:
+            return
+        while self._proc and self._proc.returncode is None:
+            await asyncio.sleep(self.component.health_interval_s)
+            if not self._proc or self._proc.returncode is not None:
+                return
+            ok = await asyncio.to_thread(self._http_probe, url)
+            self.state.last_health_at = time.time()
+            self.state.last_health_ok = ok
+            if ok:
+                if self.state.health_consecutive_failures:
+                    self.logger.info("health recovered")
+                self.state.health_consecutive_failures = 0
+            else:
+                self.state.health_consecutive_failures += 1
+                self.logger.warning(
+                    "health probe failed (%d/%d): %s",
+                    self.state.health_consecutive_failures,
+                    HEALTH_FAILURES_TO_RESTART,
+                    url,
+                )
+                if self.state.health_consecutive_failures >= HEALTH_FAILURES_TO_RESTART:
+                    self.logger.error(
+                        "%d consecutive health failures — terminating for restart",
+                        HEALTH_FAILURES_TO_RESTART,
+                    )
+                    await self._terminate()
+                    return
+
     async def _spawn_and_wait(self) -> None:
         """Spawn one instance of the subprocess and wait for it to exit."""
         c = self.component
         # cwd may not yet exist for some setups — fail loud rather than silent
         if not c.cwd.exists():
             raise FileNotFoundError(f"cwd does not exist: {c.cwd}")
+
+        # Wait for any declared dependency
+        if not await self._wait_for_dependency():
+            return  # caller will retry after restart_grace_s
+
+        # Reset health counters on each fresh spawn
+        self.state.health_consecutive_failures = 0
+        self.state.last_health_ok = None
 
         self.logger.info("spawning: %s", " ".join(c.command))
         self.logger.debug("  cwd=%s", c.cwd)
@@ -155,12 +255,21 @@ class ComponentRunner:
             self._pump(self._proc.stderr, level=logging.WARNING, tag="err"),
             name=f"{c.name}-stderr",
         )
+        # Health checks run alongside if a URL was configured
+        health_task = (
+            asyncio.create_task(self._health_loop(), name=f"{c.name}-health")
+            if c.health_url else None
+        )
 
         try:
             rc = await self._proc.wait()
         finally:
+            # Stop the health loop if running
+            if health_task and not health_task.done():
+                health_task.cancel()
             # Drain remaining buffered output
-            await asyncio.gather(pump_out, pump_err, return_exceptions=True)
+            tasks = [t for t in [pump_out, pump_err, health_task] if t]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         self.state.pid = None
         self.state.last_exit_at = time.time()
@@ -278,6 +387,10 @@ class Supervisor:
                 "pid": r.state.pid,
                 "restart_count": r.state.restart_count,
                 "last_exit_code": r.state.last_exit_code,
+                "health_url": r.component.health_url,
+                "last_health_ok": r.state.last_health_ok,
+                "health_consecutive_failures": r.state.health_consecutive_failures,
+                "waiting_for_dependency": r.state.waiting_for_dependency,
             }
             for name, r in self.runners.items()
         }
