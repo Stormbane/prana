@@ -1,0 +1,31 @@
+# Test config for multi-component supervision smoke test.
+# Two short-lived components (sleep then exit) — verifies the supervisor
+# can spawn N children concurrently, log them with distinct prefixes,
+# restart them on exit (rate-limiter eventually cools them down).
+#
+# Use:  prana host run --replace --config tests/host/test_multi_components.yaml
+# (not exposed as a flag yet — symlink/copy this over components.yaml
+# manually if you want to run it.)
+
+components:
+  - name: ping
+    description: "test child A — sleeps then exits 0"
+    command:
+      - python
+      - -u
+      - -c
+      - "import time; print('ping alive'); time.sleep(3); print('ping bye')"
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 1.0
+
+  - name: pong
+    description: "test child B — sleeps then exits 0"
+    command:
+      - python
+      - -u
+      - -c
+      - "import time; print('pong alive'); time.sleep(5); print('pong bye')"
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 1.0
