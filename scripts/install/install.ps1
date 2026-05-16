@@ -53,8 +53,11 @@ if ($DryRun) {
     exit 0
 }
 
-# Check for existing task; if found and -Force, remove first
-$existing = schtasks /Query /TN $TaskName 2>$null
+# Check for existing task; if found and -Force, remove first.
+# Use Get-ScheduledTask cmdlet -- schtasks /Query writes to stderr when the
+# task is missing and `2>$null` does not fully suppress that under
+# $ErrorActionPreference=Stop (PowerShell wraps it as NativeCommandError).
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing -and -not $Force) {
     Write-Host "Task '$TaskName' already exists. Use -Force to re-register."
     exit 2
