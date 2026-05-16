@@ -11,7 +11,7 @@ param()
 $ErrorActionPreference = "Stop"
 $TaskName = "Narada_Host"
 
-$existing = schtasks /Query /TN $TaskName 2>$null
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if (-not $existing) {
     Write-Host "Task '$TaskName' not registered -- nothing to do."
     exit 0
