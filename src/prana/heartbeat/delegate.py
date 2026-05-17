@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from prana.heartbeat.viveka import Desire
+from prana.spawn import run_hidden
 
 logger = logging.getLogger(__name__)
 
@@ -312,25 +313,39 @@ class ClaudeDelegate:
             "--max-budget-usd", str(self.max_budget_usd),
         ]
 
+        # Heartbeat-dedicated MCP config: smriti (memory) + body (peer-
+        # accessible body via deha.mcp.server). Per the integration
+        # handoff, heartbeat carries its own mcp-config rather than
+        # inheriting the user's global ~/.claude.json — so a fresh
+        # install gets a reproducible MCP set with no surprises from
+        # whatever the user happens to have mounted locally.
+        mcp_config = _NARADA_ROOT / "heartbeat" / "mcp-config.json"
+        if mcp_config.exists():
+            cmd.extend(["--mcp-config", str(mcp_config)])
+
         if tools_enabled == "full":
-            # MCP smriti tools are explicitly listed so headless claude -p
-            # doesn't prompt for permission on every call. Without this,
-            # the executor falls back to filesystem Read/Grep which works
-            # but misses the indexed semantic search smriti provides.
+            # MCP tools are explicitly listed so headless claude -p doesn't
+            # prompt for permission on every call. Without this, the
+            # executor falls back to filesystem Read/Grep which works
+            # but misses smriti's indexed semantic search and can't reach
+            # the body at all.
             cmd.extend([
                 "--allowedTools",
                 "Read Glob Grep Bash WebFetch WebSearch Write Edit "
                 "mcp__smriti__smriti_read mcp__smriti__smriti_write "
-                "mcp__smriti__smriti_status",
+                "mcp__smriti__smriti_status "
+                "mcp__body__body.speak mcp__body__body.get_presence",
                 "--permission-mode", "acceptEdits",
             ])
         elif tools_enabled == "readonly":
             # Plan/revision phase: investigate the project state but don't
-            # mutate anything. Smriti read is allowed; smriti write is not.
+            # mutate anything. Smriti read + body presence (a read) are
+            # allowed; smriti write and body.speak (a write) are not.
             cmd.extend([
                 "--allowedTools",
                 "Read Glob Grep WebFetch WebSearch "
-                "mcp__smriti__smriti_read mcp__smriti__smriti_status",
+                "mcp__smriti__smriti_read mcp__smriti__smriti_status "
+                "mcp__body__body.get_presence",
             ])
         else:
             # Text-only — `--tools ""` actually disables every tool, where
@@ -345,7 +360,7 @@ class ClaudeDelegate:
         effective_cwd = Path(cwd) if cwd is not None else PROJECT_ROOT
 
         def _spawn() -> subprocess.CompletedProcess:
-            return subprocess.run(
+            return run_hidden(
                 cmd,
                 cwd=str(effective_cwd),
                 capture_output=True,
