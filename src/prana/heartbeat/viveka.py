@@ -26,6 +26,28 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# Single-file append log for parse failures. Easier to tail when chasing a
+# regression than per-cycle sidecars; keeps the raw model output that the
+# cycle markdown may not capture cleanly (yaml escape, truncation, etc).
+_PARSE_FAIL_LOG = Path.home() / ".narada" / "heartbeat" / "parse-failures.log"
+
+
+def _log_parse_failure(kind: str, raw: str) -> None:
+    """Append a parse-failure entry. Best-effort — never raises."""
+    try:
+        _PARSE_FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        entry = (
+            f"=== {ts} :: {kind} ===\n"
+            f"{raw}\n"
+        )
+        with _PARSE_FAIL_LOG.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except OSError as exc:
+        logger.warning("could not write parse-failure log: %s", exc)
+
+
 def _extract_json(raw: str) -> dict | None:
     """Extract a JSON object from a model response.
 
@@ -118,7 +140,7 @@ class VivekaCore:
         self,
         model_path: str = "unsloth/Qwen3-8B-unsloth-bnb-4bit",
         lora_path: str | Path | None = None,
-        max_new_tokens: int = 200,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
         repetition_penalty: float = 1.15,
     ):
@@ -250,6 +272,7 @@ class VivekaCore:
             logger.warning(
                 "Could not extract JSON from desire response: %r", raw[:300]
             )
+            _log_parse_failure("desire", raw)
             return Desire(
                 action=Action.REST,
                 topic="parse_failed",
@@ -292,6 +315,7 @@ class VivekaCore:
             logger.warning(
                 "Could not extract JSON from judgment response: %r", raw[:300]
             )
+            _log_parse_failure("judgment", raw)
             return Judgment(
                 approved=False,
                 feedback="model output was not valid JSON",
