@@ -23,6 +23,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Tolerance when comparing the lockfile's recorded start_time against
+# psutil.create_time(). The lockfile is written milliseconds-to-seconds
+# after the process actually starts, so allow a small window.
+_START_TIME_MATCH_TOLERANCE_S = 5.0
+
 try:
     import psutil  # type: ignore
     HAS_PSUTIL = True
@@ -62,6 +67,45 @@ def _pid_alive(pid: int) -> bool:
         except OSError:
             return False
     return False
+
+
+def _lock_holder_alive(lock: dict) -> bool:
+    """True only if the process recorded in `lock` is still the live holder.
+
+    Stricter than ``_pid_alive``: also verifies the process's create time
+    matches the lockfile's recorded ``start_time`` (within tolerance).
+    PIDs are recycled — Windows in particular cycles them aggressively —
+    so a bare pid liveness check can mistake an unrelated new process for
+    the original holder and refuse to start the new host.
+
+    If we can't read the process's start time (no psutil, or psutil
+    raises), fall back to the bare pid check. Lockfiles missing the
+    ``start_time`` field also fall back, for backward compatibility.
+    """
+    pid = int(lock.get("pid", 0))
+    if not _pid_alive(pid):
+        return False
+
+    recorded = lock.get("start_time")
+    if not recorded or not HAS_PSUTIL:
+        return True  # best-effort: pid liveness only
+
+    try:
+        recorded_dt = datetime.fromisoformat(recorded)
+    except ValueError:
+        return True
+
+    # Normalize to UTC-aware so timestamp arithmetic is unambiguous.
+    if recorded_dt.tzinfo is None:
+        recorded_dt = recorded_dt.replace(tzinfo=timezone.utc)
+    recorded_epoch = recorded_dt.timestamp()
+
+    try:
+        actual_epoch = psutil.Process(pid).create_time()
+    except psutil.Error:
+        return False  # process vanished between checks; treat as gone
+
+    return abs(actual_epoch - recorded_epoch) <= _START_TIME_MATCH_TOLERANCE_S
 
 
 def _kill_pid(pid: int, timeout_s: float = 5.0) -> bool:
@@ -106,7 +150,7 @@ def acquire(replace: bool = False) -> bool:
     existing = read_lock()
     if existing:
         pid = int(existing.get("pid", 0))
-        if _pid_alive(pid):
+        if _lock_holder_alive(existing):
             if not replace:
                 logger.warning(
                     "host orchestrator already running (pid=%d, started %s)",
@@ -117,6 +161,13 @@ def acquire(replace: bool = False) -> bool:
             if not _kill_pid(pid):
                 logger.error("failed to kill existing orchestrator pid=%d", pid)
                 return False
+        elif _pid_alive(pid):
+            # PID is alive but doesn't match the recorded start_time —
+            # a different process inherited this pid. Original is gone.
+            logger.info(
+                "stale lockfile (pid=%d alive but start_time mismatch — pid reused) — replacing",
+                pid,
+            )
         else:
             logger.info("stale lockfile (pid=%d not alive) — replacing", pid)
 

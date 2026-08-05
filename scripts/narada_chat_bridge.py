@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -35,6 +36,16 @@ from telegram.ext import (
     CommandHandler,
     filters,
 )
+
+from prana.spawn import run_hidden
+
+
+# Resolve claude once at module load. Pre-CVE-2024-3219 we used
+# shell=True so cmd.exe would find the .cmd shim; that put Telegram
+# message text on a cmd.exe command line, which is a real injection
+# surface even with ALLOWED_USERS gating. Direct execution via the
+# resolved path keeps args in the C-runtime parsing context.
+_CLAUDE_PATH: str | None = shutil.which("claude")
 
 
 HERMES_ENV = Path.home() / ".hermes" / ".env"
@@ -100,8 +111,11 @@ def _mark_session_active(workdir: Path) -> None:
 async def _run_claude(message: str, workdir: Path) -> tuple[bool, str]:
     """Spawn claude -p with the wake-context as system prompt. Returns
     (success, response_text)."""
+    if not _CLAUDE_PATH:
+        return False, "(claude CLI not found on PATH at startup)"
+
     cmd = [
-        "claude",
+        _CLAUDE_PATH,
         "-p", message,
         "--append-system-prompt-file", str(WAKE_CONTEXT),
         "--max-turns", str(MAX_TURNS),
@@ -116,7 +130,7 @@ async def _run_claude(message: str, workdir: Path) -> tuple[bool, str]:
 
     try:
         proc = await asyncio.to_thread(
-            subprocess.run,
+            run_hidden,
             cmd,
             cwd=str(workdir),
             env=_scrubbed_env(),
@@ -127,7 +141,6 @@ async def _run_claude(message: str, workdir: Path) -> tuple[bool, str]:
             encoding="utf-8",
             errors="replace",
             timeout=CLAUDE_TIMEOUT,
-            shell=True,  # Windows: claude is a .cmd shim
         )
     except subprocess.TimeoutExpired:
         return False, f"(timed out after {CLAUDE_TIMEOUT}s)"

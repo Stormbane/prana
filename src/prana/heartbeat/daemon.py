@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from prana.indriyas.jnanendriyas.tvac.weather import fetch_kallangur_weather
 from prana.heartbeat.cycle_log import CycleRecord, latest_started, write_cycle
 from prana.heartbeat.delegate import ClaudeDelegate
 from prana.heartbeat.viveka import Action, Desire, VivekaCore
+from prana.spawn import run_hidden
 from prana.heartbeat.wake import (
     NARADA_ROOT,
     WakeManifest,
@@ -145,8 +147,8 @@ def ingest_new_artifacts(before: set[Path]) -> list[dict]:
     for artifact in new_artifacts:
         logger.info("Ingesting artifact: %s", artifact.name)
         try:
-            proc = subprocess.run(
-                ["python", "-m", "smriti.cli", "ingest", str(artifact)],
+            proc = run_hidden(
+                [sys.executable, "-m", "smriti.cli", "ingest", str(artifact)],
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -179,11 +181,11 @@ def ingest_new_artifacts(before: set[Path]) -> list[dict]:
 
 def _project_git_head(project_root: Path) -> str | None:
     try:
-        head = subprocess.run(
+        head = run_hidden(
             ["git", "rev-parse", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, timeout=5,
         )
-        status = subprocess.run(
+        status = run_hidden(
             ["git", "status", "--porcelain"],
             cwd=str(project_root), capture_output=True, text=True, timeout=5,
         )
@@ -478,16 +480,30 @@ class HeartbeatDaemon:
         logger.info("SLEEP: launching smriti sleep --all (topic=%r)", desire.topic)
         self.display.set_status("sleeping")
 
-        proc = subprocess.run(
-            ["python", "-m", "smriti.cli", "sleep", "--all"],
-            capture_output=True, text=True,
-        )
+        # 30-min cap: smriti sleep is bounded work in practice; if it
+        # ever exceeds that something is wrong and we must not block
+        # the next heartbeat indefinitely.
+        try:
+            proc = run_hidden(
+                [sys.executable, "-m", "smriti.cli", "sleep", "--all"],
+                capture_output=True, text=True, timeout=1800,
+            )
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            logger.error("SLEEP timed out after 30 min — abandoning cycle")
+            proc = subprocess.CompletedProcess(
+                args=exc.cmd, returncode=-1,
+                stdout=(exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+                stderr=(exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
+            )
+            timed_out = True
+
         LAST_SLEEP_MARKER.parent.mkdir(parents=True, exist_ok=True)
         LAST_SLEEP_MARKER.touch()
 
-        ok = proc.returncode == 0
+        ok = (proc.returncode == 0) and not timed_out
         summary = (proc.stdout or "").strip().splitlines()[-1:] or [""]
-        result_line = summary[0]
+        result_line = summary[0] if not timed_out else "(timed out after 30m)"
         logger.info("SLEEP complete (exit=%d): %s", proc.returncode, result_line)
 
         self._log_cycle(

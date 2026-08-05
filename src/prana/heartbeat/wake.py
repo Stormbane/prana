@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prana.spawn import run_hidden
+
 logger = logging.getLogger(__name__)
 
 
@@ -220,7 +222,7 @@ def _resolve_one(kind: str, spec: dict) -> str:
         else:
             argv = list(command)
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 argv, capture_output=True, text=True, timeout=timeout,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):

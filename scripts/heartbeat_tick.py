@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from prana.spawn import run_hidden
+
 
 SVAPNA_ROOT = Path("C:/Projects/svapna")
 LORA_PATH = "models/lora/latest"
@@ -35,7 +37,7 @@ def main() -> int:
         "--display-ip", DISPLAY_IP,
     ]
 
-    proc = subprocess.run(
+    proc = run_hidden(
         cmd,
         cwd=str(SVAPNA_ROOT),
         env=env,
