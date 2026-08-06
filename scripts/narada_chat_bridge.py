@@ -17,6 +17,7 @@ Run: python C:/Projects/prana/scripts/narada_chat_bridge.py
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -62,6 +63,7 @@ ALLOWED_USERS: Set[int] = {
 WAKE_CONTEXT = Path.home() / ".narada" / ".smriti" / "wake-context.md"
 CHAT_SESSIONS_ROOT = Path.home() / ".narada" / "chat-sessions"
 CHAT_LOG_ROOT = Path.home() / ".narada" / "heartbeat" / "chat-cycles"
+SESSIONS_MCP_CONFIG = Path.home() / ".narada" / ".sessions-mcp.json"
 
 CLAUDE_TIMEOUT = 300  # seconds; claude -p calls cap at 5 min
 MAX_TURNS = 20
@@ -72,6 +74,41 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("narada_chat_bridge")
+
+
+def _write_sessions_mcp_config() -> Path | None:
+    """Materialize the MCP config wiring the session manager into chat.
+
+    The bridge is the PRANA TIER: messages here come from Suti's
+    allowlisted Telegram chat, which is the authenticated channel the
+    sovereignty design requires for mutations. The config carries the
+    tier token, so it lives under the user profile like the tokens file.
+    Returns None (chat still works, without session tools) on any error.
+    """
+    try:
+        from prana.sessions.mcp import _load_or_create_tokens
+
+        token = _load_or_create_tokens()["prana"]
+        config = {
+            "mcpServers": {
+                "narada-sessions": {
+                    "command": sys.executable,
+                    "args": ["-m", "prana.sessions.mcp", "--tier", "prana"],
+                    "env": {"PRANA_SESSIONS_TOKEN": token},
+                }
+            }
+        }
+        SESSIONS_MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        SESSIONS_MCP_CONFIG.write_text(
+            json.dumps(config, indent=2), encoding="utf-8"
+        )
+        return SESSIONS_MCP_CONFIG
+    except Exception as exc:  # never let session tools break chat itself
+        logger.warning("sessions MCP config unavailable: %s", exc)
+        return None
+
+
+_SESSIONS_MCP: Path | None = _write_sessions_mcp_config()
 
 
 def _per_chat_workdir(chat_id: int) -> Path:
@@ -122,6 +159,8 @@ async def _run_claude(message: str, workdir: Path) -> tuple[bool, str]:
         "--output-format", "text",
         "--dangerously-skip-permissions",
     ]
+    if _SESSIONS_MCP is not None:
+        cmd += ["--mcp-config", str(_SESSIONS_MCP)]
     if _has_prior_session(workdir):
         cmd.append("--continue")
 
