@@ -2,33 +2,81 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from prana.voice.budget import BudgetExceeded, VoiceBudget
+from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
 
 
 def _budget(tmp_path, **kw):
     return VoiceBudget(tmp_path / "ledger.json", **kw)
 
 
-def test_budget_accumulates_and_caps(tmp_path):
-    b = _budget(tmp_path, daily_cap_min=10)
-    b.check_can_start()  # fresh day: fine
-    b.record_session(9 * 60)
+def test_reserve_settle_roundtrip(tmp_path):
+    b = _budget(tmp_path, daily_cap_min=30, session_cap_s=10 * 60)
+    rid = b.reserve()
+    b.settle(rid, 9 * 60)
     assert b.spent_today_min() == pytest.approx(9.0)
-    b.check_can_start()  # 9 < 10: still fine
-    b.record_session(2 * 60)
+
+
+def test_reservations_bound_concurrent_admission(tmp_path):
+    """Cap 25 min, sessions reserve 10 min each: only two may enter."""
+    b = _budget(tmp_path, daily_cap_min=25, session_cap_s=10 * 60)
+    admitted, rejected = [], []
+
+    def worker():
+        try:
+            admitted.append(b.reserve())
+        except BudgetExceeded:
+            rejected.append(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(admitted) == 2 and len(rejected) == 4
+
+
+def test_settle_releases_unused_reservation(tmp_path):
+    b = _budget(tmp_path, daily_cap_min=15, session_cap_s=10 * 60)
+    rid = b.reserve()
     with pytest.raises(BudgetExceeded):
-        b.check_can_start()
+        b.reserve()  # 10 reserved + 10 requested > 15
+    b.settle(rid, 60)  # actual use: 1 minute
+    b.reserve()  # now fits
 
 
-def test_budget_survives_corrupt_ledger(tmp_path):
+def test_corrupt_ledger_fails_closed(tmp_path):
     path = tmp_path / "ledger.json"
     path.write_text("{corrupt", encoding="utf-8")
     b = VoiceBudget(path, daily_cap_min=10)
-    assert b.spent_today_min() == 0.0
-    b.record_session(60)
-    assert b.spent_today_min() == pytest.approx(1.0)
+    with pytest.raises(BudgetUnavailable):
+        b.reserve()
+    with pytest.raises(BudgetUnavailable):
+        b.spent_today_min()
+
+
+def test_midnight_split_attributes_both_days(tmp_path):
+    import json
+    from datetime import datetime, timedelta
+
+    b = _budget(tmp_path, daily_cap_min=1000)
+    rid = b.reserve()
+    # rewrite the reservation to have started 30 min before midnight
+    data = json.loads((tmp_path / "ledger.json").read_text())
+    yesterday_start = datetime.combine(
+        datetime.now().date(), datetime.min.time()
+    ) - timedelta(minutes=30)
+    data["reservations"][rid]["start_iso"] = yesterday_start.isoformat()
+    (tmp_path / "ledger.json").write_text(json.dumps(data))
+    b.settle(rid, 60 * 60)  # one hour spanning midnight
+    ledger = json.loads((tmp_path / "ledger.json").read_text())["days"]
+    days = sorted(ledger)
+    assert len(days) == 2
+    assert ledger[days[0]] == pytest.approx(30.0)  # yesterday
+    assert ledger[days[1]] == pytest.approx(30.0)  # today
 
 
 VOICE_TOOL_NAMES = {

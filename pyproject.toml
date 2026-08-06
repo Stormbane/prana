@@ -35,9 +35,18 @@ dependencies = [
     # optional; an extras-only dep would restart-loop clean installs)
     "psutil>=5.9",
     "mcp>=1.0",
+    # Long-standing undeclared imports (chat bridge) + voice budget/gate
+    "python-dotenv>=1.0",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
+voice = [
+    # Voice loop (component ships enabled:false, so extras are correct
+    # here — flip requires deliberate setup incl. OPENAI_API_KEY)
+    "livekit-agents[openai]>=1.6",
+    "livekit-wakeword>=0.2",
+]
 viveka = [
     # Local Qwen+LoRA inference for the viveka core
     "torch>=2.1",

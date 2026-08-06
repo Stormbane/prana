@@ -88,18 +88,28 @@ def build_voice_tools(
         if not approve:
             return {"approved": False, "reason": reason,
                     "proposal_id": proposal.id}
+        # REDEEM FIRST: the single-use capability is the gate, not the
+        # receipt. A crash after redeem loses the action (safe); the
+        # old order could execute a mutation whose capability was never
+        # validated, and retry it after a redeem failure (unsafe).
+        try:
+            proposals.redeem(proposal.id, proposal.capability or "")
+        except ProposalError as exc:
+            return {"approved": True, "executed": False,
+                    "reason": f"capability not redeemable: {exc}"}
         try:
             if tool == "spawn_session":
                 result = client.spawn(
                     params["provider"], params["cwd"], params["prompt"],
                     title=params.get("title", ""),
-                    idempotency_key=params.get("idempotency_key"),
+                    # proposal-derived key: an accidental retry of the
+                    # same approved action can never double-spawn
+                    idempotency_key=f"proposal-{proposal.id}",
                 )
             elif tool == "relay_instruction":
                 result = client.relay(params["session_id"], params["text"])
             else:
                 result = client.cancel(params["session_id"])
-            proposals.redeem(proposal.id, proposal.capability or "")
             return {"approved": True, "reason": reason, "result": result}
         except (ServiceUnavailable, RuntimeError, KeyError) as exc:
             return {"approved": True, "executed": False, "error": str(exc)}
