@@ -52,47 +52,79 @@ def _check_env() -> None:
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    budget = VoiceBudget()
-    try:
-        budget.check_can_start()
-    except BudgetExceeded as exc:
-        logger.warning("refusing session: %s", exc)
-        return
+    import asyncio
 
+    budget = VoiceBudget()
     await ctx.connect()
 
     # Wake gating: watch LAN audio locally; the billed realtime session
-    # opens only after "Narada". NARADA_WAKE_GATING=off skips it (the
-    # browser-mic milestone predates the trained model).
+    # opens only after "Narada". FAIL CLOSED: a missing model or an
+    # audio stream that ends without a wake ABORTS — no session. Only
+    # an explicit NARADA_WAKE_GATING=off (the pre-model browser-mic
+    # milestone) skips the gate.
     if os.environ.get("NARADA_WAKE_GATING", "auto") != "off":
         try:
             gate = WakeGate()
-            await _wait_for_wake(ctx, gate)
         except FileNotFoundError as exc:
-            logger.warning("wake gating disabled: %s", exc)
+            logger.error("wake model unavailable — refusing session "
+                         "(set NARADA_WAKE_GATING=off to bypass): %s", exc)
+            return
+        if not await _wait_for_wake(ctx, gate):
+            logger.info("audio ended without wake — no session opened")
+            return
+
+    # Admission: reserve this session's maximum charge (fail closed on
+    # budget exhaustion, races, or a damaged ledger).
+    try:
+        reservation = budget.reserve()
+    except (BudgetExceeded, BudgetUnavailable) as exc:
+        logger.warning("refusing session: %s", exc)
+        return
+
+    closed = asyncio.Event()
+    ctx.room.on("disconnected", lambda *_: closed.set())
+
+    def _maybe_empty(*_args) -> None:
+        if not ctx.room.remote_participants:
+            closed.set()
+
+    ctx.room.on("participant_disconnected", _maybe_empty)
 
     started = time.monotonic()
-
-    session = AgentSession(
-        llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
-    )
-    agent = Agent(instructions=INSTRUCTIONS, tools=build_voice_tools())
-    await session.start(agent=agent, room=ctx.room)
-    logger.info("realtime session open (model=%s)", REALTIME_MODEL)
-
+    session = None
     try:
-        # duration cap: hard-close the billed session when time is up
-        cap = budget.session_cap_s
-        while time.monotonic() - started < cap:
-            await agents.utils.aio.sleep(5)
-        logger.info("session cap reached (%.0fs) — closing", cap)
+        session = AgentSession(
+            llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
+        )
+        agent = Agent(instructions=INSTRUCTIONS, tools=build_voice_tools())
+        await session.start(agent=agent, room=ctx.room)
+        logger.info("realtime session open (model=%s)", REALTIME_MODEL)
+        # cap vs. natural close, whichever first — a disconnected room
+        # must stop billing immediately, not at the cap
+        try:
+            await asyncio.wait_for(
+                closed.wait(), timeout=budget.session_cap_s
+            )
+            logger.info("room closed — ending session")
+        except asyncio.TimeoutError:
+            logger.info("session cap reached (%.0fs) — closing",
+                        budget.session_cap_s)
     finally:
-        budget.record_session(time.monotonic() - started)
-        await session.aclose()
+        if session is not None:
+            try:
+                await session.aclose()
+            except Exception as exc:
+                logger.warning("session close failed: %s", exc)
+        budget.settle(reservation, time.monotonic() - started)
 
 
-async def _wait_for_wake(ctx: JobContext, gate: WakeGate) -> None:
-    """Stream the first participant's mic into the gate until wake."""
+async def _wait_for_wake(ctx: JobContext, gate: WakeGate) -> bool:
+    """Stream the first participant's mic into the gate.
+
+    Returns True only on an affirmative detection; False when the audio
+    stream ends first (disconnect, unpublish) — the caller must NOT
+    open a billed session on False.
+    """
     track_q: "agents.utils.aio.Chan[rtc.RemoteAudioTrack]" = agents.utils.aio.Chan()
 
     def _on_track(track: rtc.Track, *_args) -> None:
@@ -107,16 +139,22 @@ async def _wait_for_wake(ctx: JobContext, gate: WakeGate) -> None:
 
     track = await track_q.recv()
     logger.info("wake gate armed — listening for 'Narada'")
+    detected = False
     stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
-    async for event in stream:
-        samples = (
-            np.frombuffer(event.frame.data, dtype=np.int16).astype(np.float32)
-            / 32768.0
-        )
-        if gate.feed(samples) is not None:
-            break
-    await stream.aclose()
-    logger.info("wake detected — opening realtime session")
+    try:
+        async for event in stream:
+            samples = (
+                np.frombuffer(event.frame.data, dtype=np.int16)
+                .astype(np.float32) / 32768.0
+            )
+            if gate.feed(samples) is not None:
+                detected = True
+                break
+    finally:
+        await stream.aclose()
+    if detected:
+        logger.info("wake detected — opening realtime session")
+    return detected
 
 
 def main() -> None:

@@ -164,8 +164,10 @@ def build_server(tier: str, backend=None) -> FastMCP:
             )
             if not approve:
                 return {"proposal_id": p.id, "approved": False, "reason": reason}
-            executed = _execute(p.tool, p.params)
+            # redeem FIRST (atomic single-use claim), then execute —
+            # never a mutation without a validated capability
             proposals.redeem(p.id, p.capability or "")
+            executed = _execute(p.tool, p.params, proposal_id=p.id)
             return {"proposal_id": p.id, "approved": True,
                     "reason": reason, "result": executed}
 
@@ -204,8 +206,8 @@ def build_server(tier: str, backend=None) -> FastMCP:
                 reason=reason,
             )
             if approve:
-                result = _execute(p.tool, p.params)
-                proposals.redeem(p.id, p.capability or "")
+                proposals.redeem(p.id, p.capability or "")  # claim first
+                result = _execute(p.tool, p.params, proposal_id=p.id)
                 return {"id": p.id, "status": "executed", "result": result}
             return {"id": p.id, "status": p.status}
 
@@ -227,12 +229,17 @@ def build_server(tier: str, backend=None) -> FastMCP:
                 resume_session_id=session_id,
             ))
 
-    def _execute(tool: str, params: dict):
+    def _execute(tool: str, params: dict, proposal_id: int = 0):
         if tool == "spawn_session":
             return _sd(mgr.spawn(
                 params["provider"], params["cwd"], params["prompt"],
                 title=params.get("title", ""),
-                idempotency_key=params.get("idempotency_key") or None,
+                # proposal-derived: a retried approved action never
+                # double-spawns
+                idempotency_key=(
+                    f"proposal-{proposal_id}" if proposal_id
+                    else params.get("idempotency_key") or None
+                ),
             ))
         if tool == "relay_instruction":
             return mgr.relay(params["session_id"], params["text"])
