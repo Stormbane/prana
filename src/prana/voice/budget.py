@@ -60,6 +60,13 @@ class VoiceBudget:
         return self.ledger_path.with_suffix(".lock")
 
     def _acquire_lock(self):
+        """O_EXCL lockfile with stale-lock recovery.
+
+        Holders keep the lock for milliseconds; a lock older than the
+        timeout belongs to a crashed process and is stolen (same policy
+        as the sessions token lock) — a crash must never permanently
+        disable voice admission.
+        """
         deadline = time.monotonic() + _LOCK_TIMEOUT_S
         lock = self._lock_path()
         while True:
@@ -67,7 +74,12 @@ class VoiceBudget:
                 return os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
                 if time.monotonic() >= deadline:
-                    raise BudgetUnavailable(f"budget lock stuck: {lock}")
+                    logger.warning("stealing stale budget lock %s", lock)
+                    try:
+                        lock.unlink()
+                    except OSError:
+                        pass
+                    deadline = time.monotonic() + _LOCK_TIMEOUT_S
                 time.sleep(0.05)
 
     def _release_lock(self, fd) -> None:

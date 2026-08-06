@@ -19,7 +19,7 @@ from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions
 from livekit.plugins import openai as lk_openai
 
-from prana.voice.budget import BudgetExceeded, VoiceBudget
+from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
 from prana.voice.tools import build_voice_tools
 from prana.voice.wakegate import WakeGate
 
@@ -57,11 +57,22 @@ async def entrypoint(ctx: JobContext) -> None:
     budget = VoiceBudget()
     await ctx.connect()
 
+    # Lifecycle handlers FIRST — a disconnect during wake wait or
+    # admission must be observed, or an empty room gets billed to cap.
+    closed = asyncio.Event()
+    ctx.room.on("disconnected", lambda *_: closed.set())
+
+    def _maybe_empty(*_args) -> None:
+        if not ctx.room.remote_participants:
+            closed.set()
+
+    ctx.room.on("participant_disconnected", _maybe_empty)
+
     # Wake gating: watch LAN audio locally; the billed realtime session
-    # opens only after "Narada". FAIL CLOSED: a missing model or an
-    # audio stream that ends without a wake ABORTS — no session. Only
-    # an explicit NARADA_WAKE_GATING=off (the pre-model browser-mic
-    # milestone) skips the gate.
+    # opens only after "Narada". FAIL CLOSED: a missing model, a room
+    # that ends, or an audio stream that ends without a wake ABORTS —
+    # no session. Only an explicit NARADA_WAKE_GATING=off (the
+    # pre-model browser-mic milestone) skips the gate.
     if os.environ.get("NARADA_WAKE_GATING", "auto") != "off":
         try:
             gate = WakeGate()
@@ -69,9 +80,13 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.error("wake model unavailable — refusing session "
                          "(set NARADA_WAKE_GATING=off to bypass): %s", exc)
             return
-        if not await _wait_for_wake(ctx, gate):
-            logger.info("audio ended without wake — no session opened")
+        if not await _wait_for_wake(ctx, gate, closed):
+            logger.info("room/audio ended without wake — no session opened")
             return
+
+    if closed.is_set() or not ctx.room.remote_participants:
+        logger.info("room empty before admission — no session opened")
+        return
 
     # Admission: reserve this session's maximum charge (fail closed on
     # budget exhaustion, races, or a damaged ledger).
@@ -81,14 +96,10 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("refusing session: %s", exc)
         return
 
-    closed = asyncio.Event()
-    ctx.room.on("disconnected", lambda *_: closed.set())
-
-    def _maybe_empty(*_args) -> None:
-        if not ctx.room.remote_participants:
-            closed.set()
-
-    ctx.room.on("participant_disconnected", _maybe_empty)
+    if closed.is_set() or not ctx.room.remote_participants:
+        budget.settle(reservation, 0.0)
+        logger.info("room emptied during admission — reservation released")
+        return
 
     started = time.monotonic()
     session = None
@@ -118,13 +129,17 @@ async def entrypoint(ctx: JobContext) -> None:
         budget.settle(reservation, time.monotonic() - started)
 
 
-async def _wait_for_wake(ctx: JobContext, gate: WakeGate) -> bool:
+async def _wait_for_wake(
+    ctx: JobContext, gate: WakeGate, closed: "asyncio.Event"
+) -> bool:
     """Stream the first participant's mic into the gate.
 
-    Returns True only on an affirmative detection; False when the audio
-    stream ends first (disconnect, unpublish) — the caller must NOT
-    open a billed session on False.
+    Returns True only on an affirmative detection; False when the room
+    closes first, no audio track ever arrives, or the stream ends —
+    the caller must NOT open a billed session on False.
     """
+    import asyncio
+
     track_q: "agents.utils.aio.Chan[rtc.RemoteAudioTrack]" = agents.utils.aio.Chan()
 
     def _on_track(track: rtc.Track, *_args) -> None:
@@ -137,7 +152,16 @@ async def _wait_for_wake(ctx: JobContext, gate: WakeGate) -> bool:
             if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
                 track_q.send_nowait(pub.track)
 
-    track = await track_q.recv()
+    recv_task = asyncio.ensure_future(track_q.recv())
+    closed_task = asyncio.ensure_future(closed.wait())
+    done, _ = await asyncio.wait(
+        {recv_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    if closed_task in done:
+        recv_task.cancel()
+        return False
+    closed_task.cancel()
+    track = recv_task.result()
     logger.info("wake gate armed — listening for 'Narada'")
     detected = False
     stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
