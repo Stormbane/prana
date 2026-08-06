@@ -26,6 +26,10 @@ class FakeProc:
         self.pid = FakeProc._next_pid
         self.on_event = on_event
         self.killed = False
+        self.started = False
+
+    def start(self):
+        self.started = True
 
     def kill(self):
         self.killed = True

@@ -90,6 +90,33 @@ def _last_message(lines: list[str]) -> tuple[Optional[str], str]:
     return None, ""
 
 
+def session_cwd(
+    session_id: str, projects_dir: Path = CLAUDE_PROJECTS_DIR
+) -> Optional[str]:
+    """The real working directory of a foreign session.
+
+    Transcript records carry a ``cwd`` field; read it rather than trying
+    to invert the lossy directory-name encoding. Returns None if the
+    transcript can't be found or holds no cwd.
+    """
+    if not projects_dir.is_dir():
+        return None
+    for project in projects_dir.iterdir():
+        transcript = project / f"{session_id}.jsonl"
+        if not transcript.is_file():
+            continue
+        for line in _tail_lines(transcript):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            cwd = obj.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+        return None
+    return None
+
+
 def scan(
     projects_dir: Path = CLAUDE_PROJECTS_DIR,
     *,

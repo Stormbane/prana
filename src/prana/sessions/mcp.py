@@ -33,43 +33,32 @@ registry at all.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import secrets
 import sys
-from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from prana.sessions import panes, watcher
+from prana.sessions.db import SESSIONS_DB
 from prana.sessions.escalate import ProposalQueue, ProposalError, judge_with_narada
-from prana.sessions.manager import ManagerConfig, SessionManager
+from prana.sessions.registry import Session
+from prana.sessions.tokens import TOKENS_FILE, load_or_create_tokens
 
 logger = logging.getLogger(__name__)
 
-TOKENS_FILE = Path.home() / ".narada" / ".sessions-tokens.json"
 TIERS = ("voice", "prana")
 
-
-def _load_or_create_tokens() -> dict[str, str]:
-    if TOKENS_FILE.exists():
-        try:
-            return json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            logger.warning("tokens file unreadable; regenerating")
-    tokens = {tier: secrets.token_urlsafe(32) for tier in TIERS}
-    TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKENS_FILE.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
-    logger.info("wrote new tier tokens to %s", TOKENS_FILE)
-    return tokens
+# Back-compat aliases (bridge + service import these names)
+_load_or_create_tokens = load_or_create_tokens
 
 
 def _authenticate(tier: str) -> None:
     """Refuse to serve a tier whose token the launcher doesn't hold."""
     presented = os.environ.get("PRANA_SESSIONS_TOKEN", "")
-    expected = _load_or_create_tokens().get(tier, "")
+    expected = load_or_create_tokens().get(tier, "")
     if not presented or not secrets.compare_digest(presented, expected):
         raise SystemExit(
             f"PRANA_SESSIONS_TOKEN missing or wrong for tier {tier!r}; "
@@ -77,7 +66,12 @@ def _authenticate(tier: str) -> None:
         )
 
 
-def _session_dict(s) -> dict:
+def _sd(s) -> dict:
+    """Session-shaped thing → dict. ServiceClient already returns dicts;
+    a directly-injected SessionManager (tests) returns Session objects."""
+    if isinstance(s, dict):
+        return s
+    assert isinstance(s, Session)
     return {
         "id": s.id, "provider": s.provider, "cwd": s.cwd, "title": s.title,
         "state": s.state.value, "pane_id": s.pane_id,
@@ -86,11 +80,21 @@ def _session_dict(s) -> dict:
     }
 
 
-def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP:
+def build_server(tier: str, backend=None) -> FastMCP:
+    """``backend`` duck-types the manager surface: ServiceClient in
+    production (process ownership lives in the persistent service —
+    an MCP server dies with each claude -p turn and MUST NOT own Job
+    Objects), or a SessionManager injected directly in tests."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier!r}")
-    mgr = manager or SessionManager(ManagerConfig())
-    proposals = ProposalQueue(mgr.config.db_path)
+    if backend is None:
+        from prana.sessions.service import ServiceClient
+
+        backend = ServiceClient()
+    mgr = backend
+    proposals = ProposalQueue(
+        getattr(getattr(mgr, "config", None), "db_path", SESSIONS_DB)
+    )
     server = FastMCP(f"narada-sessions-{tier}")
 
     # ── read surface (both tiers) ────────────────────────────────────
@@ -99,12 +103,12 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
     def list_sessions(live_only: bool = True) -> list[dict]:
         """List owned coding-agent sessions and their lifecycle state."""
         mgr.sweep()
-        return [_session_dict(s) for s in mgr.list_sessions(live_only=live_only)]
+        return [_sd(s) for s in mgr.list_sessions(live_only=live_only)]
 
     @server.tool()
     def session_status(session_id: str) -> dict:
         """Status of one owned session."""
-        return _session_dict(mgr.get(session_id))
+        return _sd(mgr.get(session_id))
 
     @server.tool()
     def read_output(session_id: str, limit: int = 50) -> list[str]:
@@ -128,10 +132,10 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
     @server.tool()
     def focus_pane(session_id: str) -> bool:
         """Bring an owned session's wezterm pane to front (UI focus only)."""
-        sess = mgr.get(session_id)
-        if not sess.pane_id:
+        pane_id = _sd(mgr.get(session_id)).get("pane_id")
+        if not pane_id:
             return False
-        return panes.focus_pane(sess.pane_id)
+        return panes.focus_pane(pane_id)
 
     @server.tool()
     def proposal_status(proposal_id: int) -> dict:
@@ -175,11 +179,10 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
             idempotency_key: str = "", title: str = "",
         ) -> dict:
             """Spawn a coding-agent session (claude | codex | kimi)."""
-            sess = mgr.spawn(
+            return _sd(mgr.spawn(
                 provider, cwd, prompt, title=title,
                 idempotency_key=idempotency_key or None,
-            )
-            return _session_dict(sess)
+            ))
 
         @server.tool()
         def relay_instruction(session_id: str, text: str) -> bool:
@@ -189,7 +192,7 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
         @server.tool()
         def cancel_session(session_id: str) -> dict:
             """Kill an owned session and its whole process tree."""
-            return _session_dict(mgr.cancel(session_id))
+            return _sd(mgr.cancel(session_id))
 
         @server.tool()
         def decide_proposal(
@@ -212,16 +215,21 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
             Prana-tier only: the request itself arrives over the
             authenticated channel (Suti's allowlisted chat / local shell) —
             that IS the confirmation. Registers the session as owned."""
-            sess = mgr.spawn(
-                "claude", str(Path.home()), prompt,
+            cwd = watcher.session_cwd(session_id)
+            if cwd is None:
+                raise ValueError(
+                    f"cannot resume {session_id}: transcript not found or "
+                    f"records no cwd"
+                )
+            return _sd(mgr.spawn(
+                "claude", cwd, prompt,
                 title=f"resumed:{session_id[:8]}",
                 resume_session_id=session_id,
-            )
-            return _session_dict(sess)
+            ))
 
     def _execute(tool: str, params: dict):
         if tool == "spawn_session":
-            return _session_dict(mgr.spawn(
+            return _sd(mgr.spawn(
                 params["provider"], params["cwd"], params["prompt"],
                 title=params.get("title", ""),
                 idempotency_key=params.get("idempotency_key") or None,
@@ -229,7 +237,7 @@ def build_server(tier: str, manager: Optional[SessionManager] = None) -> FastMCP
         if tool == "relay_instruction":
             return mgr.relay(params["session_id"], params["text"])
         if tool == "cancel_session":
-            return _session_dict(mgr.cancel(params["session_id"]))
+            return _sd(mgr.cancel(params["session_id"]))
         raise ProposalError(f"unknown tool {tool!r}")
 
     return server

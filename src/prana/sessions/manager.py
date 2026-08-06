@@ -127,9 +127,13 @@ class SessionManager:
                 )
                 raise
             self._procs[sess.id] = sp
-            return self.registry.transition(
+            result = self.registry.transition(
                 sess.id, SessionState.RUNNING, pid=sp.pid
             )
+            # Only now may events flow — a fast-exiting process must not
+            # race the SPAWNING -> RUNNING transition above.
+            sp.start()
+            return result
 
     def _handle_event(self, session_id: str, event: SessionEvent) -> None:
         try:
@@ -198,6 +202,21 @@ class SessionManager:
         sp = self._procs.pop(session_id, None)
         if sp is not None:
             sp.kill()
+        elif sess.pid is not None and psutil.pid_exists(sess.pid):
+            # We hold no handle (manager restarted, or another process
+            # spawned it) — kill by persisted pid, children first, so
+            # KILLED never leaves a live tree behind.
+            try:
+                root = psutil.Process(sess.pid)
+                procs = root.children(recursive=True) + [root]
+                for p in procs:
+                    try:
+                        p.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+                psutil.wait_procs(procs, timeout=5)
+            except psutil.NoSuchProcess:
+                pass
         if sess.state.live:
             return self.registry.transition(session_id, SessionState.KILLED)
         return sess
