@@ -95,6 +95,7 @@ Browser / phone mic ───► LiveKit server (Docker Desktop, self-hosted)
 | Media server | **LiveKit server** (Docker Desktop/WSL2; community `compose-up.ps1` setups) | one compose file |
 | Voice agent framework | **LiveKit Agents** (Python, Apache-2.0, first-party OpenAI Realtime adapter) | one worker + tool defs |
 | S2S model | **gpt-realtime-2.1-mini** (GA, reasoning+tools, ~$0.016/min cached) | prompt + escalation rules |
+| Wake word | **livekit-wakeword** (open-source, custom-model training in one command, openWakeWord-compatible export) | train a "Narada" model, wire gating |
 | Human watch/take-over surface | **wezterm** panes or an adopted orchestrator dashboard (§6b) | thin wrapper module |
 | Session transcripts | Claude Code's own `~/.claude/projects/**/*.jsonl` (ecosystem-standard to scan; claude-code-log et al. as parser reference) | watcher module |
 | Coding-model access | **first-party CLIs**: claude, codex, kimi (`@moonshot-ai/kimi-code`) | spawn adapters (~100 LOC each) |
@@ -224,17 +225,27 @@ using the §6a steal list. The module layout below is the build path.
 
 1. LiveKit server via Docker Desktop (`docker compose up`; community PowerShell
    setups exist). LAN-only; no internet exposure.
-2. `src/prana/voice/`: LiveKit Agents worker fronting **gpt-realtime-2.1-mini**,
+2. **Wake word** — gpt-realtime has none (it only does turn detection:
+   server/semantic VAD), so the wake word lives in our stack — and LiveKit
+   ships the answer: **livekit-wakeword** (open-source, single-command
+   custom-model training, ~100× fewer false positives than openWakeWord;
+   ONNX/TFLite export). Train a "Narada" model; the agent worker runs
+   detection **on the PC** against the always-on LAN audio track and only
+   opens the OpenAI Realtime session after wake. This replaces the old flakey
+   on-device wake word with a PC-side model we can retrain and tune, and
+   doubles as the cost gate: OpenAI hears nothing (and bills nothing) until
+   the wake fires. LAN streaming from the BOX-3 is free.
+3. `src/prana/voice/`: LiveKit Agents worker fronting **gpt-realtime-2.1-mini**,
    function tools = the session manager's **voice tier** (read + escalate +
    proposals — the server enforces this regardless of what the model tries)
    + deha body tools. The system prompt still teaches the escalation habit
    ("let me hand that to Narada properly") — but as UX, not as the security
    boundary.
-3. **Test from a browser mic** (LiveKit playground) — full conversation loop,
-   session coordination by voice, zero ESP32 involvement.
-4. Add as a `voice` component in `components.yaml` under the host orchestrator.
-5. Cost guard: session-duration cap + daily API budget alarm (it's API-key
-   spend, not subscription).
+4. **Test from a browser mic** (LiveKit playground) — full conversation loop,
+   wake word, session coordination by voice, zero ESP32 involvement.
+5. Add as a `voice` component in `components.yaml` under the host orchestrator.
+6. Cost guard: wake-word gating (above) + session-duration cap + daily API
+   budget alarm (it's API-key spend, not subscription).
 
 ### Phase 3 — the body returns: BOX-3 on LiveKit firmware (~1–2 sessions)
 
@@ -263,8 +274,16 @@ using the §6a steal list. The module layout below is the build path.
      completion and retried on failure. deha's `/utter` HTTP endpoint
      survives as the *enqueue* API; the drain side of deha's mediator is
      retired with the rest of its audio stack.
-   - Expression/face engine (BOX-3 display via LiveKit data channels —
-     design work; the casita faces die with the old firmware).
+   - Expression/face engine — **including all existing image assets**
+     (Suti directive 2026-08-06: deha keeps using our images to show state):
+     the sprite atlas (`sprites/` — eyes, viseme mouth shapes for lip-sync,
+     moods with transition tiers), sandhi animation frames (`sandhis/`), and
+     the 21 weather/time-of-day scenes (`docs/previews/` renders). Only the
+     upstream casita placeholder art dies with the old firmware. The
+     compositor design carries over; the *renderer* moves into the new
+     firmware: an LVGL display layer in the LiveKit BOX-3 firmware, driven by
+     state messages over LiveKit data channels (deha sends `set_face`/
+     `set_status`/weather → firmware picks/composites the sprites).
    - Presence contract (implementation was always a stub; re-scope against
      what the LiveKit firmware exposes).
    - Body-MCP schemas.
@@ -361,7 +380,10 @@ c. **Delete vs archive** the BigBobbas firmware clone (minor; default: delete �
   revised form; heavy `claude -p` use would become budget-visible ($100–200/mo
   tier). Workable, but watch it.
 - **LiveKit ESP32 SDK is young** (Dec 2025) — BOX-3 example exists but
-  expect rough edges; xiaozhi fallback stands by.
+  expect rough edges; xiaozhi fallback stands by. In particular the example's
+  **display support is unverified** — rendering our sprite/face assets may
+  mean writing the LVGL layer ourselves (the BOX-3 pinout/codec knowledge in
+  deha's firmware YAMLs de-risks the hardware side).
 - **Focus-stealing / UIA** — deliberately excluded from the core design;
   computer use remains a last-resort actuator only.
 - **Realtime API spend is unbounded by subscription** — Phase 2.5 cost guard is
