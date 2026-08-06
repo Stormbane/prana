@@ -28,7 +28,7 @@ from pathlib import Path
 from deha.expression.expression import ExpressionClient
 from deha.display import DisplayClient
 from prana.indriyas.jnanendriyas.tvac.weather import fetch_kallangur_weather
-from prana.heartbeat.cycle_log import CycleRecord, latest_started, write_cycle
+from prana.heartbeat.cycle_log import CycleRecord, write_cycle
 from prana.heartbeat.delegate import ClaudeDelegate
 from prana.heartbeat.viveka import Action, Desire, VivekaCore
 from prana.spawn import run_hidden
@@ -552,18 +552,17 @@ class HeartbeatDaemon:
         logger.info("CHECK_IN: wrote %s", message_path.name)
         self.display.set_status("messaged Suti")
 
-        # Route through the action bus so the message reaches Suti
-        # via body (if at PC) or Telegram (if away). Audit file above
-        # is kept either way; the bus adds ACTION_INVOKE / ACTION_RESULT
-        # events to the audit trail.
-        from prana.bus.actions.speak import invoke_speak
+        # Route so the message reaches Suti via body (if at PC) or
+        # Telegram (if away). Audit file above is kept either way;
+        # delivery is audited in state.db (utterance_queue).
+        from prana.state.router import route_utterance
 
         route_text = (
             f"{desire.reason}"
             if not desire.topic
             else f"{desire.topic}\n\n{desire.reason}"
         )
-        route_result = invoke_speak(
+        route_result = route_utterance(
             route_text,
             source="heartbeat-check-in",
             topic=desire.topic,
@@ -655,13 +654,11 @@ class HeartbeatDaemon:
                 "result": "empty reason",
             }
 
-        # Route through the action bus — body if Suti is at his PC,
-        # Telegram if not, audited in state.db (utterance_queue + bus
-        # events). The bus call is a thin wrapper over route_utterance
-        # that publishes ACTION_INVOKE / ACTION_RESULT events.
-        from prana.bus.actions.speak import invoke_speak
+        # Route — body if Suti is at his PC, Telegram if not, audited
+        # in state.db (utterance_queue).
+        from prana.state.router import route_utterance
 
-        result = invoke_speak(
+        result = route_utterance(
             text,
             source=f"heartbeat-speak:{desire.topic[:32] or 'speak'}",
             topic=desire.topic,
