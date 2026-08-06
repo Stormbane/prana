@@ -41,6 +41,29 @@ class CapExceeded(RuntimeError):
     pass
 
 
+def _proc_create_time(pid: int) -> Optional[float]:
+    try:
+        return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+
+def _session_alive(sess: Session) -> bool:
+    """Liveness = pid exists AND identity matches (pids get reused).
+
+    Rows from before the identity column (pid_created_at None) fall
+    back to bare existence — the best available for legacy rows.
+    """
+    if sess.pid is None:
+        return False
+    created = _proc_create_time(sess.pid)
+    if created is None:
+        return False
+    if sess.pid_created_at is None:
+        return True
+    return abs(created - sess.pid_created_at) < 1.0
+
+
 @dataclass
 class ManagerConfig:
     db_path: Path = SESSIONS_DB
@@ -128,7 +151,8 @@ class SessionManager:
                 raise
             self._procs[sess.id] = sp
             result = self.registry.transition(
-                sess.id, SessionState.RUNNING, pid=sp.pid
+                sess.id, SessionState.RUNNING, pid=sp.pid,
+                pid_created_at=_proc_create_time(sp.pid),
             )
             # Only now may events flow — a fast-exiting process must not
             # race the SPAWNING -> RUNNING transition above.
@@ -202,10 +226,13 @@ class SessionManager:
         sp = self._procs.pop(session_id, None)
         if sp is not None:
             sp.kill()
-        elif sess.pid is not None and psutil.pid_exists(sess.pid):
-            # We hold no handle (manager restarted, or another process
-            # spawned it) — kill by persisted pid, children first, so
-            # KILLED never leaves a live tree behind.
+        elif _session_alive(sess):
+            # We hold no handle (manager restarted) but pid IDENTITY
+            # matches the record — kill by pid, children first, so
+            # KILLED never leaves a live tree behind. Without the
+            # identity match we refuse: a reused pid means the session
+            # is already gone and the pid belongs to an innocent.
+            assert sess.pid is not None
             try:
                 root = psutil.Process(sess.pid)
                 procs = root.children(recursive=True) + [root]
@@ -217,6 +244,13 @@ class SessionManager:
                 psutil.wait_procs(procs, timeout=5)
             except psutil.NoSuchProcess:
                 pass
+        elif sess.state.live:
+            # process already gone (or identity mismatch): honest state
+            # is DEAD, not KILLED — we killed nothing.
+            return self.registry.transition(
+                session_id, SessionState.DEAD,
+                error="cancel: process already gone or pid reused",
+            )
         if sess.state.live:
             return self.registry.transition(session_id, SessionState.KILLED)
         return sess
@@ -225,7 +259,7 @@ class SessionManager:
 
     def reconcile(self) -> list[Session]:
         pane_ids = panes.list_pane_ids() if panes.available() else None
-        return self.registry.reconcile(psutil.pid_exists, pane_ids)
+        return self.registry.reconcile(_session_alive, pane_ids)
 
     def sweep(self) -> list[Session]:
         changed = self.registry.sweep_timeouts(

@@ -31,14 +31,13 @@ dependencies = [
     # Core
     "pyyaml>=6.0",
     "requests>=2.31",
-]
-
-[project.optional-dependencies]
-sessions = [
-    # Session manager: process liveness + the MCP tool surface
+    # Session manager (a default-enabled host component — required, not
+    # optional; an extras-only dep would restart-loop clean installs)
     "psutil>=5.9",
     "mcp>=1.0",
 ]
+
+[project.optional-dependencies]
 viveka = [
     # Local Qwen+LoRA inference for the viveka core
     "torch>=2.1",
