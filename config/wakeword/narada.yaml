@@ -1,0 +1,30 @@
+# livekit-wakeword training config for the "Narada" wake word.
+# Pipeline (each step reads this file):
+#   python -m livekit.wakeword setup   --config config/wakeword/narada.yaml
+#   python -m livekit.wakeword generate config/wakeword/narada.yaml
+#   python -m livekit.wakeword augment  config/wakeword/narada.yaml
+#   python -m livekit.wakeword train    config/wakeword/narada.yaml
+#   python -m livekit.wakeword export   config/wakeword/narada.yaml
+# Fully local: bundled Piper VITS synthesizes the training utterances.
+# Output: ~/.narada/wakeword/output/narada/narada.onnx
+
+model_name: narada
+
+target_phrases:
+  - narada
+  - hey narada
+  # phonetic spellings help TTS coverage of a Sanskrit name
+  - nuh rah duh
+  - nah rah dah
+
+custom_negative_phrases:
+  # near-misses that must NOT trigger
+  - nevada
+  - ramada
+  - granada
+  - armada
+  - not rather
+  - no radar
+
+data_dir: C:/Users/admin/.narada/wakeword/data
+output_dir: C:/Users/admin/.narada/wakeword/output
