@@ -342,6 +342,13 @@ a. **Adopt vs build: build thin, steal aggressively.** The intersection of
      test `POST /api/sessions/spawn`, `POST /api/inject-input`,
      foreign-session pickup). Pass → adopt-with-glue (thin MCP wrapper over
      its REST API); fail → build thin as planned.
+     **RESULT (2026-08-06): FAIL — build thin.** Code inspection of the
+     clone: the worker control plane uses `socket.AF_UNIX` at three call
+     sites with no TCP/named-pipe fallback, and CPython does not expose
+     AF_UNIX on Windows — spawn/inject structurally cannot run on native
+     win32 (CCC's own tests document "native Windows" = dashboard-only,
+     full stack = WSL2). The spawn worker is precisely the part we needed.
+     Build path proceeds with the steal list below.
    - **Steal list for the build path:** foreign-session scanner pattern from
      **Codecast** (chokidar on `~/.claude/projects/**/*.jsonl` +
      `~/.codex/sessions/**/*.jsonl`) and **CCC**'s hooks-writing-live-state
