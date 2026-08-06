@@ -1,0 +1,25 @@
+# Self-hosted LiveKit server — LAN-only media hub for Narada's voice.
+# Bring up via scripts/livekit-up.ps1 (generates the key env file first).
+#
+# Clients: browser mic (phase 2 test), the voice worker (LiveKit Agents),
+# and eventually the BOX-3 running the LiveKit ESP32 SDK (phase 3).
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    environment:
+      # "<api key>: <secret>" pairs; generated into ~/.narada/.livekit.env
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      # RTC range MUST match the published udp ports below — the server
+      # default (50000-60000) would hand out unreachable ICE candidates.
+      LIVEKIT_CONFIG: |
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50100
+          port_range_end: 50200
+          use_external_ip: false
+    command: --bind 0.0.0.0
+    ports:
+      - "7880:7880"            # websocket / http
+      - "7881:7881"            # rtc over tcp
+      - "50100-50200:50100-50200/udp"  # rtc media

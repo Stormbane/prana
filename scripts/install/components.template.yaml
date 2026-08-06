@@ -92,6 +92,24 @@ components:
     restart_grace_s: 5.0
 
   # ─────────────────────────────────────────────────────────────────
+  # voice — LiveKit Agents worker fronting gpt-realtime-2.1-mini.
+  # Wake-gated ("Narada" model), cost-capped (per-session + daily).
+  # Requires: LiveKit server up (scripts/livekit-up.ps1), OPENAI_API_KEY
+  # in the env (API spend, not subscription — Suti's gate).
+  # ─────────────────────────────────────────────────────────────────
+  - name: voice
+    description: "Voice loop — wake-gated realtime S2S (LiveKit worker)"
+    enabled: false  # flip once OPENAI_API_KEY exists and the mic test passes
+    command:
+      - python
+      - -m
+      - prana.voice.worker
+      - start
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 10.0
+
+  # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current
   # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
   #
