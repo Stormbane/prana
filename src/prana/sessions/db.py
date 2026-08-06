@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title           TEXT NOT NULL DEFAULT '',
     state           TEXT NOT NULL,                  -- SessionState value
     pid             INTEGER,
+    pid_created_at  REAL,                           -- psutil create_time(); identity guard vs pid reuse
     pane_id         TEXT,                           -- wezterm pane id, if mirrored
     idempotency_key TEXT,                           -- dedupe spawn retries
     created_at      TEXT NOT NULL,                  -- ISO8601 UTC
@@ -62,6 +63,12 @@ INSERT OR IGNORE INTO schema_version (version, applied_at)
     VALUES (1, datetime('now'));
 """
 
+_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    # v2: pid identity guard (Codex recheck: pid reuse could kill an
+    # unrelated process tree)
+    (2, "ALTER TABLE sessions ADD COLUMN pid_created_at REAL"),
+)
+
 
 def get_db(path: Path = SESSIONS_DB) -> sqlite3.Connection:
     """Open (or create) sessions.db with WAL mode. Same pattern as state.db."""
@@ -80,10 +87,26 @@ def get_db(path: Path = SESSIONS_DB) -> sqlite3.Connection:
 
 
 def init_db(path: Path = SESSIONS_DB) -> None:
-    """Create tables if missing. Safe to call repeatedly."""
+    """Create tables if missing and apply migrations. Safe to repeat."""
     conn = get_db(path)
     try:
         conn.executescript(SCHEMA_SQL)
+        for version, ddl in _MIGRATIONS:
+            applied = conn.execute(
+                "SELECT 1 FROM schema_version WHERE version = ?", (version,)
+            ).fetchone()
+            if applied:
+                continue
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at)"
+                " VALUES (?, datetime('now'))",
+                (version,),
+            )
         logger.debug("sessions.db initialized at %s", path)
     finally:
         conn.close()

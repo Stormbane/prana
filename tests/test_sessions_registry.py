@@ -58,19 +58,19 @@ def test_duplicate_spawn_idempotency(reg):
 def test_manager_restart_reconcile_marks_dead(reg):
     live = _spawned(reg)
     # restart: process is gone
-    marked = reg.reconcile(pid_alive=lambda pid: False)
+    marked = reg.reconcile(session_alive=lambda s: False)
     assert [s.id for s in marked] == [live.id]
     assert reg.get(live.id).state is SessionState.DEAD
-    # a session whose pid survives is untouched
+    # a session whose process survives is untouched
     survivor = _spawned(reg, key="k2")
-    assert reg.reconcile(pid_alive=lambda pid: True) == []
+    assert reg.reconcile(session_alive=lambda s: True) == []
     assert reg.get(survivor.id).state is SessionState.RUNNING
 
 
 def test_pane_closed_clears_mapping_but_keeps_session(reg):
     sess = _spawned(reg)
     reg.transition(sess.id, SessionState.IDLE, pane_id="7")
-    reg.reconcile(pid_alive=lambda pid: True, live_pane_ids=["1", "2"])
+    reg.reconcile(session_alive=lambda s: True, live_pane_ids=["1", "2"])
     after = reg.get(sess.id)
     assert after.pane_id is None          # stale mapping cleared
     assert after.state is SessionState.IDLE  # session still live

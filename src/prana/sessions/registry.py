@@ -80,6 +80,7 @@ class Session:
     title: str = ""
     provider_session_id: Optional[str] = None
     pid: Optional[int] = None
+    pid_created_at: Optional[float] = None
     pane_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     created_at: str = ""
@@ -201,6 +202,7 @@ class SessionRegistry:
         to: SessionState,
         *,
         pid: Optional[int] = None,
+        pid_created_at: Optional[float] = None,
         provider_session_id: Optional[str] = None,
         pane_id: Optional[str] = None,
         exit_code: Optional[int] = None,
@@ -227,6 +229,8 @@ class SessionRegistry:
             args: list = [to.value, now]
             if pid is not None:
                 sets.append("pid = ?"); args.append(pid)
+            if pid_created_at is not None:
+                sets.append("pid_created_at = ?"); args.append(pid_created_at)
             if provider_session_id is not None:
                 sets.append("provider_session_id = ?"); args.append(provider_session_id)
             if pane_id is not None:
@@ -271,20 +275,22 @@ class SessionRegistry:
 
     def reconcile(
         self,
-        pid_alive: Callable[[int], bool],
+        session_alive: Callable[[Session], bool],
         live_pane_ids: Optional[Iterable[str]] = None,
     ) -> list[Session]:
         """Mark live-in-db sessions DEAD when their process is gone.
 
-        Called on manager startup and periodically. ``pid_alive`` is
-        injected (psutil.pid_exists in production) so tests control it.
-        A closed wezterm pane alone does not kill a session (the CLI may
-        be headless); it clears the stale pane mapping.
+        Called on manager startup and periodically. ``session_alive``
+        is injected (the manager's pid+create_time identity check in
+        production — bare pid existence is NOT enough, pids get reused)
+        so tests control it. A closed wezterm pane alone does not kill
+        a session (the CLI may be headless); it clears the stale pane
+        mapping.
         """
         panes = set(live_pane_ids) if live_pane_ids is not None else None
         marked: list[Session] = []
         for sess in self.list(live_only=True):
-            if sess.pid is None or not pid_alive(sess.pid):
+            if not session_alive(sess):
                 marked.append(
                     self.transition(
                         sess.id, SessionState.DEAD,
