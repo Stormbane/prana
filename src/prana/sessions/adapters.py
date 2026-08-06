@@ -78,7 +78,10 @@ class SpawnedProcess:
             cwd=cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # stderr merged into stdout: an undrained stderr pipe fills
+            # and blocks the child (auth banners, update notices...).
+            # Parsers already tolerate non-JSON lines.
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -91,7 +94,14 @@ class SpawnedProcess:
         self._reader = threading.Thread(
             target=self._pump, name=f"session-reader-{self.proc.pid}", daemon=True
         )
-        self._reader.start()
+        # NOT started here: the manager registers the session as RUNNING
+        # first, then calls start() — otherwise a fast-exiting process
+        # can emit 'exit' while the registry row is still SPAWNING.
+
+    def start(self) -> None:
+        """Begin pumping events. Call after the session is registered."""
+        if not self._reader.is_alive():
+            self._reader.start()
 
     @property
     def pid(self) -> int:

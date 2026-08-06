@@ -34,6 +34,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sessions = [
+    # Session manager: process liveness + the MCP tool surface
+    "psutil>=5.9",
+    "mcp>=1.0",
+]
 viveka = [
     # Local Qwen+LoRA inference for the viveka core
     "torch>=2.1",

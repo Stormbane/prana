@@ -74,6 +74,24 @@ components:
     restart_grace_s: 5.0
 
   # ─────────────────────────────────────────────────────────────────
+  # sessions — the persistent session service. OWNS every spawned
+  # coding-agent session (Job Objects die with their owner, so the
+  # owner must be long-lived, not a per-chat-turn MCP process). MCP
+  # servers (chat bridge prana tier, voice tier) are thin clients on
+  # 127.0.0.1:8791. See docs/plans/embodiment-rebirth-2026-08-06.md.
+  # ─────────────────────────────────────────────────────────────────
+  - name: sessions
+    description: "Session service — owns coding-agent sessions (127.0.0.1:8791)"
+    enabled: true
+    command:
+      - python
+      - -m
+      - prana.sessions.service
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 5.0
+
+  # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current
   # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
   #
