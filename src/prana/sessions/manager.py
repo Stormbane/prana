@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,7 @@ class SessionManager:
         self.config = config or ManagerConfig()
         self.registry = SessionRegistry(self.config.db_path)
         self._procs: dict[str, SpawnedProcess] = {}
+        self._output: dict[str, deque[str]] = {}
         self._lock = threading.Lock()
         self.reconcile()
 
@@ -64,6 +66,14 @@ class SessionManager:
 
     def get(self, session_id: str) -> Session:
         return self.registry.get(session_id)
+
+    def recent_output(self, session_id: str, limit: int = 50) -> list[str]:
+        """Recent normalized output lines for an owned session (this
+        process's ring buffer — empty after a manager restart)."""
+        buf = self._output.get(session_id)
+        if not buf:
+            return []
+        return list(buf)[-limit:]
 
     # ── spawn ────────────────────────────────────────────────────────
 
@@ -146,6 +156,9 @@ class SessionManager:
                     self._set_provider_session_id(
                         session_id, event.provider_session_id
                     )
+            if event.text:
+                buf = self._output.setdefault(session_id, deque(maxlen=200))
+                buf.append(f"[{event.kind}] {event.text}")
             self.registry.touch(session_id)
         except Exception as exc:
             logger.warning("event handling for %s failed: %s", session_id, exc)
