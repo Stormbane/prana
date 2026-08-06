@@ -1,5 +1,11 @@
 # prana — architecture
 
+> **SUPERSEDED (2026-08-06).** This document describes the "light heart on
+> Hermes" design that was never built (skills-based cycle, SOUL.md,
+> Slack/email channels). Kept for history. The actual system and its
+> trajectory are described in `../README.md` and
+> `plans/embodiment-rebirth-2026-08-06.md`.
+
 ## What runs
 
 Two long-lived processes, one filesystem state directory:
