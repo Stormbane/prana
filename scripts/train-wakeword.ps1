@@ -3,6 +3,21 @@
 $ErrorActionPreference = "Stop"
 $config = Join-Path $PSScriptRoot "..\config\wakeword\narada.yaml"
 
+# Pin the interpreter that actually has livekit-wakeword + torch installed.
+# Bare `python` is NOT safe here: under a scheduled task / minimal shell it
+# resolves to the Hermes venv (no livekit). Prefer $env:PRANA_PYTHON, else
+# the Anaconda base python, else PATH.
+$py = $env:PRANA_PYTHON
+if (-not $py -or -not (Test-Path $py)) {
+    $candidates = @(
+        "C:\ProgramData\anaconda3\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+    )
+    $py = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $py) { $py = (Get-Command python -ErrorAction Stop).Source }
+}
+Write-Host "using interpreter: $py"
+
 # espeak-ng (Piper's phonemizer) is required by the generate stage. It
 # was installed via MSI administrative-extract to LOCALAPPDATA (no admin
 # needed); make it discoverable to shutil.which and point it at its data.
@@ -15,23 +30,23 @@ if (Test-Path (Join-Path $espeakDir "espeak-ng.exe")) {
 }
 
 Write-Host "[1/5] setup (downloads: piper VITS, ACAV features, MUSAN, RIRs)"
-python -m livekit.wakeword setup --config $config
+& $py -m livekit.wakeword setup --config $config
 if ($LASTEXITCODE -ne 0) { throw "setup failed" }
 
 Write-Host "[2/5] generate (synthetic TTS utterances)"
-python -m livekit.wakeword generate $config
+& $py -m livekit.wakeword generate $config
 if ($LASTEXITCODE -ne 0) { throw "generate failed" }
 
 Write-Host "[3/5] augment (noise / reverb / feature extraction)"
-python -m livekit.wakeword augment $config
+& $py -m livekit.wakeword augment $config
 if ($LASTEXITCODE -ne 0) { throw "augment failed" }
 
 Write-Host "[4/5] train"
-python -m livekit.wakeword train $config
+& $py -m livekit.wakeword train $config
 if ($LASTEXITCODE -ne 0) { throw "train failed" }
 
 Write-Host "[5/5] export to ONNX"
-python -m livekit.wakeword export $config
+& $py -m livekit.wakeword export $config
 if ($LASTEXITCODE -ne 0) { throw "export failed" }
 
 Write-Host "done: $env:USERPROFILE\.narada\wakeword\output\narada\narada.onnx"
