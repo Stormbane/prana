@@ -47,6 +47,15 @@ voice = [
     "livekit-agents[openai]>=1.6",
     "livekit-wakeword>=0.2",
 ]
+wakeword-train = [
+    # Training the "Narada" wake model (scripts/train-wakeword.ps1).
+    # livekit-wakeword's generate stage lazily imports webrtcvad but
+    # doesn't declare it; webrtcvad-wheels ships prebuilt Windows wheels
+    # (plain webrtcvad needs a C compiler). Also needs the espeak-ng
+    # BINARY on PATH — the script installs it via MSI extract.
+    "livekit-wakeword>=0.2",
+    "webrtcvad-wheels>=2.0",
+]
 viveka = [
     # Local Qwen+LoRA inference for the viveka core
     "torch>=2.1",
