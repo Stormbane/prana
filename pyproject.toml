@@ -37,7 +37,9 @@ dependencies = [
     "mcp>=1.0",
     # Long-standing undeclared imports (chat bridge) + voice budget/gate
     "python-dotenv>=1.0",
-    "numpy>=1.26",
+    # <2: torch/scipy in this env are compiled against numpy 1.x; numpy 2
+    # breaks them (librosa/audiomentations will try to pull it — don't let them)
+    "numpy>=1.26,<2",
 ]
 
 [project.optional-dependencies]
@@ -46,15 +48,20 @@ voice = [
     # here — flip requires deliberate setup incl. OPENAI_API_KEY)
     "livekit-agents[openai]>=1.6",
     "livekit-wakeword>=0.2",
+    "pyaudio>=0.2.14",   # WakeWordListener mic capture (standalone path)
 ]
 wakeword-train = [
     # Training the "Narada" wake model (scripts/train-wakeword.ps1).
-    # livekit-wakeword's generate stage lazily imports webrtcvad but
-    # doesn't declare it; webrtcvad-wheels ships prebuilt Windows wheels
-    # (plain webrtcvad needs a C compiler). Also needs the espeak-ng
-    # BINARY on PATH — the script installs it via MSI extract.
+    # livekit-wakeword lazily imports these across its generate/augment/
+    # export stages without declaring them; pin them all so a clean
+    # environment trains reproducibly. Also needs the espeak-ng BINARY
+    # on PATH — the script installs it via MSI extract.
     "livekit-wakeword>=0.2",
-    "webrtcvad-wheels>=2.0",
+    "webrtcvad-wheels>=2.0",  # generate: VAD silence trim (prebuilt wheels)
+    "pronouncing>=0.2",       # generate: adversarial negative phrases
+    "audiomentations>=0.43",  # augment: noise/reverb
+    "librosa>=0.11",          # augment/features: audio feature extraction
+    "onnx>=1.22",             # export: ONNX model emission
 ]
 viveka = [
     # Local Qwen+LoRA inference for the viveka core
