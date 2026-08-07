@@ -3,6 +3,17 @@
 $ErrorActionPreference = "Stop"
 $config = Join-Path $PSScriptRoot "..\config\wakeword\narada.yaml"
 
+# espeak-ng (Piper's phonemizer) is required by the generate stage. It
+# was installed via MSI administrative-extract to LOCALAPPDATA (no admin
+# needed); make it discoverable to shutil.which and point it at its data.
+$espeakDir = Join-Path $env:LOCALAPPDATA "espeak-ng\eSpeak NG"
+if (Test-Path (Join-Path $espeakDir "espeak-ng.exe")) {
+    $env:PATH = "$espeakDir;$env:PATH"
+    $env:ESPEAK_DATA_PATH = Join-Path $espeakDir "espeak-ng-data"
+} elseif (-not (Get-Command espeak-ng -ErrorAction SilentlyContinue)) {
+    throw "espeak-ng not found (expected $espeakDir or on PATH)"
+}
+
 Write-Host "[1/5] setup (downloads: piper VITS, ACAV features, MUSAN, RIRs)"
 python -m livekit.wakeword setup --config $config
 if ($LASTEXITCODE -ne 0) { throw "setup failed" }
