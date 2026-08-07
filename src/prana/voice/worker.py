@@ -44,14 +44,12 @@ def _check_env() -> None:
     # The brain key depends on the backend: pipeline runs on OpenRouter,
     # realtime needs a direct OpenAI key (OpenRouter can't proxy S2S).
     backend = os.environ.get("NARADA_VOICE_BACKEND", "realtime").lower()
-    if backend == "pipeline":
-        required.append("OPENROUTER_API_KEY")
-    else:
-        required.append("OPENAI_API_KEY")
+    key = "OPENROUTER_API_KEY" if backend == "pipeline" else "OPENAI_API_KEY"
+    required.append(key)
     missing = [k for k in required if not os.environ.get(k)]
-    # a leftover placeholder counts as missing
-    if os.environ.get("OPENROUTER_API_KEY", "").startswith("PASTE_"):
-        missing.append("OPENROUTER_API_KEY (still a placeholder)")
+    # a leftover placeholder counts as missing (only the key we need)
+    if os.environ.get(key, "").startswith("PASTE_"):
+        missing.append(f"{key} (still a placeholder)")
     if missing:
         raise SystemExit(
             f"voice worker missing env for backend={backend}: "
