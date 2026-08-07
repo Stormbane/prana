@@ -38,16 +38,25 @@ enough to say aloud."""
 
 def _check_env() -> None:
     load_dotenv(Path.home() / ".narada" / ".livekit.env")
-    missing = [
-        k for k in ("OPENAI_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY",
-                    "LIVEKIT_API_SECRET")
-        if not os.environ.get(k)
-    ]
+    load_dotenv(Path.home() / ".narada" / ".voice.env")
+    # LiveKit transport is always required.
+    required = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
+    # The brain key depends on the backend: pipeline runs on OpenRouter,
+    # realtime needs a direct OpenAI key (OpenRouter can't proxy S2S).
+    backend = os.environ.get("NARADA_VOICE_BACKEND", "realtime").lower()
+    if backend == "pipeline":
+        required.append("OPENROUTER_API_KEY")
+    else:
+        required.append("OPENAI_API_KEY")
+    missing = [k for k in required if not os.environ.get(k)]
+    # a leftover placeholder counts as missing
+    if os.environ.get("OPENROUTER_API_KEY", "").startswith("PASTE_"):
+        missing.append("OPENROUTER_API_KEY (still a placeholder)")
     if missing:
         raise SystemExit(
-            f"voice worker missing env: {', '.join(missing)} "
-            f"(OPENAI_API_KEY is Suti's gate; LiveKit vars come from "
-            f"~/.narada/.livekit.env)"
+            f"voice worker missing env for backend={backend}: "
+            f"{', '.join(missing)}. Keys live in ~/.narada/.voice.env "
+            f"(brain) and ~/.narada/.livekit.env (transport)."
         )
 
 
