@@ -63,3 +63,8 @@ htmlcov/
 # and customizes for their own LoRA path / display IP / interval). The
 # .example is the committed template; the real launcher stays local.
 scripts/heartbeat.bat
+
+# secrets — real key files live in ~/.narada, never in-repo
+voice.env
+*.voice.env
+.voice.env
