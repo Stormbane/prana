@@ -49,6 +49,9 @@ voice = [
     "livekit-agents[openai]>=1.6",
     "livekit-wakeword>=0.2",
     "pyaudio>=0.2.14",   # WakeWordListener mic capture (standalone path)
+    # livekit-agents 1.6 calls aiohttp.ClientSession(proxy=...), added in
+    # 3.11; the base env shipped 3.10 and the resolver left it. Pin up.
+    "aiohttp>=3.11",
 ]
 wakeword-train = [
     # Training the "Narada" wake model (scripts/train-wakeword.ps1).
