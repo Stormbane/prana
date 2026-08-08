@@ -29,6 +29,7 @@ from typing import Optional
 
 from prana.host.component import Component
 from prana.host.log import component_logger
+from prana.sessions.jobobject import JobObject
 
 
 SHUTDOWN_GRACE_S = 5.0
@@ -82,12 +83,16 @@ class ComponentState:
 class ComponentRunner:
     """Per-component lifecycle: spawn → log → wait-exit → restart loop."""
 
-    def __init__(self, component: Component):
+    def __init__(self, component: Component, job: Optional[JobObject] = None):
         self.component = component
         self.state = ComponentState(component=component)
         self.logger = component_logger(component.name)
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._stop_requested = False
+        # kill-on-close job: children die with the host even if the host
+        # is killed without a graceful shutdown (Stop-ScheduledTask), so
+        # component processes are never orphaned.
+        self._job = job
 
     async def run(self) -> None:
         """Restart loop. Returns when supervisor signals shutdown."""
@@ -244,6 +249,12 @@ class ComponentRunner:
         )
         self.state.pid = self._proc.pid
         self.state.started_at = time.time()
+        # Tie the child to the host's kill-on-close job so it can never
+        # outlive the host (no orphans on an ungraceful host death).
+        if self._job is not None and self._job.active:
+            if not self._job.assign(self._proc.pid):
+                self.logger.warning("could not assign pid to host job — "
+                                    "process may orphan on ungraceful exit")
         self.logger.info("spawned pid=%d", self._proc.pid)
 
         # Start pipe pumps — these run until the process closes its streams
@@ -326,8 +337,12 @@ class Supervisor:
 
     def __init__(self, components: list[Component]):
         self.components = components
+        # One kill-on-close job for the whole host: every component the
+        # host spawns is assigned to it, so all children die when the
+        # host process dies — however it dies. Held for the host's life.
+        self._job = JobObject()
         self.runners: dict[str, ComponentRunner] = {
-            c.name: ComponentRunner(c) for c in components
+            c.name: ComponentRunner(c, job=self._job) for c in components
         }
         self._tasks: dict[str, asyncio.Task] = {}
         self._shutdown_event = asyncio.Event()
