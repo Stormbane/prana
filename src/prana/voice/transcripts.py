@@ -1,27 +1,87 @@
-"""Full conversation transcript logging for the voice loop.
+"""Full conversation transcript logging for the voice loop — with the
+privacy controls the cross-review (#3) requires before the body goes live.
 
-Every finalized utterance — Suti's speech (transcribed) and Narada's
-replies — is appended to a per-session markdown file with UTC
-timestamps. This is the audit trail of what the body heard and said,
-and future training material for the wake word and persona.
+Every finalized utterance is appended to a per-session markdown file with
+UTC timestamps. Controls:
+  - owner-only file permissions (Windows ACL locked to the current user)
+  - secret redaction before write (API keys, tokens)
+  - retention: transcripts older than RETENTION_DAYS are pruned
+  - a visible "recording active" marker file the body/indicator can read,
+    and explicit RECORDING STARTED / STOPPED lines
+  - training-data reuse is opt-in and OUT of this audit tree by default
 
-Fail-open by contract: a transcript write must NEVER break or drop the
-live conversation. Every path swallows OSError and logs a warning.
+Fail-open by contract: a transcript/privacy error must NEVER break or drop
+the live conversation.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 TRANSCRIPT_ROOT = Path.home() / ".narada" / "heartbeat" / "voice-transcripts"
+RECORDING_MARKER = Path.home() / ".narada" / "heartbeat" / ".voice-recording-active"
+RETENTION_DAYS = 30
+
+# Secret patterns redacted before any utterance is written to disk.
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),           # OpenAI / Anthropic keys
+    re.compile(r"\b[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{16,}\b"),  # tokens/JWT-ish
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),            # AWS
+]
+
+
+def redact(text: str) -> str:
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text
 
 
 def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:40]
+
+
+def _lock_owner_only(path: Path) -> None:
+    """Restrict a file to the current user (Windows icacls). Best-effort."""
+    if sys.platform != "win32":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
+    try:
+        user = os.environ.get("USERNAME", "")
+        # remove inheritance, grant only the owner full control
+        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r",
+                        f"{user}:F"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("could not lock transcript perms: %s", exc)
+
+
+def prune_old(root: Path = TRANSCRIPT_ROOT, days: int = RETENTION_DAYS) -> int:
+    """Delete transcript files older than `days`. Returns count removed."""
+    if not root.is_dir():
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    removed = 0
+    for f in root.rglob("*.md"):
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            if mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("pruned %d transcript(s) older than %d days", removed, days)
+    return removed
 
 
 def text_of(item) -> str:
@@ -38,9 +98,10 @@ def text_of(item) -> str:
 
 
 class TranscriptLogger:
-    """One markdown file per voice session."""
+    """One markdown file per voice session, owner-locked and redacted."""
 
     def __init__(self, room_name: str, root: Path = TRANSCRIPT_ROOT) -> None:
+        prune_old(root)  # retention on each new session
         now = datetime.now(timezone.utc)
         self.path = (root / now.strftime("%Y_%m") /
                      f"{now.strftime('%Y%m%d-%H%M%S')}-{_safe(room_name)}.md")
@@ -48,14 +109,30 @@ class TranscriptLogger:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(
                 f"# Voice transcript — {room_name}\n\n"
-                f"started: {now.isoformat()}\n\n",
+                f"started: {now.isoformat()}\n"
+                f"> RECORDING ACTIVE — this conversation is being logged.\n\n",
                 encoding="utf-8",
             )
+            _lock_owner_only(self.path)
         except OSError as exc:
             logger.warning("transcript init failed (%s): %s", self.path, exc)
+        self._set_recording_marker(True, room_name)
+
+    def _set_recording_marker(self, active: bool, room: str = "") -> None:
+        """A file the body / a status LED can read to show recording state."""
+        try:
+            if active:
+                RECORDING_MARKER.parent.mkdir(parents=True, exist_ok=True)
+                RECORDING_MARKER.write_text(
+                    f"recording since {datetime.now(timezone.utc).isoformat()} "
+                    f"({room})\n", encoding="utf-8")
+            elif RECORDING_MARKER.exists():
+                RECORDING_MARKER.unlink()
+        except OSError:
+            pass
 
     def log(self, role: str, text: str) -> None:
-        text = (text or "").strip()
+        text = redact((text or "").strip())
         if not text:
             return
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -70,9 +147,11 @@ class TranscriptLogger:
         ts = datetime.now(timezone.utc).isoformat()
         try:
             with open(self.path, "a", encoding="utf-8") as f:
-                f.write(f"\nended: {ts}{f' ({reason})' if reason else ''}\n")
+                f.write(f"\nended: {ts}{f' ({reason})' if reason else ''}\n"
+                        f"> RECORDING STOPPED\n")
         except OSError:
             pass
+        self._set_recording_marker(False)
 
 
 def attach(session, room_name: str) -> TranscriptLogger:
