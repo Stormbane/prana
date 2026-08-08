@@ -132,8 +132,8 @@ exists; the gaps are marked BUILD.
 
 | Requirement | Current state | Action |
 |---|---|---|
-| Comes online with Windows | Docker Desktop auto-starts on login; LiveKit container `restart: unless-stopped`; `Narada_Host` scheduled task runs at logon | Enable the `voice` component so the worker starts with the rest. Confirm the full chain (Docker → LiveKit → host → worker) survives a reboot. |
-| Stays online, invisible | Host runs components under `pythonw` (no console); LiveKit is a headless container | Voice worker inherits this once enabled. Verify no console flash. |
+| Comes online with Windows | Docker Desktop auto-starts on login; LiveKit container `restart: unless-stopped`; `Narada_Host` scheduled task runs at logon | **Voice stays DISABLED until the #3 privacy + #4 false-accept gates pass.** The worker is wired into the host and proven to start/register; enabling it + verifying the reboot chain (Docker → LiveKit → host → worker) is the LAST step, after the gates. |
+| Stays online, invisible | Host runs components under `pythonw` (no console); LiveKit is a headless container | Worker inherits this the moment it's enabled (post-gate). Verify no console flash then. |
 | Recovers invisibly if it dies | Host supervisor restarts components with backoff; container restart policy | **STILL OPEN (cross-review #6):** process supervision catches *exits*, not a worker that stays alive but stops accepting rooms (event-loop / LiveKit-registration hang). BUILD a `health_url`/readiness endpoint, configure the host to probe it, and test restart-after-hang — not just restart-after-exit. |
 | Logs full transcripts | built (this session) | **NOT SAFE YET (cross-review #3):** full plaintext conversations stored indefinitely, no consent/indicator/retention/redaction. See privacy controls below. |
 
@@ -157,15 +157,20 @@ confirmation / authenticated-presence signal, a hardware mute, a
 recording indicator, and a budget-consumption alert.
 
 **Done this session (2026-08-08):** transcript logging built (privacy
-controls still owed); voice component enabled + supervised; auto-start
-chain verified; leaked orphan worker cleaned up. **Track C is PARTIAL,
-not done** — the hung-worker liveness check (#6), transcript privacy
-(#3), and the false-accept gate (#4) remain, and the last two are
-prerequisites for connecting the body.
+controls still owed); auto-start/supervision chain proven (worker starts
++ registers under the host). The voice component was briefly enabled to
+verify supervision, then **RE-DISABLED** (live config + template) per
+cross-review #4 — it is currently OFF and must stay OFF until the #3/#4
+gates pass. Leaked orphan workers cleaned up (and the underlying
+orphan-on-host-restart bug fixed 2026-08-09 via a kill-on-close job).
+**Track C is PARTIAL, not done** — hung-worker liveness (#6), transcript
+privacy (#3), and the false-accept gate (#4) remain; #3 and #4 are hard
+prerequisites for enabling voice / connecting the body.
 
-**Interim safety note:** the always-on worker is currently harmless only
-because nothing connects to the LiveKit server but our own tests. It
-must NOT be treated as production-safe until #3/#4/#6 are done.
+**Config state of record:** `voice` is `enabled: false` everywhere. Do
+NOT flip it on until the false-accept gate and transcript-privacy
+controls are built and tested — enabling an always-on billed/recording
+worker gated only by a weak wake word is the risk this gate prevents.
 
 ---
 
@@ -185,8 +190,14 @@ Verdict **needs-attention**; six findings, **all accepted** (no rejections):
 **Net effect:** Track A must not be built until the memory-projection and
 escalation-sandbox boundaries are designed + tested. Track C is not done.
 Track B may proceed through the *reversible backup/identify* prep, but the
-reflash-and-connect must wait for the safety gates. A round-2 verification
-of these revisions is warranted before execution.
+reflash-and-connect must wait for the safety gates.
+
+**Round 2 (2026-08-09):** #1, #2, #3, #5, #6 verified RESOLVED. #4 flagged
+again — not the fix but stale contradictory text in Track C ("enable the
+voice component" / "currently harmless" wording) that conflicted with the
+committed re-disable. Reconciled: Track C now states throughout that voice
+is `enabled: false` and stays off until the #3/#4 gates pass; enablement +
+reboot-chain verification moved to the last step. Plan is execution-ready.
 
 ## Open decisions for next time
 
