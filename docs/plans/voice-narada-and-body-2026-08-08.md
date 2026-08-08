@@ -147,14 +147,18 @@ retention/deletion policy; and keeping any training-data use opt-in and
 *separate* from the audit log (once memory recall lands, private
 memories must not bleed into the transcript tree).
 
-**False-accept safety gate (cross-review #4 — blocks always-on with a
-body):** the only wake-word evidence is 2/30 *recall* (false
-negatives); the cost/privacy risk is *false accepts* — ambient room
-audio opening a billed, transcribing session. Before the ESP32 streams
-to the always-on worker: measure false accepts over hours of real room
-audio + adversarial near-phrases, set a release threshold, add a second
-confirmation / authenticated-presence signal, a hardware mute, a
-recording indicator, and a budget-consumption alert.
+**False-accept safety gate (cross-review #4):** MEASURED 2026-08-09
+(`scripts/eval_wake_false_accept.py`): **0 false accepts over 2.73h of
+ambient audio** and **0/13 adversarial near-phrases**, at thresholds 0.5
+AND 0.32. So the ambient-audio-opens-a-billed-session risk is very low —
+the model barely triggers at all (its problem is recall, not false
+accepts). Recording indicator ✓ (transcript marker), budget alert ✓
+(budget guards warn at 80%, fail-closed daily cap). STILL OWED before
+always-on with a body: a **hardware mute** and an **authenticated-
+presence / second-confirmation** signal (both device-side, Phase 3), and
+real-room-mic false-accept data (needs the BOX-3 as a capture source).
+Honest limitation of the current number: training-adjacent noise + TTS
+near-phrases, not this room's mic.
 
 **Done this session (2026-08-08):** transcript logging built (privacy
 controls still owed); auto-start/supervision chain proven (worker starts
