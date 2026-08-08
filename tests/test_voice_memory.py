@@ -76,3 +76,43 @@ def test_empty_query_returns_nothing(tree):
 
 def test_missing_branch_dirs_are_fine(tmp_path):
     assert recall("anything", root=tmp_path) == []
+
+
+# ── path-containment adversarial (cross-review round-2 #2) ────────────
+
+def test_path_traversal_branch_rejected(tree):
+    results = recall("secret plan", root=tree,
+                     branches=["notes/../people", "notes\\..\\people"])
+    assert all(m.branch not in ("people",) for m in results)
+    # neither traversal form reaches people
+    assert "people" not in {m.branch for m in results}
+
+
+def test_absolute_branch_path_rejected(tree, tmp_path):
+    results = recall("secret plan", root=tree,
+                     branches=[str(tree / "people"), "/people"])
+    assert "people" not in {m.branch for m in results}
+
+
+def test_case_variant_denylist_rejected(tree):
+    # a case-variant of a private branch must still be refused
+    (tree / "People").mkdir(exist_ok=True) if not (tree / "people").exists() else None
+    results = recall("secret plan", root=tree, branches=["People", "JOURNAL"])
+    assert not {m.branch for m in results} & {"People", "JOURNAL", "people", "journal"}
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="symlink creation needs admin on Windows; logic covered by resolve()",
+)
+def test_symlink_into_private_branch_not_followed(tmp_path):
+    (tmp_path / "people").mkdir()
+    (tmp_path / "people" / "secret.md").write_text(
+        "the secret plan lives here", encoding="utf-8")
+    (tmp_path / "notes").mkdir()
+    # a dir symlink inside an allowlisted branch pointing at the private one
+    (tmp_path / "notes" / "sneaky").symlink_to(tmp_path / "people",
+                                               target_is_directory=True)
+    results = recall("secret plan", root=tmp_path)
+    for m in results:
+        assert "secret plan lives here" not in m.snippet

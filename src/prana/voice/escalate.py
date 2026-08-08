@@ -29,6 +29,17 @@ ESCALATION_TIMEOUT_S = 90
 MAX_CONCURRENT = 2
 _gate = asyncio.Semaphore(MAX_CONCURRENT)
 
+# Every built-in tool, denied explicitly. --allowedTools "" alone only
+# empties the permission allowlist (the tool definitions still load, per
+# cross-review); this hard-denies them, --safe-mode strips user CLAUDE.md/
+# skills/plugins/hooks/MCP, and --no-session-persistence stops the
+# untrusted Q&A being retained under user Claude state.
+_DENIED_TOOLS = ",".join([
+    "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "Glob",
+    "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit", "SlashCommand",
+    "Agent", "TodoWrite",
+])
+
 _SYSTEM = (
     "You are Narada, answering a question that will be SPOKEN ALOUD, "
     "possibly in a room where others can hear. Hard rules: "
@@ -66,10 +77,12 @@ async def escalate(question: str, *, timeout_s: float = ESCALATION_TIMEOUT_S) ->
                 [
                     "claude", "-p", prompt,
                     "--append-system-prompt", _SYSTEM,
-                    "--allowedTools", "",          # NO tools — nothing to inject
+                    "--safe-mode",                    # no user CLAUDE.md/skills/hooks/MCP
+                    "--allowedTools", "",             # empty permission allowlist
+                    "--disallowedTools", _DENIED_TOOLS,   # hard-deny every built-in
+                    "--no-session-persistence",       # don't retain the untrusted Q&A
                     "--output-format", "text",
-                    # no --mcp-config → no smriti/session tools; empty cwd →
-                    # no project .mcp.json, no hooks, no settings inheritance
+                    # empty cwd → no project .mcp.json / hooks / settings
                 ],
                 cwd=workdir,
                 capture_output=True,
