@@ -160,16 +160,23 @@ real-room-mic false-accept data (needs the BOX-3 as a capture source).
 Honest limitation of the current number: training-adjacent noise + TTS
 near-phrases, not this room's mic.
 
-**Done this session (2026-08-08):** transcript logging built (privacy
-controls still owed); auto-start/supervision chain proven (worker starts
-+ registers under the host). The voice component was briefly enabled to
-verify supervision, then **RE-DISABLED** (live config + template) per
-cross-review #4 — it is currently OFF and must stay OFF until the #3/#4
-gates pass. Leaked orphan workers cleaned up (and the underlying
-orphan-on-host-restart bug fixed 2026-08-09 via a kill-on-close job).
-**Track C is PARTIAL, not done** — hung-worker liveness (#6), transcript
-privacy (#3), and the false-accept gate (#4) remain; #3 and #4 are hard
-prerequisites for enabling voice / connecting the body.
+**Progress:** 2026-08-08 transcript logging built; supervision proven;
+voice briefly enabled then re-disabled per #4. 2026-08-09 the code-side
+safety gates were COMPLETED: transcript privacy (#3 — owner-only ACL,
+redaction, retention, recording indicator), hung-worker liveness (#6 —
+health endpoint on a fixed port + supervisor probe, verified 200), and
+false-accept data (#4 — 0/hour over 2.73h ambient + 0/13 near-phrases).
+Track A also built + hardened (#1 memory projection, #2 escalation
+sandbox — both survived a round of adversarial review). The
+orphan-on-host-restart bug was fixed (kill-on-close job).
+
+**Track C code-complete; voice still OFF by choice.** The remaining
+gate items are device-side (a hardware mute + authenticated-presence
+signal) and real-voice work (wake recall on Suti's voice; real-room-mic
+false-accept data) — all of which need the BOX-3. For PC/browser-mic use
+the gates are met (0/hr false accepts + cost guards + privacy +
+liveness), so `voice` is ENABLE-READY there; it stays disabled pending
+Suti's call, given the plan's history.
 
 **Config state of record:** `voice` is `enabled: false` everywhere. Do
 NOT flip it on until the false-accept gate and transcript-privacy
