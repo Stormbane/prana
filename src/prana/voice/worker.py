@@ -195,10 +195,22 @@ async def _wait_for_wake(
     return detected
 
 
+HEALTH_HOST = "127.0.0.1"
+HEALTH_PORT = int(os.environ.get("NARADA_VOICE_HEALTH_PORT", "8792"))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _check_env()
-    agents.cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    # Fixed health port so the host supervisor can probe liveness at a
+    # known URL (cross-review #6). The agents worker's `/` returns 503 on
+    # a lost LiveKit connection, and an event-loop hang makes the probe
+    # time out — either way the supervisor restarts it.
+    agents.cli.run_app(WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        host=HEALTH_HOST,
+        port=HEALTH_PORT,
+    ))
 
 
 if __name__ == "__main__":

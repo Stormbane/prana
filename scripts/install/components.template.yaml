@@ -111,6 +111,11 @@ components:
     cwd: ${PRANA_ROOT}
     env: {}
     restart_grace_s: 10.0
+    # Liveness (cross-review #6): the agents worker serves /  on a fixed
+    # port — 503 on a lost LiveKit connection, and an event-loop hang makes
+    # the probe time out. Either way the supervisor restarts a worker that
+    # is alive-but-not-serving, not just one that crashed.
+    health_url: http://127.0.0.1:8792/
 
   # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current

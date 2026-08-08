@@ -33,12 +33,19 @@ def test_runs_with_no_tools_no_mcp_isolated_cwd(monkeypatch):
     out = _run(esc.escalate("what's the tradeoff between X and Y?"))
     assert out == "a short spoken answer"
     argv = captured["argv"]
-    # NO tools granted
-    assert "--allowedTools" in argv
+    # empty permission allowlist
     assert argv[argv.index("--allowedTools") + 1] == ""
-    # NO mcp config passed (no smriti/session tools)
+    # every built-in tool hard-denied (allowlist alone is not enough)
+    assert "--disallowedTools" in argv
+    denied = argv[argv.index("--disallowedTools") + 1]
+    for t in ("Bash", "Read", "Write", "Edit", "WebFetch", "Task"):
+        assert t in denied
+    # user customizations (CLAUDE.md/skills/hooks/MCP) stripped
+    assert "--safe-mode" in argv
+    # untrusted Q&A not retained
+    assert "--no-session-persistence" in argv
+    # no MCP config; isolated cwd
     assert "--mcp-config" not in argv
-    # isolated cwd, NOT the project
     assert "narada-escalate-" in str(captured["cwd"])
 
 

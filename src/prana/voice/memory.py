@@ -42,14 +42,62 @@ NEVER_RECALLABLE: frozenset[str] = frozenset({
 MAX_SNIPPET = 240
 
 
-def _assert_safe(branches: Iterable[str]) -> list[str]:
-    safe = []
-    for b in branches:
-        if b in NEVER_RECALLABLE:
+_DENY_LOWER = frozenset(n.lower() for n in NEVER_RECALLABLE)
+
+
+def _resolve_safe_roots(root: Path, branch_names: Iterable[str]) -> list[tuple[str, Path]]:
+    """Resolve the allowlisted branches to real directories, rejecting
+    anything that could reach private content: non-bare names, path
+    traversal, denylist matches (case-insensitive), symlinks/junctions,
+    and dirs that don't resolve to a direct child of root.
+    """
+    try:
+        rroot = root.resolve()
+    except OSError:
+        return []
+    private_roots = []
+    for name in NEVER_RECALLABLE:
+        p = root / name
+        try:
+            if p.exists():
+                private_roots.append(p.resolve())
+        except OSError:
+            continue
+    safe: list[tuple[str, Path]] = []
+    for b in branch_names:
+        # must be a bare, non-private branch name
+        if not b or "/" in b or "\\" in b or ".." in b or b == "." :
+            continue
+        if b.lower() in _DENY_LOWER:
             logger.error("refusing voice-recall of private branch %r", b)
             continue
-        safe.append(b)
+        d = root / b
+        try:
+            if d.is_symlink() or not d.is_dir():
+                continue
+            rd = d.resolve()
+        except OSError:
+            continue
+        # must resolve to a DIRECT child of the (resolved) narada root,
+        # and not be (or sit under) any private branch
+        if rd.parent != rroot:
+            continue
+        if any(rd == pr or pr in rd.parents for pr in private_roots):
+            continue
+        safe.append((b, rd))
     return safe
+
+
+def _contained(path: Path, root: Path) -> bool:
+    """True iff `path` resolves to a real file strictly under `root`,
+    with no symlink escape."""
+    try:
+        if path.is_symlink():
+            return False
+        rp = path.resolve()
+        return root == rp.parent or root in rp.parents
+    except OSError:
+        return False
 
 
 @dataclass
@@ -68,21 +116,23 @@ def recall(
     query: str,
     *,
     root: Path = NARADA_ROOT,
-    branches: Iterable[str] = VOICE_RECALLABLE_BRANCHES,
+    branches: Iterable[str] | None = None,
     limit: int = 4,
 ) -> list[Memory]:
     """Keyword-search the allowlisted branches only. Returns redacted
-    snippets, best match first. Never touches a non-allowlisted branch."""
-    safe_branches = _assert_safe(branches)
+    snippets, best match first. Cannot touch a non-allowlisted branch:
+    every branch and candidate file is resolved and containment-checked,
+    and symlinks are rejected. `branches` defaults to the constant
+    allowlist; a caller override is still fully containment-validated."""
+    branch_names = VOICE_RECALLABLE_BRANCHES if branches is None else tuple(branches)
     terms = {t for t in query.lower().split() if len(t) > 2}
     if not terms:
         return []
     hits: list[tuple[int, Memory]] = []
-    for branch in safe_branches:
-        bdir = root / branch
-        if not bdir.is_dir():
-            continue
-        for md in bdir.rglob("*.md"):
+    for branch, rdir in _resolve_safe_roots(root, branch_names):
+        for md in rdir.rglob("*.md"):
+            if not _contained(md, rdir):
+                continue  # symlink escape or resolves outside the branch
             try:
                 text = md.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -90,7 +140,6 @@ def recall(
             s = _score(terms, text)
             if s == 0:
                 continue
-            # snippet = the best-matching paragraph, redacted
             snippet = _best_paragraph(terms, text)
             hits.append((s, Memory(branch=branch, path=md.name,
                                    snippet=redact(snippet)[:MAX_SNIPPET])))
