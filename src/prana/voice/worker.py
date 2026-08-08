@@ -21,6 +21,7 @@ from livekit.plugins import openai as lk_openai
 
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
 from prana.voice.tools import build_voice_tools
+from prana.voice.transcripts import attach
 from prana.voice.wakegate import WakeGate
 
 logger = logging.getLogger("narada-voice")
@@ -110,10 +111,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
     started = time.monotonic()
     session = None
+    transcript = None
     try:
         session = AgentSession(
             llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
         )
+        # Full transcript of what was said, both sides, to
+        # ~/.narada/heartbeat/voice-transcripts/. Fail-open.
+        transcript = attach(session, ctx.room.name)
         agent = Agent(instructions=INSTRUCTIONS, tools=build_voice_tools())
         await session.start(agent=agent, room=ctx.room)
         logger.info("realtime session open (model=%s)", REALTIME_MODEL)
@@ -128,6 +133,8 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("session cap reached (%.0fs) — closing",
                         budget.session_cap_s)
     finally:
+        if transcript is not None:
+            transcript.close("session ended")
         if session is not None:
             try:
                 await session.aclose()
