@@ -99,7 +99,10 @@ components:
   # ─────────────────────────────────────────────────────────────────
   - name: voice
     description: "Voice loop — wake-gated realtime S2S (LiveKit worker)"
-    enabled: true  # 2026-08-08: OPENAI_API_KEY present, loop proven E2E
+    # Wired + proven E2E, but kept OFF until the false-accept safety gate
+    # exists (cross-review 2026-08-08 #4): an always-on billed/recording
+    # worker gated only by a weak wake word is an ambient-audio risk.
+    enabled: false
     command:
       - python
       - -m
