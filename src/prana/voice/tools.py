@@ -21,6 +21,8 @@ from livekit.agents import function_tool
 from prana.sessions import watcher
 from prana.sessions.escalate import ProposalError, ProposalQueue, judge_with_narada
 from prana.sessions.service import ServiceClient, ServiceUnavailable
+from prana.voice import memory
+from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +116,34 @@ def build_voice_tools(
         except (ServiceUnavailable, RuntimeError, KeyError) as exc:
             return {"approved": True, "executed": False, "error": str(exc)}
 
+    @function_tool()
+    async def recall_memory(
+        query: Annotated[str, "what to recall, in a few words"],
+    ) -> list[dict]:
+        """Recall shareable notes from Narada's memory. Voice-safe by
+        construction: only non-private branches are searched — personal,
+        journal, and identity memory are never accessible here."""
+        return [
+            {"branch": m.branch, "note": m.snippet}
+            for m in memory.recall(query)
+        ]
+
+    @function_tool()
+    async def escalate_to_narada(
+        question: Annotated[str, "the question, quoted from what Suti asked"],
+    ) -> dict:
+        """Hand a substantive question (judgment, tradeoffs, explanation)
+        to Narada's deeper reasoning. Slower than a quick reply — say
+        'let me think about that properly' first. Cannot touch files or
+        make changes; those go through Suti's authenticated channels."""
+        answer = await escalate(question)
+        return {"answer": answer}
+
     return [
         list_coding_sessions,
         list_open_terminals,
         read_session_output,
         request_session_action,
+        recall_memory,
+        escalate_to_narada,
     ]

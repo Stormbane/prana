@@ -84,10 +84,14 @@ VOICE_TOOL_NAMES = {
     "list_open_terminals",
     "read_session_output",
     "request_session_action",
+    "recall_memory",
+    "escalate_to_narada",
 }
 FORBIDDEN_NAMES = {
     "spawn_session", "relay_instruction", "cancel_session",
     "decide_proposal", "resume_foreign_session",
+    # memory recall must be the voice-safe projection, never raw smriti
+    "smriti_read",
 }
 
 
