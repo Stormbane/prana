@@ -8,6 +8,7 @@ between wake and hangup/timeout.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -19,6 +20,15 @@ from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions
 from livekit.plugins import openai as lk_openai
 
+from prana.voice.admission import (
+    DEVICE_IDENTITY,
+    TIER_PERSONAL,
+    TIER_SHAREABLE,
+    TOPIC_ADMISSION,
+    TOPIC_SESSION,
+    TapAdmission,
+    is_sleep_tap,
+)
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
 from prana.voice.tools import build_voice_tools
 from prana.voice.transcripts import attach
@@ -60,6 +70,10 @@ def _check_env() -> None:
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    """One long-lived job per room, looping wake-watch → session →
+    wake-watch (M2 spec). Admission into a *billed* session happens by
+    wake-word detection OR a verified tap assertion; the room/audio
+    connection itself is LAN-only and free."""
     import asyncio
 
     budget = VoiceBudget()
@@ -108,12 +122,53 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.on("participant_disconnected", _maybe_empty)
     ctx.room.on("participant_connected", _participant_back)
 
+    # ── Tap admission + data-channel plumbing (M2 spec §2.2) ─────────
+    admission = TapAdmission()
+    tap_admit = asyncio.Event()
+    sleep_tap = asyncio.Event()
+    box_dropped = asyncio.Event()
+    state = {"assertion": None, "in_session": False}
+
+    def _on_data(packet) -> None:
+        try:
+            ident = getattr(getattr(packet, "participant", None),
+                            "identity", None)
+            data = getattr(packet, "data", b"")
+            if state["in_session"]:
+                if is_sleep_tap(ident, data):
+                    sleep_tap.set()
+                return
+            assertion = admission.verify(ident, data)
+            if assertion is not None:
+                state["assertion"] = assertion
+                tap_admit.set()
+        except Exception:  # data handler must never take the job down
+            pass
+
+    ctx.room.on("data_received", _on_data)
+
+    def _on_participant_left(participant, *_args) -> None:
+        if getattr(participant, "identity", None) == DEVICE_IDENTITY:
+            box_dropped.set()
+
+    ctx.room.on("participant_disconnected", _on_participant_left)
+
+    async def _publish(topic: str, obj: dict) -> None:
+        try:
+            await ctx.room.local_participant.publish_data(
+                json.dumps(obj), topic=topic,
+                destination_identities=[DEVICE_IDENTITY],
+            )
+        except Exception as exc:
+            logger.debug("publish %s failed: %s", topic, exc)
+
     # Wake gating: watch LAN audio locally; the billed realtime session
-    # opens only after "Narada". FAIL CLOSED: a missing model, a room
-    # that ends, or an audio stream that ends without a wake ABORTS —
-    # no session. Only an explicit NARADA_WAKE_GATING=off (the
-    # pre-model browser-mic milestone) skips the gate.
-    if os.environ.get("NARADA_WAKE_GATING", "auto") != "off":
+    # opens only after "Narada" OR a verified tap. FAIL CLOSED on a
+    # missing model. NARADA_WAKE_GATING=off (dev/browser-mic mode) keeps
+    # the pre-M2 single-session behavior.
+    gating = os.environ.get("NARADA_WAKE_GATING", "auto") != "off"
+    gate = None
+    if gating:
         try:
             gate = WakeGate()
         except FileNotFoundError as exc:
@@ -121,13 +176,7 @@ async def entrypoint(ctx: JobContext) -> None:
                          "to bypass): %s", exc)
             bail("wake model unavailable")
             return
-        if not await _wait_for_wake(ctx, gate, closed):
-            bail("room/audio ended without wake")
-            return
 
-    if closed.is_set():
-        bail("room closed before admission")
-        return
     if not ctx.room.remote_participants:
         # Dispatch-on-room-creation can beat the creating participant's
         # own join (observed with the BOX-3: agent connects first, sees
@@ -146,56 +195,123 @@ async def entrypoint(ctx: JobContext) -> None:
         bail("room closed while waiting for participant")
         return
 
-    # Admission: reserve this session's maximum charge (fail closed on
-    # budget exhaustion, races, or a damaged ledger).
-    try:
-        reservation = budget.reserve()
-    except (BudgetExceeded, BudgetUnavailable) as exc:
-        logger.warning("refusing session: %s", exc)
-        bail("budget refused")
-        return
-
-    if closed.is_set() or not ctx.room.remote_participants:
-        budget.settle(reservation, 0.0)
-        bail("room emptied during admission — reservation released")
-        return
-
-    started = time.monotonic()
-    session = None
-    transcript = None
-    try:
-        session = AgentSession(
-            llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
-        )
-        # Full transcript of what was said, both sides, to
-        # ~/.narada/heartbeat/voice-transcripts/. Fail-open.
-        transcript = attach(session, ctx.room.name)
-        agent = Agent(instructions=INSTRUCTIONS, tools=build_voice_tools())
-        await session.start(agent=agent, room=ctx.room)
-        logger.info("realtime session open (model=%s)", REALTIME_MODEL)
-        # cap vs. natural close, whichever first — a disconnected room
-        # must stop billing immediately, not at the cap
+    async def _run_session(tier: str) -> str:
+        """One billed session. Returns the end reason."""
         try:
-            await asyncio.wait_for(
-                closed.wait(), timeout=budget.session_cap_s
+            reservation = budget.reserve()
+        except (BudgetExceeded, BudgetUnavailable) as exc:
+            logger.warning("refusing session: %s", exc)
+            return "budget-refused"
+        if closed.is_set() or not ctx.room.remote_participants:
+            budget.settle(reservation, 0.0)
+            return "room-emptied-during-admission"
+
+        started = time.monotonic()
+        session = None
+        transcript = None
+        reason = "unknown"
+        state["in_session"] = True
+        sleep_tap.clear()
+        box_dropped.clear()
+        try:
+            session = AgentSession(
+                llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
             )
-            logger.info("room closed — ending session")
-        except asyncio.TimeoutError:
-            logger.info("session cap reached (%.0fs) — closing",
-                        budget.session_cap_s)
-    finally:
-        if transcript is not None:
-            transcript.close("session ended")
-        if session is not None:
-            try:
-                await session.aclose()
-            except Exception as exc:
-                logger.warning("session close failed: %s", exc)
-        budget.settle(reservation, time.monotonic() - started)
-        # Leave the room when the session ends. Without this the job
-        # lingers as a zombie participant, holding the room open so no
-        # fresh job can ever be dispatched (observed with the BOX-3).
-        ctx.shutdown(reason="session ended")
+            transcript = attach(session, ctx.room.name)
+            agent = Agent(instructions=INSTRUCTIONS,
+                          tools=build_voice_tools())
+            await session.start(agent=agent, room=ctx.room)
+            logger.info("realtime session open (model=%s, tier=%s)",
+                        REALTIME_MODEL, tier)
+            await _publish(TOPIC_SESSION,
+                           {"type": "session", "open": True, "tier": tier})
+            # End on whichever comes first: room closed, sleep tap, the
+            # cap — and for PERSONAL tier, the device dropping (the tier
+            # must not survive a reconnect, per spec §2.2).
+            waiters = {
+                "room-closed": asyncio.ensure_future(closed.wait()),
+                "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
+            }
+            if tier == TIER_PERSONAL:
+                waiters["device-dropped"] = asyncio.ensure_future(
+                    box_dropped.wait())
+            done, pending = await asyncio.wait(
+                waiters.values(),
+                timeout=budget.session_cap_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if not done:
+                reason = "session-cap"
+            else:
+                reason = next(k for k, v in waiters.items() if v in done)
+            logger.info("session ending: %s", reason)
+        finally:
+            state["in_session"] = False
+            if transcript is not None:
+                transcript.close(reason)
+            if session is not None:
+                try:
+                    await session.aclose()
+                except Exception as exc:
+                    logger.warning("session close failed: %s", exc)
+            budget.settle(reservation, time.monotonic() - started)
+            await _publish(TOPIC_SESSION,
+                           {"type": "session", "open": False,
+                            "reason": reason})
+        return reason
+
+    if not gating:
+        # Dev/browser-mic mode: pre-M2 behavior — one immediate session,
+        # then the job ends. (Looping here would chain billed sessions
+        # back-to-back against an always-present device.)
+        await _run_session(TIER_SHAREABLE)
+        ctx.shutdown(reason="session ended (dev mode)")
+        return
+
+    # ── The wake-watch loop (M2): watch → admit → session → repeat ───
+    while not closed.is_set():
+        tap_admit.clear()
+        state["assertion"] = None
+        nonce = admission.new_cycle()
+        await _publish(TOPIC_ADMISSION,
+                       {"type": "admission_nonce", "nonce": nonce})
+        logger.info("wake-watch: listening for wake word or tap")
+
+        wake_task = asyncio.ensure_future(_wait_for_wake(ctx, gate, closed))
+        tap_task = asyncio.ensure_future(tap_admit.wait())
+        closed_task = asyncio.ensure_future(closed.wait())
+        done, pending = await asyncio.wait(
+            {wake_task, tap_task, closed_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        admission.invalidate()  # one admission decision per cycle
+
+        if closed_task in done:
+            break
+        if tap_task in done and state["assertion"] is not None:
+            tier = state["assertion"].tier
+            logger.info("admitted by tap (tier=%s)", tier)
+        elif wake_task in done and not wake_task.cancelled() \
+                and wake_task.result():
+            tier = TIER_SHAREABLE
+            logger.info("admitted by wake word")
+        else:
+            # audio stream ended without a wake — device likely flapped;
+            # next cycle re-arms (the room-grace handles true departure)
+            await asyncio.sleep(1.0)
+            continue
+
+        end_reason = await _run_session(tier)
+        if end_reason in ("budget-refused",):
+            # fail-closed but not silently: stay in wake-watch, a later
+            # cycle may succeed (e.g. next day’s budget)
+            await asyncio.sleep(30.0)
+
+    ctx.shutdown(reason="room closed — job ended")
 
 
 async def _wait_for_wake(
