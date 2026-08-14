@@ -18,6 +18,13 @@ services:
           port_range_start: 50100
           port_range_end: 50200
           use_external_ip: false
+          # Advertise the PC's LAN IP in ICE candidates. Without this the
+          # server (inside Docker) offers its container IP (172.18.x.x,
+          # unreachable from the LAN) + a STUN-derived public IP (hairpin
+          # NAT, unreliable) — LAN devices like the BOX-3 can then never
+          # establish media and abort. Found via the box's connect loop.
+          node_ip: 192.168.86.20
+          stun_servers: []
     command: --bind 0.0.0.0
     ports:
       - "7880:7880"            # websocket / http
