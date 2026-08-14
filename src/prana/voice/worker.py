@@ -65,16 +65,48 @@ async def entrypoint(ctx: JobContext) -> None:
     budget = VoiceBudget()
     await ctx.connect()
 
+    def bail(reason: str) -> None:
+        """Refuse a session AND leave the room — a bare return leaves a
+        zombie participant holding the room open, blocking re-dispatch."""
+        logger.info("%s — no session opened", reason)
+        ctx.shutdown(reason=reason)
+
     # Lifecycle handlers FIRST — a disconnect during wake wait or
     # admission must be observed, or an empty room gets billed to cap.
     closed = asyncio.Event()
     ctx.room.on("disconnected", lambda *_: closed.set())
 
+    # Room-empty is DEBOUNCED: the BOX-3 flaps 2-3 times while its WiFi
+    # settles after boot (observed: stabilizes within ~15s). Hanging up
+    # on the first flap strands the room agent-less once the box finally
+    # sticks. Grace costs at most ~45s of idle session (~1 cent).
+    EMPTY_GRACE_S = 45.0
+    empty_grace: dict = {"task": None}
+
     def _maybe_empty(*_args) -> None:
-        if not ctx.room.remote_participants:
-            closed.set()
+        if ctx.room.remote_participants:
+            return
+        if empty_grace["task"] is not None and not empty_grace["task"].done():
+            return  # grace timer already running
+
+        async def _grace() -> None:
+            try:
+                await asyncio.sleep(EMPTY_GRACE_S)
+            except asyncio.CancelledError:
+                return
+            if not ctx.room.remote_participants:
+                logger.info("room empty for %.0fs — closing", EMPTY_GRACE_S)
+                closed.set()
+
+        empty_grace["task"] = asyncio.create_task(_grace())
+
+    def _participant_back(*_args) -> None:
+        if empty_grace["task"] is not None and not empty_grace["task"].done():
+            empty_grace["task"].cancel()
+            logger.info("participant returned within grace — session continues")
 
     ctx.room.on("participant_disconnected", _maybe_empty)
+    ctx.room.on("participant_connected", _participant_back)
 
     # Wake gating: watch LAN audio locally; the billed realtime session
     # opens only after "Narada". FAIL CLOSED: a missing model, a room
@@ -85,15 +117,33 @@ async def entrypoint(ctx: JobContext) -> None:
         try:
             gate = WakeGate()
         except FileNotFoundError as exc:
-            logger.error("wake model unavailable — refusing session "
-                         "(set NARADA_WAKE_GATING=off to bypass): %s", exc)
+            logger.error("wake model unavailable (set NARADA_WAKE_GATING=off "
+                         "to bypass): %s", exc)
+            bail("wake model unavailable")
             return
         if not await _wait_for_wake(ctx, gate, closed):
-            logger.info("room/audio ended without wake — no session opened")
+            bail("room/audio ended without wake")
             return
 
-    if closed.is_set() or not ctx.room.remote_participants:
-        logger.info("room empty before admission — no session opened")
+    if closed.is_set():
+        bail("room closed before admission")
+        return
+    if not ctx.room.remote_participants:
+        # Dispatch-on-room-creation can beat the creating participant's
+        # own join (observed with the BOX-3: agent connects first, sees
+        # an empty room). Wait briefly for them instead of refusing.
+        joined = asyncio.Event()
+        ctx.room.on("participant_connected", lambda *_: joined.set())
+        if ctx.room.remote_participants:  # re-check after handler attach
+            joined.set()
+        try:
+            await asyncio.wait_for(joined.wait(), timeout=60)
+            logger.info("participant arrived — proceeding to admission")
+        except asyncio.TimeoutError:
+            bail("no participant within 60s")
+            return
+    if closed.is_set():
+        bail("room closed while waiting for participant")
         return
 
     # Admission: reserve this session's maximum charge (fail closed on
@@ -102,11 +152,12 @@ async def entrypoint(ctx: JobContext) -> None:
         reservation = budget.reserve()
     except (BudgetExceeded, BudgetUnavailable) as exc:
         logger.warning("refusing session: %s", exc)
+        bail("budget refused")
         return
 
     if closed.is_set() or not ctx.room.remote_participants:
         budget.settle(reservation, 0.0)
-        logger.info("room emptied during admission — reservation released")
+        bail("room emptied during admission — reservation released")
         return
 
     started = time.monotonic()
@@ -141,6 +192,10 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception as exc:
                 logger.warning("session close failed: %s", exc)
         budget.settle(reservation, time.monotonic() - started)
+        # Leave the room when the session ends. Without this the job
+        # lingers as a zombie participant, holding the room open so no
+        # fresh job can ever be dispatched (observed with the BOX-3).
+        ctx.shutdown(reason="session ended")
 
 
 async def _wait_for_wake(
