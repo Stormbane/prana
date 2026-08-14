@@ -126,8 +126,16 @@ async def entrypoint(ctx: JobContext) -> None:
     admission = TapAdmission()
     tap_admit = asyncio.Event()
     sleep_tap = asyncio.Event()
-    box_dropped = asyncio.Event()
+    # Device-drop is signalled via a PER-SESSION event held in a mutable
+    # box, never a shared clearable one (cross-review: clearing a shared
+    # event after the presence check could erase a drop that fired in the
+    # admission gap). Each session installs a fresh event *before* its
+    # atomic presence check; the handler always targets the current one.
+    drop = {"ev": asyncio.Event()}
     state = {"assertion": None, "in_session": False}
+
+    def _device_present() -> bool:
+        return DEVICE_IDENTITY in ctx.room.remote_participants
 
     def _on_data(packet) -> None:
         try:
@@ -149,7 +157,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     def _on_participant_left(participant, *_args) -> None:
         if getattr(participant, "identity", None) == DEVICE_IDENTITY:
-            box_dropped.set()
+            drop["ev"].set()
 
     ctx.room.on("participant_disconnected", _on_participant_left)
 
@@ -215,12 +223,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _run_session(tier: str) -> str:
         """One billed session. Returns the end reason."""
+        # Install a FRESH drop event, then check device presence with NO
+        # await in between — so a drop in the admission gap is either
+        # caught by this event (fired after) or by the presence check
+        # (fired before). Never cleared mid-session (round-2 race fix).
+        drop["ev"] = asyncio.Event()
+        if not _device_present():
+            return "device-absent-at-admission"
         try:
             reservation = budget.reserve()
         except (BudgetExceeded, BudgetUnavailable) as exc:
             logger.warning("refusing session: %s", exc)
             return "budget-refused"
-        if closed.is_set() or not ctx.room.remote_participants:
+        if closed.is_set() or not _device_present():
             budget.settle(reservation, 0.0)
             return "room-emptied-during-admission"
 
@@ -230,7 +245,6 @@ async def entrypoint(ctx: JobContext) -> None:
         reason = "unknown"
         state["in_session"] = True
         sleep_tap.clear()
-        box_dropped.clear()
         try:
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
@@ -244,14 +258,14 @@ async def entrypoint(ctx: JobContext) -> None:
             await _publish(TOPIC_SESSION,
                            {"type": "session", "open": True, "tier": tier})
             # End on whichever comes first: room closed, sleep tap, the
-            # cap — or the DEVICE dropping (every tier: a rejoined
-            # device could otherwise show no REC glyph while a session
-            # stayed live, falsifying the honest indicator; and with the
-            # human's device gone there is no conversation anyway).
+            # cap — or the DEVICE dropping (every tier: a rejoined device
+            # could otherwise show no REC glyph while a session stayed
+            # live, falsifying the honest indicator; and with the human's
+            # device gone there is no conversation anyway).
             waiters = {
                 "room-closed": asyncio.ensure_future(closed.wait()),
                 "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
-                "device-dropped": asyncio.ensure_future(box_dropped.wait()),
+                "device-dropped": asyncio.ensure_future(drop["ev"].wait()),
             }
             done, pending = await asyncio.wait(
                 waiters.values(),
@@ -260,6 +274,7 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             for t in pending:
                 t.cancel()
+            await asyncio.gather(*waiters.values(), return_exceptions=True)
             if not done:
                 reason = "session-cap"
             else:
