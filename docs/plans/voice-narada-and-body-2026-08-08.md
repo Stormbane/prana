@@ -210,6 +210,34 @@ committed re-disable. Reconciled: Track C now states throughout that voice
 is `enabled: false` and stays off until the #3/#4 gates pass; enablement +
 reboot-chain verification moved to the last step. Plan is execution-ready.
 
+## Milestone 2 firmware — CONFIRMED SPEC (Suti, 2026-08-15, after the
+first working conversation)
+
+The interaction model, in Suti's words: "we should only wake it with the
+wake word or a touch and put it back to sleep with a touch. The screen
+should be showing us the whole time it is listening."
+
+- **Wake:** wake word ("Narada", after real-voice retraining) OR a
+  screen tap. Either one connects/starts the session.
+- **Sleep:** a tap while awake ends the session (doubles as interrupt
+  if it's mid-sentence).
+- **Screen = listening indicator:** the display persistently shows the
+  state — asleep ("tap to talk") vs awake/LISTENING — the whole time a
+  session is open. This IS the visible recording indicator the
+  cross-review (#3/#4) required; Suti's UX instinct and the safety
+  requirement are the same feature.
+- Plus (from the first live session): speaker volume up (85 →
+  compile-time bump + pa_gain if needed — "a bit quiet"); firmware
+  infinite reconnect with backoff (kills the replug ritual; finite
+  retries strand the box after drops/kicks/caps); no auto-join — the
+  box connects on wake/tap only, which is also what makes always-on
+  affordable and re-dispatch after the session cap a non-issue.
+
+Worker side to pair with it: wake-gating ON (model gates the wake-word
+path; tap path bypasses it by design — a deliberate touch is stronger
+authentication than a wake word), session cap behavior reviewed so a
+tap can always summon a fresh session.
+
 ## Open decisions for next time
 
 1. Track A depth: build 1+2 (identity + smriti_read) next, or go
