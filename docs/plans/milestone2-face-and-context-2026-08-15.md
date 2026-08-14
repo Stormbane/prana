@@ -183,8 +183,9 @@ and Suti must ratify the residual risk explicitly:
 - **Optional strengthening (build if wanted later):** first personal
   session of the day pings Suti's Telegram ("box unlocked personal
   tier — that you?"); or a secret tap pattern.
-- **RESIDUAL RISK ACCEPTED (Suti, 2026-08-15):** anyone tapping the
-  box in the home can hear the narrowed personal tier above.
+- **RESIDUAL RISK RATIFIED (Suti, explicitly, 2026-08-15 — after the
+  cross-review sharpened the guest-at-device threat):** anyone tapping
+  the box in the home can hear the narrowed personal tier above.
 
 **Tier-signal integrity (fail-closed admission protocol):**
 - The tier assertion is a **one-shot** data-channel message accepted
