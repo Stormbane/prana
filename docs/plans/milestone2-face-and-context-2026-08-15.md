@@ -66,11 +66,17 @@ converged on, and it's *less* work than managing image assets.
   in a session. Non-negotiable invariant, enforced in firmware: the
   session state and the display state come from the same variable.
 
-- **Protocol:** LiveKit data channel messages from worker → firmware:
-  `{"state": "listening"}`, `{"emotion": "curious", "ttl_ms": 4000}`.
-  Firmware falls back to local state (it knows session/audio state
-  itself) if the worker sends nothing — the face never freezes on a
-  lost packet.
+- **Protocol (revised per cross-review #5):** the firmware's own
+  `mic_live` flag is **authoritative and not writable over the data
+  channel** — it alone controls a persistent recording glyph that
+  overlays *every* expression while a session is live (listening,
+  thinking, and speaking are presentation flavors UNDER the glyph, not
+  alternatives to it). Worker → firmware messages are **presentation
+  hints only**: `{"emotion": "curious", "ttl_ms": 4000}` from an
+  allowlist. Hints that could suppress or mimic the mic indicator
+  (asleep, offline, listening-off) are rejected by the firmware. Lost
+  packets degrade to the local state machine; the face never freezes
+  and the glyph never lies.
 
 - **Emotion source (the xiaozhi trick, upgraded):** give the realtime
   model a `set_expression(emotion)` tool — display-only, zero risk, it
@@ -83,12 +89,31 @@ converged on, and it's *less* work than managing image assets.
   (m5stack-avatar approach, ~20 lines). v2 (later) = deha's viseme
   sprites for true mouth shapes.
 
-### Phasing
+### Phasing (revised per cross-review #4 — tap needs BOTH sides)
 
-- **M2a (ship with tap-to-listen):** face engine + 6 states, no
-  emotion tool yet. This is the firmware rewrite that also carries
-  tap-wake/tap-sleep, infinite reconnect, volume fix.
-- **M2b:** `set_expression` tool + audio-level lip-sync.
+- **M2a — firmware AND worker together** (tap-to-listen doesn't exist
+  without both; the current worker only admits via WakeGate or a
+  global gating-off switch, and weakening that gate is not acceptable):
+  - *Firmware:* face engine + states + authoritative mic_live glyph;
+    tap-wake / tap-sleep; **connect-on-tap (no auto-join)**; reconnect
+    with bounded exponential backoff + jitter; volume fix.
+  - *Worker:* **tap admission path** — a verified tap assertion (2.2
+    protocol) admits a session alongside the WakeGate path; wake
+    gating stays ON globally. Session-cap recovery: after a capped
+    session ends, a fresh tap summons a fresh session.
+  - *Reconnect/token lifecycle (per #7):* the device token is 10-year;
+    on ANY join rejection (revoked/expired/server restart/protocol
+    mismatch) the firmware backs off bounded (max ~5 min interval,
+    jitter), shows the **offline face** as a visible terminal state —
+    never an invisible retry-forever. Token re-provisioning is a
+    reflash (documented); acceptance checklist carries the parent
+    plan's flash/rollback/smoke-test procedure (backup verified,
+    clean-power-boot ritual, codec + display + join + audio checks).
+  - *End-to-end tests:* tap wake, wake-word wake, tap sleep/interrupt,
+    cap recovery, disconnect/reconnect (tier downgrade), no-global-
+    gating-bypass proof.
+- **M2b:** context packs + tier admission + `my_day` + `set_expression`
+  + audio-level lip-sync.
 - **M2c (art pass):** deha sprite atlas / sandhi transitions as the
   visual identity — or Lottie if we want motion-designer polish.
 
@@ -100,64 +125,93 @@ Principle from the cross-review, unchanged: **the open voice surface is
 untrusted** (anyone in earshot). "Full context" therefore lives in
 tiers, not in one bucket:
 
-### 2.1 The voice context pack (daily digest → session instructions)
+### 2.1 TWO context packs, not one (revised per cross-review #1)
 
-A curated, size-capped (~2-3KB) digest injected into the realtime
-session's instructions, rebuilt daily (or on demand):
+Tool tiers cannot protect data already sitting in the model's
+instructions — so the pack itself must be tiered, with **separate
+builders** chosen only *after* tier admission (2.2):
 
-- Narada identity essence (voice, values — the *being-Narada* part)
-- **Suti essentials** — curated from `people/suti.md`: who he is, how
-  he likes to be spoken to, current projects, ongoing threads
-- **Today's calendar** (see 2.3) + top open threads
-- Explicitly excluded: journal content, credentials, anything Suti
-  wouldn't say aloud in front of a guest.
+- **Shareable pack (every session):** built **by construction** from
+  the `voice-pack/` branch ONLY (same allowlist-by-construction
+  treatment as `memory.py`: that one resolved directory, nothing
+  else). Contents: Narada identity essence + whatever Narada has
+  deliberately written for any listener to know. Size-capped ~2KB.
+- **Personal pack (verified personal tier only):** shareable pack +
+  Suti essentials (curated into `voice-pack/personal/`, not read live
+  from `people/`) + today's calendar + top open threads.
+- Tests must prove the shareable builder *cannot* open calendar,
+  `people/`, threads, or any path outside `voice-pack/` — same
+  adversarial style as the memory-projection tests.
 
-**The provider caveat, stated honestly:** everything in the pack is
-sent to OpenAI with every session. The pack is therefore a *deliberate
-allowlist Suti approves once*, not a live pipe into smriti. Proposal:
-Narada maintains a dedicated smriti branch **`voice-pack/`** — memory
-*written specifically for the voice to know*. Curation at write time,
-not filtering at read time; auditable by reading one folder.
+**The provider caveat, stated honestly:** a pack is sent to OpenAI
+with the session. `voice-pack/` is a *deliberate allowlist Suti
+approves*, written by Narada specifically for the voice — curation at
+write time, auditable by reading one folder.
 
-### 2.2 Tap as authentication (the tier unlock)
+### 2.2 Tap as tier unlock — with the guest threat named
+(revised per cross-review #2, #3)
 
-A tap is physical presence in Suti's home — a real auth factor, and
-stronger than a wake word (which anyone/anything audible can fire).
+**What a tap actually proves: someone is physically at the device in
+Suti's home — NOT that it is Suti.** Guests, visitors, children,
+tradespeople can tap. The design accepts this with two mitigations,
+and Suti must ratify the residual risk explicitly:
 
-- **Tap-started session → personal tier:** calendar details, Suti-
-  specific recall (the `voice-pack/` + widened-but-curated projection),
-  "what's on today", reminders.
-- **Wake-word-started session → shareable tier only** (current scoped
-  projection; polite refusal + "tap the screen and ask me again" for
-  personal queries).
+- **The personal tier is narrowed to visitor-tolerable disclosure:**
+  today/tomorrow calendar *titles and times*, open-thread headlines,
+  Suti-curated personal notes (`voice-pack/personal/`). Rule of thumb:
+  nothing the wall calendar and a whiteboard wouldn't already tell a
+  guest standing in the room. No email content, no journal, no
+  credentials, no location history — those stay on authenticated
+  digital surfaces (chat).
+- **Optional strengthening (build if wanted later):** first personal
+  session of the day pings Suti's Telegram ("box unlocked personal
+  tier — that you?"); or a secret tap pattern.
+- **RESIDUAL RISK ACCEPTED (Suti, 2026-08-15):** anyone tapping the
+  box in the home can hear the narrowed personal tier above.
 
-This also satisfies the review's "authenticated confirmation channel"
-with hardware instead of ceremony. The session tier travels from
-firmware → worker in the join metadata (tap vs wake in the data
-channel handshake).
+**Tier-signal integrity (fail-closed admission protocol):**
+- The tier assertion is a **one-shot** data-channel message accepted
+  ONLY from participant identity `narada-box3` (verified), bound to
+  the current session (nonce issued by the worker at session start,
+  echoed in the assertion), immutable once set.
+- Missing, late, duplicate, or replayed assertions → **shareable**.
+- Disconnect/rejoin during the empty-room grace: the tier does NOT
+  survive — reconnect downgrades to shareable (and drops the personal
+  pack) until a fresh tap asserts again.
+- Adversarial tests: second participant sending assertions, forged
+  identity, replayed nonce, rapid disconnect/rejoin.
 
-### 2.3 Calendar (read) — voice-facing
+### 2.3 Calendar (read) — voice-facing (pinned per cross-review #6)
 
-- Read-only Google Calendar access (suti@fractal.co.nz — Workspace).
-  Several existing MCP servers / a direct API client with a scoped
-  OAuth token; pick at build time — this is a solved integration.
+- **Integration pinned:** direct Google Calendar API client (not an
+  MCP server — fewer moving parts in the worker), OAuth scope exactly
+  `calendar.readonly`, single calendar (suti@fractal.co.nz primary).
+- **Credential custody:** token in `~/.narada/.gcal-token.json`,
+  owner-only ACL (same treatment as the other secrets), documented
+  revocation (Google account → third-party access), rotation on
+  demand. Worker fails closed: no token → `my_day` returns "calendar
+  not connected", never an error loop.
+- **Cache:** memory-only, tier-keyed, ≤5 min TTL, bounded, cleared at
+  session end — cached personal-tier data can never serve a
+  shareable session.
 - New voice tool **`my_day`**: today + next 48h, titles/times only,
-  **personal tier only**. Cached a few minutes.
-- This is a deliberate disclosure decision: calendar titles will be
-  spoken aloud in the home and sent to the provider. Suti opts in
-  per this spec.
+  **personal tier only**. Disclosure accepted with the tier (2.2).
 
-### 2.4 Email — NOT on the open voice surface
+### 2.4 Email — NOT on the open voice surface (pinned per #6)
 
 Senders + contents are exactly the disclosure class the review flagged.
-- Email (read + draft) lands in the **prana tier**: the chat bridge
-  and authenticated surfaces, via an existing Gmail MCP server with
-  read + draft-only scopes (no send without Suti's click, no delete).
-- The most voice gets: unread count / "anything important this
-  morning?" summary — **tap tier only**, and only if Suti wants it
-  after living with the calendar tool.
-- The sandboxed escalate stays **tool-free** (its whole security story);
-  email questions from voice route to "I'll have that for you in chat".
+- Email lands in the **prana tier** (chat bridge / authenticated
+  surfaces) behind a **wrapper that exposes exactly two operations:
+  read and create-draft** — and rejects send/delete at the application
+  layer *regardless* of what the model asks or the connector could do.
+  (Note: Google's `gmail.compose` scope technically permits sending —
+  which is precisely why the wrapper, not the scope, is the boundary.
+  Scopes requested: `gmail.readonly` + `gmail.compose`; wrapper blocks
+  everything but read + draft.)
+- The most voice ever gets: a tap-tier "anything important" summary —
+  and only if Suti wants it after living with the calendar tool.
+- The sandboxed escalate stays **tool-free** (its whole security
+  story); email questions from voice route to "I'll have that in chat".
 
 ### 2.5 Where full context already works
 
@@ -178,13 +232,28 @@ private for the room is one message away.
 4. **M2b** emotion tool + lip-sync.
 5. Email in chat (prana tier), voice summary later if wanted.
 
-## Open questions for Suti
+## Cross-review (Codex, round 1 — 2026-08-15)
 
-1. Approve the **voice context pack** model (curated `voice-pack/`
-   branch, provider-visible, you review its contents)?
-2. Approve **tap = personal tier** (calendar & personal recall only on
-   tap-started sessions)?
-3. Face art direction for M2c: deha's bespoke sprite/sandhi identity,
-   or keep the clean procedural look?
-4. Calendar OAuth: do it with your Workspace admin hat on (one scoped
-   read-only credential), or personal-account OAuth flow?
+Seven findings, **all accepted**:
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | high | One context pack put calendar/personal data in EVERY session's instructions — tool tiers can't protect prompt contents; contradicted the shareable tier | Two packs, separate builders; shareable = `voice-pack/` by construction; personal assembled only after verified admission; adversarial builder tests (2.1) |
+| 2 | high | Tap authenticates *a person present*, not Suti — guests can tap | Personal tier narrowed to visitor-tolerable disclosure ("wall calendar rule"); optional Telegram ping/secret pattern; residual risk named for Suti's explicit ratification (2.2) |
+| 3 | high | Tier signal had no sender/session binding — spoofable, replayable, survives reconnect | Fail-closed admission protocol: one-shot, sender-verified (`narada-box3`), nonce-bound, immutable, downgrade-on-reconnect, default shareable + adversarial tests (2.2) |
+| 4 | high | M2a promised tap-to-listen with worker changes deferred — impossible without globally disabling wake gating | M2a now spans firmware AND worker: tap admission path beside WakeGate, gating stays on; cap-recovery + E2E tests (Phasing) |
+| 5 | med | Worker state messages could suppress the recording indicator the spec called firmware-owned | `mic_live` authoritative + not writable via data channel; persistent glyph overlays all live states; hints allowlisted/TTL'd, sleep-mimicking hints rejected (Protocol) |
+| 6 | med | Calendar/email choices deferred across a sensitive boundary; `gmail.compose` can send | Integrations pinned: direct gcal client, `calendar.readonly`, owner-only token file, memory-only tier-keyed cache; email wrapper exposing read+draft only, send/delete blocked at app layer (2.3, 2.4) |
+| 7 | med | "Infinite reconnect" had no token lifecycle or visible failure state | Bounded backoff + jitter, offline face as terminal state, token re-provisioning documented, parent flash/rollback checklist = M2a acceptance (Phasing) |
+
+## Decisions (Suti, 2026-08-15: "accept all recommendations")
+
+1. Voice context pack model — **accepted** (now the two-pack design).
+2. Tap = personal tier — **accepted**; the cross-review then named the
+   guest-at-device threat precisely, so the narrowed "wall calendar
+   rule" tier + residual-risk statement in 2.2 needs Suti's eyes ONCE
+   more (it's a sharper statement of what he already approved).
+3. Face art: procedural first, deha sprite/sandhi identity as M2c.
+4. Calendar: direct API client, `calendar.readonly`; admin-vs-personal
+   OAuth flow decided at build time (either works with the pinned
+   custody rules).
