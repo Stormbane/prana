@@ -153,6 +153,24 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.room.on("participant_disconnected", _on_participant_left)
 
+    # Nonce resync (cross-review): the device clears its nonce on
+    # disconnect; if it rejoins mid-cycle it would otherwise hold none
+    # and taps would be dead until the next cycle. Republish the
+    # current unconsumed nonce whenever the device (re)joins.
+    current_nonce = {"value": None}
+
+    def _on_participant_joined(participant, *_args) -> None:
+        if getattr(participant, "identity", None) != DEVICE_IDENTITY:
+            return
+        nonce = current_nonce["value"]
+        if nonce is not None and not state["in_session"]:
+            asyncio.ensure_future(_publish(
+                TOPIC_ADMISSION,
+                {"type": "admission_nonce", "nonce": nonce}))
+            logger.info("device rejoined — admission nonce republished")
+
+    ctx.room.on("participant_connected", _on_participant_joined)
+
     async def _publish(topic: str, obj: dict) -> None:
         try:
             await ctx.room.local_participant.publish_data(
@@ -226,15 +244,15 @@ async def entrypoint(ctx: JobContext) -> None:
             await _publish(TOPIC_SESSION,
                            {"type": "session", "open": True, "tier": tier})
             # End on whichever comes first: room closed, sleep tap, the
-            # cap — and for PERSONAL tier, the device dropping (the tier
-            # must not survive a reconnect, per spec §2.2).
+            # cap — or the DEVICE dropping (every tier: a rejoined
+            # device could otherwise show no REC glyph while a session
+            # stayed live, falsifying the honest indicator; and with the
+            # human's device gone there is no conversation anyway).
             waiters = {
                 "room-closed": asyncio.ensure_future(closed.wait()),
                 "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
+                "device-dropped": asyncio.ensure_future(box_dropped.wait()),
             }
-            if tier == TIER_PERSONAL:
-                waiters["device-dropped"] = asyncio.ensure_future(
-                    box_dropped.wait())
             done, pending = await asyncio.wait(
                 waiters.values(),
                 timeout=budget.session_cap_s,
@@ -271,15 +289,18 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     # ── The wake-watch loop (M2): watch → admit → session → repeat ───
+    track_q = make_track_channel(ctx)  # ONE handler for the whole job
     while not closed.is_set():
         tap_admit.clear()
         state["assertion"] = None
         nonce = admission.new_cycle()
+        current_nonce["value"] = nonce  # for rejoin republish
         await _publish(TOPIC_ADMISSION,
                        {"type": "admission_nonce", "nonce": nonce})
         logger.info("wake-watch: listening for wake word or tap")
 
-        wake_task = asyncio.ensure_future(_wait_for_wake(ctx, gate, closed))
+        wake_task = asyncio.ensure_future(
+            _wait_for_wake(ctx, gate, closed, track_q))
         tap_task = asyncio.ensure_future(tap_admit.wait())
         closed_task = asyncio.ensure_future(closed.wait())
         done, pending = await asyncio.wait(
@@ -288,7 +309,12 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         for t in pending:
             t.cancel()
+        # await the cancelled tasks so their cleanup (stream close,
+        # child-task teardown) actually runs — no orphan accumulation
+        await asyncio.gather(wake_task, tap_task, closed_task,
+                             return_exceptions=True)
         admission.invalidate()  # one admission decision per cycle
+        current_nonce["value"] = None
 
         if closed_task in done:
             break
@@ -314,17 +340,10 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.shutdown(reason="room closed — job ended")
 
 
-async def _wait_for_wake(
-    ctx: JobContext, gate: WakeGate, closed: "asyncio.Event"
-) -> bool:
-    """Stream the first participant's mic into the gate.
-
-    Returns True only on an affirmative detection; False when the room
-    closes first, no audio track ever arrives, or the stream ends —
-    the caller must NOT open a billed session on False.
-    """
-    import asyncio
-
+def make_track_channel(ctx: JobContext):
+    """Register the audio-track handler ONCE per job (registering it
+    per wake cycle leaked a handler every cycle — cross-review) and
+    return the channel wake cycles read from."""
     track_q: "agents.utils.aio.Chan[rtc.RemoteAudioTrack]" = agents.utils.aio.Chan()
 
     def _on_track(track: rtc.Track, *_args) -> None:
@@ -336,34 +355,54 @@ async def _wait_for_wake(
         for pub in participant.track_publications.values():
             if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
                 track_q.send_nowait(pub.track)
+    return track_q
+
+
+async def _wait_for_wake(
+    ctx: JobContext, gate: WakeGate, closed: "asyncio.Event", track_q
+) -> bool:
+    """Stream the device's mic into the gate.
+
+    Returns True only on an affirmative detection; False when the room
+    closes first, no audio track ever arrives, or the stream ends —
+    the caller must NOT open a billed session on False. All child
+    tasks are cleaned up even when this coroutine is cancelled (a tap
+    winning the admission race cancels it).
+    """
+    import asyncio
 
     recv_task = asyncio.ensure_future(track_q.recv())
     closed_task = asyncio.ensure_future(closed.wait())
-    done, _ = await asyncio.wait(
-        {recv_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
-    )
-    if closed_task in done:
-        recv_task.cancel()
-        return False
-    closed_task.cancel()
-    track = recv_task.result()
-    logger.info("wake gate armed — listening for 'Narada'")
-    detected = False
-    stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
     try:
-        async for event in stream:
-            samples = (
-                np.frombuffer(event.frame.data, dtype=np.int16)
-                .astype(np.float32) / 32768.0
-            )
-            if gate.feed(samples) is not None:
-                detected = True
-                break
+        done, _ = await asyncio.wait(
+            {recv_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if closed_task in done:
+            return False
+        track = recv_task.result()
+        logger.info("wake gate armed — listening for 'Narada'")
+        detected = False
+        stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+        try:
+            async for event in stream:
+                samples = (
+                    np.frombuffer(event.frame.data, dtype=np.int16)
+                    .astype(np.float32) / 32768.0
+                )
+                if gate.feed(samples) is not None:
+                    detected = True
+                    break
+        finally:
+            await stream.aclose()
+        if detected:
+            logger.info("wake detected — opening realtime session")
+        return detected
     finally:
-        await stream.aclose()
-    if detected:
-        logger.info("wake detected — opening realtime session")
-    return detected
+        for t in (recv_task, closed_task):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(recv_task, closed_task,
+                             return_exceptions=True)
 
 
 HEALTH_HOST = "127.0.0.1"
