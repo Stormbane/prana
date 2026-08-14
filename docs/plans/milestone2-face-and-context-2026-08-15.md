@@ -94,13 +94,26 @@ converged on, and it's *less* work than managing image assets.
 - **M2a — firmware AND worker together** (tap-to-listen doesn't exist
   without both; the current worker only admits via WakeGate or a
   global gating-off switch, and weakening that gate is not acceptable):
-  - *Firmware:* face engine + states + authoritative mic_live glyph;
-    tap-wake / tap-sleep; **connect-on-tap (no auto-join)**; reconnect
-    with bounded exponential backoff + jitter; volume fix.
-  - *Worker:* **tap admission path** — a verified tap assertion (2.2
-    protocol) admits a session alongside the WakeGate path; wake
-    gating stays ON globally. Session-cap recovery: after a capped
-    session ends, a fresh tap summons a fresh session.
+  - *Connection model (round-2 fix — connect-on-tap would starve the
+    worker-side wake detector of audio):* the box stays **connected to
+    the room and publishing mic audio continuously** — LAN-only, free,
+    consumed solely by the worker's local wake-watcher; nothing goes
+    to OpenAI and nothing is billed until admission. Two honest
+    display levels: **SLEEP face + small passive "ear" mark** (mic
+    monitored locally, on-LAN only) and **LIVE + recording glyph**
+    (session open, audio leaving the house). Tap during LIVE → back
+    to SLEEP (session closed). The glyph still cannot lie: it is
+    bound to session-open, and the ear mark is bound to
+    audio-published — both firmware-owned.
+  - *Firmware:* face engine + states + authoritative indicators as
+    above; tap-wake / tap-sleep; reconnect with bounded exponential
+    backoff + jitter; volume fix.
+  - *Worker:* one long-lived job per room that **loops**: wake-watch →
+    (wake detected OR verified tap assertion, per 2.2) → billed
+    session → session ends (tap/cap/silence) → back to wake-watch.
+    Wake gating stays ON globally; tap is an additional admission
+    signal, never a bypass of the gate design. Session-cap recovery
+    falls out of the loop for free.
   - *Reconnect/token lifecycle (per #7):* the device token is 10-year;
     on ANY join rejection (revoked/expired/server restart/protocol
     mismatch) the firmware backs off bounded (max ~5 min interval,
@@ -131,17 +144,21 @@ Tool tiers cannot protect data already sitting in the model's
 instructions — so the pack itself must be tiered, with **separate
 builders** chosen only *after* tier admission (2.2):
 
+- **DISJOINT roots (round-2 fix):** `voice-pack/shareable/` and
+  `voice-pack/personal/` — sibling directories, neither containing
+  the other.
 - **Shareable pack (every session):** built **by construction** from
-  the `voice-pack/` branch ONLY (same allowlist-by-construction
+  `voice-pack/shareable/` ONLY (same allowlist-by-construction
   treatment as `memory.py`: that one resolved directory, nothing
   else). Contents: Narada identity essence + whatever Narada has
   deliberately written for any listener to know. Size-capped ~2KB.
 - **Personal pack (verified personal tier only):** shareable pack +
-  Suti essentials (curated into `voice-pack/personal/`, not read live
+  `voice-pack/personal/` (Suti essentials, curated — never read live
   from `people/`) + today's calendar + top open threads.
-- Tests must prove the shareable builder *cannot* open calendar,
-  `people/`, threads, or any path outside `voice-pack/` — same
-  adversarial style as the memory-projection tests.
+- Tests must prove the shareable builder cannot open calendar,
+  `people/`, threads, or any path outside `voice-pack/shareable/` —
+  including a **sentinel test**: a canary file in
+  `voice-pack/personal/` must never appear in shareable output.
 
 **The provider caveat, stated honestly:** a pack is sent to OpenAI
 with the session. `voice-pack/` is a *deliberate allowlist Suti
@@ -245,6 +262,16 @@ Seven findings, **all accepted**:
 | 5 | med | Worker state messages could suppress the recording indicator the spec called firmware-owned | `mic_live` authoritative + not writable via data channel; persistent glyph overlays all live states; hints allowlisted/TTL'd, sleep-mimicking hints rejected (Protocol) |
 | 6 | med | Calendar/email choices deferred across a sensitive boundary; `gmail.compose` can send | Integrations pinned: direct gcal client, `calendar.readonly`, owner-only token file, memory-only tier-keyed cache; email wrapper exposing read+draft only, send/delete blocked at app layer (2.3, 2.4) |
 | 7 | med | "Infinite reconnect" had no token lifecycle or visible failure state | Bounded backoff + jitter, offline face as terminal state, token re-provisioning documented, parent flash/rollback checklist = M2a acceptance (Phasing) |
+
+**Round 2 (2026-08-15):** #2, #3, #5, #6, #7 verified RESOLVED. Two of
+the round-1 fixes were themselves flawed and are corrected above:
+#1 — `personal/` nested inside the shareable root → now disjoint
+`voice-pack/shareable/` vs `voice-pack/personal/` + sentinel test.
+#4 — connect-on-tap starved the worker-side wake detector of audio →
+box stays connected publishing LAN-only audio; the *billed session* is
+what wake/tap gates; two-level honest indicators (passive ear mark for
+local wake-watch, recording glyph for a live session); worker becomes a
+wake-watch → session → wake-watch loop. Spec is execution-ready.
 
 ## Decisions (Suti, 2026-08-15: "accept all recommendations")
 
