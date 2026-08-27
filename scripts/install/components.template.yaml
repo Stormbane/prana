@@ -92,9 +92,30 @@ components:
     restart_grace_s: 5.0
 
   # ─────────────────────────────────────────────────────────────────
+  # livekit — the media server, native Windows binary (NO Docker; the
+  # Docker Desktop path died of a broken WSL distro, 2026-08-27 —
+  # resilience-and-reach §A1). Binary + config live outside the repo:
+  # download livekit-server_windows_amd64 to ~/.narada/host/bin/ and
+  # write ~/.narada/host/livekit.yaml (keys, ports, node_ip — see the
+  # superseded config/livekit/docker-compose.yml for the values).
+  # Emergency manual start / rollback: scripts/livekit-up.ps1.
+  # ─────────────────────────────────────────────────────────────────
+  - name: livekit
+    description: "LiveKit media server - native binary (127.0.0.1:7880)"
+    enabled: false   # enable once binary + config are in place
+    command:
+      - ${HOME}\.narada\host\bin\livekit-server.exe
+      - --config
+      - ${HOME}\.narada\host\livekit.yaml
+    cwd: ${HOME}\.narada\host
+    env: {}
+    restart_grace_s: 5.0
+    health_url: http://127.0.0.1:7880/
+
+  # ─────────────────────────────────────────────────────────────────
   # voice — LiveKit Agents worker fronting gpt-realtime-2.1-mini.
   # Wake-gated ("Narada" model), cost-capped (per-session + daily).
-  # Requires: LiveKit server up (scripts/livekit-up.ps1), OPENAI_API_KEY
+  # Requires: the livekit component (above), OPENAI_API_KEY
   # in the env (API spend, not subscription — Suti's gate).
   # ─────────────────────────────────────────────────────────────────
   - name: voice
@@ -111,6 +132,9 @@ components:
     cwd: ${PRANA_ROOT}
     env: {}
     restart_grace_s: 10.0
+    # Boot ordering: don't spawn the worker until the media server
+    # answers — a cold boot otherwise burns the worker's retry budget.
+    wait_for_url: http://127.0.0.1:7880/
     # Liveness (cross-review #6): the agents worker serves /  on a fixed
     # port — 503 on a lost LiveKit connection, and an event-loop hang makes
     # the probe time out. Either way the supervisor restarts a worker that

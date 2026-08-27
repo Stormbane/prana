@@ -1,5 +1,12 @@
+# SUPERSEDED (2026-08-27): LiveKit now runs as a native Windows binary
+# supervised by the host orchestrator (~/.narada/host/bin/livekit-server.exe
+# + ~/.narada/host/livekit.yaml — same keys and ports as below). Docker
+# Desktop crash-looped on a broken Ubuntu WSL distro and took the server
+# down for days; see docs/plans/resilience-and-reach-2026-08-27.md §A1.
+# Kept as provenance for the config values only. Do not bring this up
+# alongside the native server — same ports.
+#
 # Self-hosted LiveKit server — LAN-only media hub for Narada's voice.
-# Bring up via scripts/livekit-up.ps1 (generates the key env file first).
 #
 # Clients: browser mic (phase 2 test), the voice worker (LiveKit Agents),
 # and eventually the BOX-3 running the LiveKit ESP32 SDK (phase 3).
