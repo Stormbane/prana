@@ -90,6 +90,41 @@ async def entrypoint(ctx: JobContext) -> None:
     closed = asyncio.Event()
     ctx.room.on("disconnected", lambda *_: closed.set())
 
+    # A stalled reconnect must ALSO end the job (zombie-agent lesson,
+    # round 2 — observed 2026-08-16: a machine-wide stall broke the
+    # publisher peer connection; the client sat in Reconnecting with the
+    # participant still registered, so the room watchdog saw "an agent"
+    # and could not recycle, and taps were dead until manual room
+    # deletion). If reconnect doesn't complete within the window, exit;
+    # the agent leaves and dispatch recovery is the watchdog's job.
+    RECONNECT_WINDOW_S = 90.0
+    reconnect_watch: dict = {"task": None}
+
+    def _on_reconnecting(*_args) -> None:
+        if (reconnect_watch["task"] is not None
+                and not reconnect_watch["task"].done()):
+            return
+
+        async def _stall_watch() -> None:
+            try:
+                await asyncio.sleep(RECONNECT_WINDOW_S)
+            except asyncio.CancelledError:
+                return
+            logger.error("reconnect stalled >%.0fs — ending job so the "
+                         "room can recycle", RECONNECT_WINDOW_S)
+            closed.set()
+
+        reconnect_watch["task"] = asyncio.create_task(_stall_watch())
+
+    def _on_reconnected(*_args) -> None:
+        if (reconnect_watch["task"] is not None
+                and not reconnect_watch["task"].done()):
+            reconnect_watch["task"].cancel()
+            logger.info("reconnected within window — job continues")
+
+    ctx.room.on("reconnecting", _on_reconnecting)
+    ctx.room.on("reconnected", _on_reconnected)
+
     # Room-empty is DEBOUNCED: the BOX-3 flaps 2-3 times while its WiFi
     # settles after boot (observed: stabilizes within ~15s). Hanging up
     # on the first flap strands the room agent-less once the box finally
@@ -423,10 +458,74 @@ async def _wait_for_wake(
 HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = int(os.environ.get("NARADA_VOICE_HEALTH_PORT", "8792"))
 
+DEVICE_ROOM = os.environ.get("NARADA_VOICE_ROOM", "narada-body")
+
+
+def _start_room_watchdog() -> None:
+    """Recycle an orphaned device room so dispatch always recovers.
+
+    Agents auto-dispatch on ROOM CREATION. If this worker restarts while
+    the box is still connected, the room predates the worker's
+    registration and no job is ever dispatched — the face looks alive
+    but taps go nowhere (hit live 2026-08-15 after moving the worker
+    under the host supervisor). Same orphan state arises if a job dies
+    while the device stays connected. Watch for it (device present, no
+    agent participant) on two consecutive checks, then delete the room:
+    the box's reconnect loop rejoins within seconds, the room is
+    recreated, and auto-dispatch fires.
+    """
+    import asyncio
+    import threading
+
+    from livekit import api as lkapi
+    from livekit.protocol import models
+
+    async def watch() -> None:
+        strikes = 0
+        while True:
+            await asyncio.sleep(20)
+            try:
+                lk = lkapi.LiveKitAPI()
+                try:
+                    rooms = await lk.room.list_rooms(
+                        lkapi.ListRoomsRequest(names=[DEVICE_ROOM]))
+                    orphaned = False
+                    for room in rooms.rooms:
+                        parts = await lk.room.list_participants(
+                            lkapi.ListParticipantsRequest(room=room.name))
+                        has_device = any(
+                            p.identity == DEVICE_IDENTITY
+                            for p in parts.participants)
+                        has_agent = any(
+                            p.kind == models.ParticipantInfo.Kind.AGENT
+                            for p in parts.participants)
+                        orphaned = has_device and not has_agent
+                    if orphaned:
+                        strikes += 1
+                        if strikes >= 2:
+                            logger.warning(
+                                "room %s orphaned (device present, no "
+                                "agent) — recycling for re-dispatch",
+                                DEVICE_ROOM)
+                            await lk.room.delete_room(
+                                lkapi.DeleteRoomRequest(room=DEVICE_ROOM))
+                            strikes = 0
+                    else:
+                        strikes = 0
+                finally:
+                    await lk.aclose()
+            except Exception as exc:  # watchdog must outlive any hiccup
+                logger.warning("room watchdog check failed: %s", exc)
+
+    threading.Thread(
+        target=lambda: asyncio.run(watch()),
+        daemon=True, name="room-watchdog").start()
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _check_env()
+    _start_room_watchdog()
     # Fixed health port so the host supervisor can probe liveness at a
     # known URL (cross-review #6). The agents worker's `/` returns 503 on
     # a lost LiveKit connection, and an event-loop hang makes the probe
