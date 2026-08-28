@@ -72,17 +72,28 @@ def send_to_suti(
     try:
         conn.executescript(SCHEMA_SQL)
         t = now()
-        n = conn.execute(
-            "SELECT COUNT(*) AS n FROM voice_outbound_log WHERE at > ?",
-            (t - 3600.0,)).fetchone()["n"]
-        if n >= MESSAGES_PER_HOUR:
-            raise RateLimited(
-                f"message limit reached ({MESSAGES_PER_HOUR}/hour)")
-        # Count the ATTEMPT before sending: a failing send must consume
-        # quota too, or failures become a hammering loophole.
-        conn.execute(
-            "INSERT INTO voice_outbound_log (at, session) VALUES (?, ?)",
-            (t, session_id[:40]))
+        # Atomic check-and-reserve (Codex review P2): BEGIN IMMEDIATE
+        # takes the write lock BEFORE the count, so two concurrent
+        # senders (parallel tool calls, the timer sweeper) cannot both
+        # observe n<cap and both insert. Attempts count, not successes.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM voice_outbound_log WHERE at > ?",
+                (t - 3600.0,)).fetchone()["n"]
+            if n >= MESSAGES_PER_HOUR:
+                raise RateLimited(
+                    f"message limit reached ({MESSAGES_PER_HOUR}/hour)")
+            conn.execute(
+                "INSERT INTO voice_outbound_log (at, session) VALUES (?, ?)",
+                (t, session_id[:40]))
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
     finally:
         conn.close()
 

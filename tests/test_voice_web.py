@@ -200,3 +200,10 @@ def test_search_backend_seam():
     out = web.search("x", backend=lambda q: [{"title": "t", "url": "u",
                                              "snippet": "s"}])
     assert out[0]["title"] == "t"
+
+
+def test_malformed_port_is_speakable_refusal():
+    for url in ("https://example.com:not-a-port/",
+                "http://example.com:99999/"):
+        with pytest.raises(WebRefused):
+            validate_url(url, resolver_for(PUBLIC))
