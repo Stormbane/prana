@@ -21,7 +21,7 @@ from livekit.agents import function_tool
 from prana.sessions import watcher
 from prana.sessions.escalate import ProposalError, ProposalQueue, judge_with_narada
 from prana.sessions.service import ServiceClient, ServiceUnavailable
-from prana.voice import memory, remember
+from prana.voice import memory, messaging, remember
 from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
@@ -151,6 +151,20 @@ def build_voice_tools(
             return {"saved": False, "reason": str(exc)}
 
     @function_tool()
+    async def message_suti(
+        text: Annotated[str, "the message, short and worth interrupting him for"],
+    ) -> dict:
+        """Send Suti a Telegram message. Personal tier only, rate
+        capped. Use for things he'd want to know while away — not
+        chatter. Report a failed delivery honestly."""
+        try:
+            return messaging.send_to_suti(
+                text, tier=tier, session_id=session_id)
+        except (messaging.NotAllowed, messaging.RateLimited,
+                ValueError) as exc:
+            return {"delivered": False, "detail": str(exc)}
+
+    @function_tool()
     async def escalate_to_narada(
         question: Annotated[str, "the question, quoted from what Suti asked"],
     ) -> dict:
@@ -161,7 +175,7 @@ def build_voice_tools(
         answer = await escalate(question)
         return {"answer": answer}
 
-    return [
+    tools = [
         list_coding_sessions,
         list_open_terminals,
         read_session_output,
@@ -170,3 +184,9 @@ def build_voice_tools(
         remember_this,
         escalate_to_narada,
     ]
+    # message_suti exists ONLY on the personal surface (B2): a
+    # shareable session does not carry the tool at all, and the
+    # messaging module re-checks the tier in code besides.
+    if tier == "personal":
+        tools.append(message_suti)
+    return tools
