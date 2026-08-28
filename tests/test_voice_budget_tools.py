@@ -90,6 +90,13 @@ VOICE_TOOL_NAMES = {
     # quarantine sentinel lives in test_voice_remember.py.
     "remember_this",
     "escalate_to_narada",
+    # B5 (ratified): music is shareable-tier — playing a station
+    # discloses nothing; the audio-owner state machine pauses it for
+    # every session and wake-word admission is off while it plays.
+    "play_music",
+    "stop_music",
+    "what_is_playing",
+    "set_music_volume",
 }
 FORBIDDEN_NAMES = {
     "spawn_session", "relay_instruction", "cancel_session",
