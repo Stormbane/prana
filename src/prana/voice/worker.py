@@ -457,8 +457,99 @@ async def _wait_for_wake(
 
 HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = int(os.environ.get("NARADA_VOICE_HEALTH_PORT", "8792"))
+# The agents framework's own HTTP server moves off the supervised port:
+# its `/` only reports 503 after max_retry is exhausted (at which point
+# the process exits anyway), so it served 200 through the entire week
+# LiveKit was down. The supervised port is owned by our shim below.
+AGENTS_PORT = int(os.environ.get("NARADA_VOICE_AGENTS_PORT", "8793"))
 
 DEVICE_ROOM = os.environ.get("NARADA_VOICE_ROOM", "narada-body")
+
+HEALTH_PROBE_TIMEOUT_S = 3.0
+
+
+async def _probe_agents() -> str | None:
+    """Is the agents framework's own server alive and content?
+    Returns None if healthy, else a short reason."""
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(
+                f"http://{HEALTH_HOST}:{AGENTS_PORT}/",
+                timeout=aiohttp.ClientTimeout(total=HEALTH_PROBE_TIMEOUT_S),
+            ) as resp:
+                if resp.status != 200:
+                    return f"agents server status {resp.status}"
+                return None
+    except Exception as exc:
+        return f"agents server unreachable: {type(exc).__name__}"
+
+
+async def _probe_livekit() -> str | None:
+    """Can we reach AND authenticate against the LiveKit server right
+    now? Exercises the real dependency (URL + key + secret), not just a
+    TCP port. Returns None if healthy, else a short reason."""
+    import asyncio
+
+    from livekit import api as lkapi
+
+    try:
+        lk = lkapi.LiveKitAPI()
+        try:
+            await asyncio.wait_for(
+                lk.room.list_rooms(lkapi.ListRoomsRequest(names=[DEVICE_ROOM])),
+                timeout=HEALTH_PROBE_TIMEOUT_S,
+            )
+            return None
+        finally:
+            await lk.aclose()
+    except Exception as exc:
+        return f"livekit unreachable: {type(exc).__name__}"
+
+
+async def _health_verdict(probes=None) -> tuple[int, str]:
+    """Compose probe results into (status, body). 200 only when every
+    probe passes; 503 names what failed. `probes` is injectable for
+    tests."""
+    import asyncio
+
+    probes = probes if probes is not None else (_probe_agents, _probe_livekit)
+    results = await asyncio.gather(*(p() for p in probes))
+    failures = [r for r in results if r is not None]
+    if failures:
+        return 503, "; ".join(failures)
+    return 200, "OK"
+
+
+def _start_health_shim() -> None:
+    """Serve the honest health probe on the supervised port (A2,
+    resilience-and-reach). The supervisor (and tomorrow the alerting
+    layer) probes this; it must reflect the worker's real ability to do
+    its job — its own server AND an authenticated LiveKit round-trip."""
+    import asyncio
+    import threading
+
+    from aiohttp import web
+
+    async def handler(_request) -> web.Response:
+        status, body = await _health_verdict()
+        return web.Response(status=status, text=body)
+
+    async def serve() -> None:
+        app = web.Application()
+        app.add_routes([web.get("/", handler)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, HEALTH_HOST, HEALTH_PORT)
+        await site.start()
+        logger.info("health shim on %s:%d (agents on %d)",
+                    HEALTH_HOST, HEALTH_PORT, AGENTS_PORT)
+        await asyncio.Event().wait()
+
+    threading.Thread(
+        target=lambda: asyncio.run(serve()),
+        daemon=True, name="health-shim").start()
 
 
 def _start_room_watchdog() -> None:
@@ -526,14 +617,16 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _check_env()
     _start_room_watchdog()
-    # Fixed health port so the host supervisor can probe liveness at a
-    # known URL (cross-review #6). The agents worker's `/` returns 503 on
-    # a lost LiveKit connection, and an event-loop hang makes the probe
-    # time out — either way the supervisor restarts it.
+    # Honest health (A2): the supervisor probes OUR shim on HEALTH_PORT —
+    # 200 only when the agents server answers AND an authenticated
+    # LiveKit round-trip succeeds. The framework's own server (moved to
+    # AGENTS_PORT) says 200 during its entire retry loop, which is how a
+    # dead LiveKit hid behind a green probe for a week.
+    _start_health_shim()
     agents.cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
         host=HEALTH_HOST,
-        port=HEALTH_PORT,
+        port=AGENTS_PORT,
     ))
 
 
