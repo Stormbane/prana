@@ -79,6 +79,13 @@ async def entrypoint(ctx: JobContext) -> None:
     budget = VoiceBudget()
     await ctx.connect()
 
+    # B5: one music player per job — the audio-owner state machine.
+    # A fresh job always starts IDLE: music never auto-resumes across
+    # a crash/restart (no surprise audio in the house).
+    from prana.voice.music import MusicPlayer, write_default_stations
+    write_default_stations()
+    player = MusicPlayer(ctx.room)
+
     def bail(reason: str) -> None:
         """Refuse a session AND leave the room — a bare return leaves a
         zombie participant holding the room open, blocking re-dispatch."""
@@ -287,7 +294,8 @@ async def entrypoint(ctx: JobContext) -> None:
             transcript = attach(session, ctx.room.name)
             agent = Agent(instructions=INSTRUCTIONS,
                           tools=build_voice_tools(
-                              tier=tier, session_id=ctx.job.id))
+                              tier=tier, session_id=ctx.job.id,
+                              music=player))
             await session.start(agent=agent, room=ctx.room)
             logger.info("realtime session open (model=%s, tier=%s)",
                         REALTIME_MODEL, tier)
@@ -364,22 +372,30 @@ async def entrypoint(ctx: JobContext) -> None:
         current_nonce["value"] = nonce  # for rejoin republish
         await _publish(TOPIC_ADMISSION,
                        {"type": "admission_nonce", "nonce": nonce})
-        logger.info("wake-watch: listening for wake word or tap")
 
-        wake_task = asyncio.ensure_future(
+        # B5 fail-safe gate: while music plays, wake-word admission is
+        # OFF (lyrics must not open billed sessions — the numeric
+        # false-accept soak hasn't passed yet). Tap always admits: it's
+        # a data-channel signal, not audio.
+        wake_enabled = not player.is_playing
+        logger.info("wake-watch: listening for %s",
+                    "wake word or tap" if wake_enabled
+                    else "tap (music playing — wake word off)")
+
+        wake_task = (asyncio.ensure_future(
             _wait_for_wake(ctx, gate, closed, track_q))
+            if wake_enabled else None)
         tap_task = asyncio.ensure_future(tap_admit.wait())
         closed_task = asyncio.ensure_future(closed.wait())
+        waitset = {t for t in (wake_task, tap_task, closed_task) if t}
         done, pending = await asyncio.wait(
-            {wake_task, tap_task, closed_task},
-            return_when=asyncio.FIRST_COMPLETED,
+            waitset, return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
             t.cancel()
         # await the cancelled tasks so their cleanup (stream close,
         # child-task teardown) actually runs — no orphan accumulation
-        await asyncio.gather(wake_task, tap_task, closed_task,
-                             return_exceptions=True)
+        await asyncio.gather(*waitset, return_exceptions=True)
         admission.invalidate()  # one admission decision per cycle
         current_nonce["value"] = None
 
@@ -388,8 +404,8 @@ async def entrypoint(ctx: JobContext) -> None:
         if tap_task in done and state["assertion"] is not None:
             tier = state["assertion"].tier
             logger.info("admitted by tap (tier=%s)", tier)
-        elif wake_task in done and not wake_task.cancelled() \
-                and wake_task.result():
+        elif wake_task is not None and wake_task in done \
+                and not wake_task.cancelled() and wake_task.result():
             tier = TIER_SHAREABLE
             logger.info("admitted by wake word")
         else:
@@ -398,7 +414,14 @@ async def entrypoint(ctx: JobContext) -> None:
             await asyncio.sleep(1.0)
             continue
 
-        end_reason = await _run_session(tier)
+        # The session owns the audio: full music stop before, resume
+        # after (B5 audio-owner state machine — never two tracks, never
+        # music into a live mic).
+        await player.pause_for_session()
+        try:
+            end_reason = await _run_session(tier)
+        finally:
+            await player.resume_after_session()
         if end_reason in ("budget-refused",):
             # fail-closed but not silently: stay in wake-watch, a later
             # cycle may succeed (e.g. next day’s budget)

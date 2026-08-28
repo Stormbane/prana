@@ -32,11 +32,13 @@ def build_voice_tools(
     proposals: Optional[ProposalQueue] = None,
     tier: str = "shareable",
     session_id: str = "",
+    music=None,
 ) -> list:
     """Build the closed voice-tier tool list for an AgentSession.
 
     `tier` and `session_id` come from the worker's admission state and
-    are stamped onto anything the session writes."""
+    are stamped onto anything the session writes. `music` is the job's
+    MusicPlayer (audio-owner state machine) or None."""
     client = client or ServiceClient()
     proposals = proposals or ProposalQueue()
 
@@ -175,6 +177,42 @@ def build_voice_tools(
         answer = await escalate(question)
         return {"answer": answer}
 
+    @function_tool()
+    async def play_music(
+        station: Annotated[str, "station name, or part of one"],
+    ) -> dict:
+        """Play a radio station on the body's speaker. During a
+        conversation it queues and starts when you finish talking —
+        say so. Music pauses whenever a conversation starts."""
+        if music is None:
+            return {"playing": False, "reason": "no player in this mode"}
+        return await music.play(station)
+
+    @function_tool()
+    async def stop_music() -> dict:
+        """Stop the music."""
+        if music is None:
+            return {"stopped": False, "reason": "no player in this mode"}
+        return await music.stop()
+
+    @function_tool()
+    async def what_is_playing() -> dict:
+        """What's playing (or queued), volume, and any stream error."""
+        if music is None:
+            return {"state": "unavailable"}
+        return music.now_playing()
+
+    @function_tool()
+    async def set_music_volume(
+        percent: Annotated[int, "0-100"],
+    ) -> dict:
+        """Set music volume."""
+        if music is None:
+            return {"volume": None, "reason": "no player in this mode"}
+        return music.set_volume(percent)
+
+    # Music is shareable-tier by ratified decision (guest-tolerable by
+    # the wall-calendar rule) — playing a station discloses nothing.
     tools = [
         list_coding_sessions,
         list_open_terminals,
@@ -183,6 +221,10 @@ def build_voice_tools(
         recall_memory,
         remember_this,
         escalate_to_narada,
+        play_music,
+        stop_music,
+        what_is_playing,
+        set_music_volume,
     ]
     @function_tool()
     async def set_timer(
