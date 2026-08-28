@@ -118,8 +118,19 @@ def run_claude(prompt: str) -> str:
     # bypass: this process consumes untrusted room-audio content.
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    # Tools are denied AT THE CLI BOUNDARY (recheck P1): without this,
+    # settings-preauthorized allowlists would still work even though we
+    # dropped the permission bypass — and the prompt carries open-mic
+    # content. The prompt's "use no tools" line is UX; this flag is the
+    # boundary.
+    denied = ",".join([
+        "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Read",
+        "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Agent",
+        "TodoWrite", "Skill", "SlashCommand", "KillShell", "BashOutput",
+        "mcp__*",
+    ])
     proc = subprocess.run(
-        ["claude", "-p", prompt],
+        ["claude", "-p", prompt, "--disallowedTools", denied],
         capture_output=True, text=True, encoding="utf-8",
         timeout=CLAUDE_TIMEOUT_S, env=env, shell=(os.name == "nt"),
     )
@@ -131,10 +142,25 @@ def run_claude(prompt: str) -> str:
 
 def apply_verdicts(raw: str, inbox_files: list[Path]) -> str:
     """Stage 2: dumb parsing, strict validation, our privilege."""
+    # An intact, ORDERED structure is required before anything mutates
+    # (recheck P2): a malformed/injected reply without proper markers
+    # must not have its stray verdict-shaped lines applied.
+    iv = raw.find("<<<VERDICTS>>>")
+    id_ = raw.find("<<<DEBRIEF>>>")
+    ie = raw.find("<<<END>>>")
+    if not (0 <= iv < id_ < ie):
+        return "(inbox: verdicts skipped — reply unstructured)"
+    section = raw[iv + len("<<<VERDICTS>>>"):id_]
     known = {f.name: f for f in inbox_files}
-    section = raw.split("<<<VERDICTS>>>", 1)[-1].split("<<<DEBRIEF>>>", 1)[0]
+    seen: set[str] = set()
     promoted = dismissed = refused = 0
     for action, name, branch in _VERDICT.findall(section):
+        # First verdict per file wins; duplicates/conflicts refuse
+        # (recheck P2: repeated promote lines duplicated entries).
+        if name in seen:
+            refused += 1
+            continue
+        seen.add(name)
         f = known.get(name)
         if f is None or not _INBOX_NAME.match(name):
             refused += 1
@@ -150,7 +176,7 @@ def apply_verdicts(raw: str, inbox_files: list[Path]) -> str:
                 from smriti.store.writer import write_entry
                 write_entry(body, branch=branch,
                             title="promoted from voice inbox",
-                            source="daily-debrief")
+                            source_hint="daily-debrief")
                 new_status = "promoted"
                 promoted += 1
             else:
