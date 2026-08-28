@@ -21,7 +21,7 @@ from livekit.agents import function_tool
 from prana.sessions import watcher
 from prana.sessions.escalate import ProposalError, ProposalQueue, judge_with_narada
 from prana.sessions.service import ServiceClient, ServiceUnavailable
-from prana.voice import memory, messaging, remember
+from prana.voice import memory, messaging, remember, timers
 from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
@@ -184,9 +184,55 @@ def build_voice_tools(
         remember_this,
         escalate_to_narada,
     ]
-    # message_suti exists ONLY on the personal surface (B2): a
-    # shareable session does not carry the tool at all, and the
-    # messaging module re-checks the tier in code besides.
+    @function_tool()
+    async def set_timer(
+        minutes: Annotated[float, "how long from now, in minutes"],
+        label: Annotated[str, "what it's for, a few words"],
+    ) -> dict:
+        """Set a timer. It reaches Suti's Telegram when it fires."""
+        try:
+            r = timers.create(label, minutes * 60.0, kind="timer",
+                              tier=tier, session_id=session_id)
+            return {"set": True, "id": r["id"]}
+        except timers.TimerError as exc:
+            return {"set": False, "reason": str(exc)}
+
+    @function_tool()
+    async def set_reminder(
+        hours: Annotated[float, "how long from now, in hours"],
+        text: Annotated[str, "what to remind Suti about"],
+    ) -> dict:
+        """Set a reminder (up to 14 days out). Delivered to Suti's
+        Telegram when due."""
+        try:
+            r = timers.create(text, hours * 3600.0, kind="reminder",
+                              tier=tier, session_id=session_id)
+            return {"set": True, "id": r["id"]}
+        except timers.TimerError as exc:
+            return {"set": False, "reason": str(exc)}
+
+    @function_tool()
+    async def list_timers() -> list[dict]:
+        """List pending timers and reminders."""
+        return timers.list_pending()
+
+    @function_tool()
+    async def cancel_timer(
+        timer_id: Annotated[int, "id from list_timers"],
+    ) -> dict:
+        """Cancel a pending timer or reminder."""
+        try:
+            ok = timers.cancel(timer_id, tier=tier)
+            return {"cancelled": ok}
+        except timers.TimerError as exc:
+            return {"cancelled": False, "reason": str(exc)}
+
+    # message_suti and the timer tools exist ONLY on the personal
+    # surface (B2/C1): a shareable session does not carry them, and the
+    # underlying modules re-check the tier in code besides. Timers open
+    # to the shareable tier (local-only chime, no Telegram) once B5's
+    # audio owner gives the body a local announcement channel.
     if tier == "personal":
-        tools.append(message_suti)
+        tools.extend([message_suti, set_timer, set_reminder,
+                      list_timers, cancel_timer])
     return tools

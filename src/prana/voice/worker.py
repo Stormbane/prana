@@ -630,10 +630,36 @@ def _start_room_watchdog() -> None:
         daemon=True, name="room-watchdog").start()
 
 
+def _start_timer_sweeper() -> None:
+    """Fire due timers/reminders (C1). Runs beside the job lifecycle so
+    a recycling room never pauses the clock. Local (body) announcement
+    arrives with B5's audio owner; until then delivery is the personal
+    Telegram path through B2's capped door."""
+    import threading
+    import time as _time
+
+    from prana.voice import messaging, timers
+
+    def sweep_loop() -> None:
+        while True:
+            _time.sleep(2.0)
+            try:
+                timers.sweep_due(
+                    send_personal=lambda text: messaging.send_to_suti(
+                        text, tier="personal", session_id="timer-sweep"),
+                )
+            except Exception as exc:  # the clock must outlive hiccups
+                logger.warning("timer sweep failed: %s", exc)
+
+    threading.Thread(target=sweep_loop, daemon=True,
+                     name="timer-sweeper").start()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _check_env()
     _start_room_watchdog()
+    _start_timer_sweeper()
     # Honest health (A2): the supervisor probes OUR shim on HEALTH_PORT —
     # 200 only when the agents server answers AND an authenticated
     # LiveKit round-trip succeeds. The framework's own server (moved to
