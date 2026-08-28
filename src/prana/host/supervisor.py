@@ -83,7 +83,8 @@ class ComponentState:
 class ComponentRunner:
     """Per-component lifecycle: spawn → log → wait-exit → restart loop."""
 
-    def __init__(self, component: Component, job: Optional[JobObject] = None):
+    def __init__(self, component: Component, job: Optional[JobObject] = None,
+                 alerts=None):
         self.component = component
         self.state = ComponentState(component=component)
         self.logger = component_logger(component.name)
@@ -93,6 +94,9 @@ class ComponentRunner:
         # is killed without a graceful shutdown (Stop-ScheduledTask), so
         # component processes are never orphaned.
         self._job = job
+        # A3: lifecycle transitions feed the durable alert state machine.
+        # Optional so tests and one-off runners need no database.
+        self._alerts = alerts
 
     async def run(self) -> None:
         """Restart loop. Returns when supervisor signals shutdown."""
@@ -147,6 +151,8 @@ class ComponentRunner:
             RATE_LIMIT_WINDOW_S,
             RATE_LIMIT_COOLDOWN_S,
         )
+        if self._alerts:
+            self._alerts.record_cooldown(self.component.name)
 
     async def _wait_for_dependency(self) -> bool:
         """If component declares wait_for_url, poll until reachable.
@@ -200,6 +206,8 @@ class ComponentRunner:
             ok = await asyncio.to_thread(self._http_probe, url)
             self.state.last_health_at = time.time()
             self.state.last_health_ok = ok
+            if self._alerts:
+                self._alerts.record_health(self.component.name, ok)
             if ok:
                 if self.state.health_consecutive_failures:
                     self.logger.info("health recovered")
@@ -217,6 +225,9 @@ class ComponentRunner:
                         "%d consecutive health failures — terminating for restart",
                         HEALTH_FAILURES_TO_RESTART,
                     )
+                    if self._alerts:
+                        self._alerts.record_health_fail_termination(
+                            self.component.name)
                     await self._terminate()
                     return
 
@@ -256,6 +267,9 @@ class ComponentRunner:
                 self.logger.warning("could not assign pid to host job — "
                                     "process may orphan on ungraceful exit")
         self.logger.info("spawned pid=%d", self._proc.pid)
+        if self._alerts:
+            self._alerts.record_spawned(
+                c.name, has_health_probe=bool(c.health_url))
 
         # Start pipe pumps — these run until the process closes its streams
         pump_out = asyncio.create_task(
@@ -288,6 +302,8 @@ class ComponentRunner:
         self.state.restart_count += 1
         level = logging.INFO if rc == 0 else logging.WARNING
         self.logger.log(level, "exited rc=%d (restart_count=%d)", rc, self.state.restart_count)
+        if self._alerts:
+            self._alerts.record_exit(self.component.name, rc)
 
     async def _pump(self, stream: Optional[asyncio.StreamReader], *, level: int, tag: str) -> None:
         """Forward child stream to the component logger line-by-line."""
@@ -306,6 +322,10 @@ class ComponentRunner:
             text = line.decode("utf-8", errors="replace").rstrip()
             if text:
                 self.logger.log(level, "%s: %s", tag, text)
+                # Keep a bounded, redacted last-stderr-line for alert
+                # context (the alert says WHAT was dying, from a phone).
+                if tag == "err" and self._alerts:
+                    self._alerts.note_diagnostic(self.component.name, text)
 
     async def _terminate(self) -> None:
         """SIGTERM then SIGKILL after grace."""
@@ -335,14 +355,27 @@ class ComponentRunner:
 class Supervisor:
     """Orchestrates ComponentRunners. One asyncio task per component."""
 
-    def __init__(self, components: list[Component]):
+    def __init__(self, components: list[Component], alerts=None):
         self.components = components
         # One kill-on-close job for the whole host: every component the
         # host spawns is assigned to it, so all children die when the
         # host process dies — however it dies. Held for the host's life.
         self._job = JobObject()
+        # A3: durable alerting. Default-on for the real host; a failure
+        # to initialize must not stop supervision (alerting is a shadow
+        # of the system, never a dependency of it).
+        if alerts is None:
+            try:
+                from prana.host.alerts import AlertManager
+                alerts = AlertManager()
+            except Exception:
+                logging.getLogger("prana.host.supervisor").exception(
+                    "alert manager failed to initialize — running unalerted")
+                alerts = None
+        self.alerts = alerts
         self.runners: dict[str, ComponentRunner] = {
-            c.name: ComponentRunner(c, job=self._job) for c in components
+            c.name: ComponentRunner(c, job=self._job, alerts=alerts)
+            for c in components
         }
         self._tasks: dict[str, asyncio.Task] = {}
         self._shutdown_event = asyncio.Event()
@@ -356,6 +389,10 @@ class Supervisor:
 
         for name, runner in self.runners.items():
             self._tasks[name] = asyncio.create_task(runner.run(), name=f"runner:{name}")
+
+        if self.alerts is not None:
+            self._tasks["__alerts__"] = asyncio.create_task(
+                self.alerts.run(self._shutdown_event), name="alerts-sweep")
 
         self._logger.info("supervisor up — %d component(s)", len(self.runners))
 
