@@ -85,6 +85,10 @@ VOICE_TOOL_NAMES = {
     "read_session_output",
     "request_session_action",
     "recall_memory",
+    # B1 (resilience-and-reach, ratified 2026-08-28): writes ONLY to
+    # the quarantined inbox/voice — never to a recallable branch. The
+    # quarantine sentinel lives in test_voice_remember.py.
+    "remember_this",
     "escalate_to_narada",
 }
 FORBIDDEN_NAMES = {
@@ -92,6 +96,8 @@ FORBIDDEN_NAMES = {
     "decide_proposal", "resume_foreign_session",
     # memory recall must be the voice-safe projection, never raw smriti
     "smriti_read",
+    # memory WRITES must be the quarantined inbox path, never raw smriti
+    "smriti_write",
 }
 
 

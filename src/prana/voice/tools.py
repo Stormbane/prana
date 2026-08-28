@@ -21,7 +21,7 @@ from livekit.agents import function_tool
 from prana.sessions import watcher
 from prana.sessions.escalate import ProposalError, ProposalQueue, judge_with_narada
 from prana.sessions.service import ServiceClient, ServiceUnavailable
-from prana.voice import memory
+from prana.voice import memory, remember
 from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,13 @@ logger = logging.getLogger(__name__)
 def build_voice_tools(
     client: Optional[ServiceClient] = None,
     proposals: Optional[ProposalQueue] = None,
+    tier: str = "shareable",
+    session_id: str = "",
 ) -> list:
-    """Build the closed voice-tier tool list for an AgentSession."""
+    """Build the closed voice-tier tool list for an AgentSession.
+
+    `tier` and `session_id` come from the worker's admission state and
+    are stamped onto anything the session writes."""
     client = client or ServiceClient()
     proposals = proposals or ProposalQueue()
 
@@ -129,6 +134,23 @@ def build_voice_tools(
         ]
 
     @function_tool()
+    async def remember_this(
+        note: Annotated[str, "the thing worth keeping, one or two sentences"],
+    ) -> dict:
+        """Save a note to Narada's memory inbox. Use when Suti says
+        'remember that' or something is clearly worth keeping. Say aloud
+        that you noted it. Notes go to a review inbox — Narada curates
+        them into memory later, so don't promise it's remembered
+        forever, just that it's written down."""
+        try:
+            remember.write_note(note, tier=tier, session_id=session_id)
+            return {"saved": True}
+        except remember.QuotaExceeded as exc:
+            return {"saved": False, "reason": str(exc)}
+        except ValueError as exc:
+            return {"saved": False, "reason": str(exc)}
+
+    @function_tool()
     async def escalate_to_narada(
         question: Annotated[str, "the question, quoted from what Suti asked"],
     ) -> dict:
@@ -145,5 +167,6 @@ def build_voice_tools(
         read_session_output,
         request_session_action,
         recall_memory,
+        remember_this,
         escalate_to_narada,
     ]
