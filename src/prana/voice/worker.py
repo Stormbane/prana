@@ -237,13 +237,26 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.on("participant_connected", _on_participant_joined)
 
     async def _publish(topic: str, obj: dict) -> None:
+        # HARD TIMEOUT (field incident 2026-08-28 15:14): this is a
+        # reliable, targeted send, and with the device's data channel
+        # mid-resubscribe the await can simply never resolve. It sat
+        # between "session open" and the waiters, so one wedged publish
+        # held a billed session open for 40+ minutes with no cap and no
+        # audio. Protocol messages are best-effort by design — the
+        # rejoin resync re-converges state — so a publish may fail,
+        # loudly, but it may never own a session's fate.
         try:
-            await ctx.room.local_participant.publish_data(
-                json.dumps(obj), topic=topic,
-                destination_identities=[DEVICE_IDENTITY],
+            await asyncio.wait_for(
+                ctx.room.local_participant.publish_data(
+                    json.dumps(obj), topic=topic,
+                    destination_identities=[DEVICE_IDENTITY],
+                ),
+                timeout=5.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("publish %s timed out — continuing", topic)
         except Exception as exc:
-            logger.debug("publish %s failed: %s", topic, exc)
+            logger.warning("publish %s failed: %s", topic, exc)
 
     # Wake gating: watch LAN audio locally; the billed realtime session
     # opens only after "Narada" OR a verified tap. FAIL CLOSED on a
