@@ -21,7 +21,7 @@ from livekit.agents import function_tool
 from prana.sessions import watcher
 from prana.sessions.escalate import ProposalError, ProposalQueue, judge_with_narada
 from prana.sessions.service import ServiceClient, ServiceUnavailable
-from prana.voice import memory, messaging, remember, timers
+from prana.voice import memory, messaging, remember, timers, web
 from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
@@ -211,8 +211,33 @@ def build_voice_tools(
             return {"volume": None, "reason": "no player in this mode"}
         return music.set_volume(percent)
 
-    # Music is shareable-tier by ratified decision (guest-tolerable by
-    # the wall-calendar rule) — playing a station discloses nothing.
+    @function_tool()
+    async def web_search(
+        query: Annotated[str, "what to look up, a few words"],
+    ) -> list[dict]:
+        """Search the web. Returns a few titled results with snippets.
+        If search isn't available, say so plainly."""
+        import asyncio as _aio
+        try:
+            return await _aio.to_thread(web.search, query)
+        except (web.WebUnavailable, web.WebRefused) as exc:
+            return [{"error": str(exc)}]
+
+    @function_tool()
+    async def read_page(
+        url: Annotated[str, "a result url from web_search"],
+    ) -> dict:
+        """Read a public web page (text only, truncated). Local and
+        private addresses are refused by design."""
+        import asyncio as _aio
+        try:
+            text = await _aio.to_thread(web.fetch, url)
+            return {"text": text}
+        except (web.WebUnavailable, web.WebRefused) as exc:
+            return {"error": str(exc)}
+
+    # Music and web are shareable-tier by ratified decision
+    # (guest-tolerable by the wall-calendar rule).
     tools = [
         list_coding_sessions,
         list_open_terminals,
@@ -225,6 +250,8 @@ def build_voice_tools(
         stop_music,
         what_is_playing,
         set_music_volume,
+        web_search,
+        read_page,
     ]
     @function_tool()
     async def set_timer(

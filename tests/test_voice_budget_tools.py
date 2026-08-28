@@ -97,6 +97,11 @@ VOICE_TOOL_NAMES = {
     "stop_music",
     "what_is_playing",
     "set_music_volume",
+    # B4 (ratified): reads of the public web, SSRF-contracted in
+    # web.py (validated resolution, pinned connections, per-hop
+    # redirect checks). Adversarial matrix in test_voice_web.py.
+    "web_search",
+    "read_page",
 }
 FORBIDDEN_NAMES = {
     "spawn_session", "relay_instruction", "cancel_session",
