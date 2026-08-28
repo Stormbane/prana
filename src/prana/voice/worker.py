@@ -286,7 +286,8 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             transcript = attach(session, ctx.room.name)
             agent = Agent(instructions=INSTRUCTIONS,
-                          tools=build_voice_tools())
+                          tools=build_voice_tools(
+                              tier=tier, session_id=ctx.job.id))
             await session.start(agent=agent, room=ctx.room)
             logger.info("realtime session open (model=%s, tier=%s)",
                         REALTIME_MODEL, tier)
@@ -319,6 +320,22 @@ async def entrypoint(ctx: JobContext) -> None:
             state["in_session"] = False
             if transcript is not None:
                 transcript.close(reason)
+                # B1: personal-tier sessions leave a digest in the
+                # quarantined voice inbox (redaction already applied at
+                # transcript-write time; the daily debrief compresses
+                # and promotes from there). Shareable sessions do not
+                # get to author Narada's memory of the day.
+                if tier == TIER_PERSONAL:
+                    try:
+                        from prana.voice import remember
+                        text = transcript.path.read_text(encoding="utf-8")
+                        body = text.split("\n\n", 2)[-1].strip()
+                        # Skip trivial exchanges (a tap + "never mind").
+                        if body.count("\n") >= 4:
+                            remember.write_session_summary(
+                                body, tier=tier, session_id=ctx.job.id)
+                    except Exception as exc:
+                        logger.warning("session digest failed: %s", exc)
             if session is not None:
                 try:
                     await session.aclose()
