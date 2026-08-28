@@ -202,3 +202,31 @@ def test_diagnostics_redacted_and_bounded(db):
     assert "sk-abcdefghijklmnop1234" not in msg
     assert "[REDACTED]" in msg
     assert len(msg) < 600
+
+
+def test_probed_spawn_clears_stale_healthy_since(db):
+    """Review P2: after a host outage, a stale healthy_since must not
+    age past the recovery threshold and close an episode before the new
+    process passes a single probe."""
+    clock, sender = Clock(), Sender()
+    mgr = make(db, clock, sender)
+    mgr.record_cooldown("livekit")
+    mgr.record_health("livekit", ok=True)   # brief recovery begins
+    pump(mgr)
+    assert len(sender.sent) == 1            # the episode alert
+
+    # Host dies; downtime exceeds the recovery window; host restarts
+    # and respawns the component — which has NOT passed a probe yet.
+    del mgr
+    clock.advance(RECOVERY_HEALTHY_S + 120)
+    sender2 = Sender()
+    mgr2 = make(db, clock, sender2)
+    mgr2.record_spawned("livekit", has_health_probe=True)
+    pump(mgr2)
+    assert sender2.sent == []               # no premature recovery
+
+    # Only a real probe success starts the recovery clock.
+    mgr2.record_health("livekit", ok=True)
+    clock.advance(RECOVERY_HEALTHY_S + 1)
+    pump(mgr2)
+    assert len(sender2.sent) == 1 and "recovered" in sender2.sent[0]

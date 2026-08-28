@@ -92,7 +92,12 @@ def validate_url(
     host = parts.hostname
     if not host:
         raise WebRefused("no host")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        # ':not-a-port' / out-of-range — a speakable refusal, not an
+        # escaping exception (Codex review P2).
+        raise WebRefused("bad port in url") from None
     if port not in ALLOWED_PORTS:
         raise WebRefused(f"port {port} is refused")
 

@@ -201,9 +201,18 @@ class AlertManager:
     def record_spawned(self, component: str, has_health_probe: bool) -> None:
         # A component with no probe has only liveness to go on: a spawn
         # is tentatively healthy (an early exit will clear it). A probed
-        # component is healthy only when its probe says so.
+        # component is healthy only when its probe says so — including
+        # after a host restart: a stale persisted healthy_since could
+        # otherwise age past the recovery threshold during downtime and
+        # close an episode before the new process passed a single probe
+        # (Codex review P2). Clear it; the first health-ok restarts the
+        # recovery clock.
         self._event(component, "spawned")
-        if not has_health_probe:
+        if has_health_probe:
+            self._conn.execute(
+                "UPDATE host_alert_status SET healthy_since = NULL "
+                "WHERE component = ?", (component,))
+        else:
             self._conn.execute(
                 "UPDATE host_alert_status SET healthy_since = "
                 "COALESCE(healthy_since, ?) WHERE component = ?",

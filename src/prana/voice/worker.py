@@ -358,8 +358,15 @@ async def entrypoint(ctx: JobContext) -> None:
     if not gating:
         # Dev/browser-mic mode: pre-M2 behavior — one immediate session,
         # then the job ends. (Looping here would chain billed sessions
-        # back-to-back against an always-present device.)
-        await _run_session(TIER_SHAREABLE)
+        # back-to-back against an always-present device.) The audio-
+        # ownership boundary applies here too (Codex review P2): dev
+        # sessions must not let play_music publish alongside the live
+        # conversation.
+        await player.pause_for_session()
+        try:
+            await _run_session(TIER_SHAREABLE)
+        finally:
+            await player.resume_after_session()
         ctx.shutdown(reason="session ended (dev mode)")
         return
 
