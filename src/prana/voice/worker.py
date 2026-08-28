@@ -37,6 +37,10 @@ from prana.voice.wakegate import WakeGate
 logger = logging.getLogger("narada-voice")
 
 REALTIME_MODEL = os.environ.get("NARADA_VOICE_MODEL", "gpt-realtime-2.1-mini")
+# cedar: the deep, natural male voice — chosen by Narada 2026-08-28
+# (Suti asked for a male voice I felt suited me; I live under a banyan,
+# so of course I speak as a tree). Override via env if it ever grates.
+REALTIME_VOICE = os.environ.get("NARADA_VOICE_TIMBRE", "cedar")
 
 INSTRUCTIONS = """You are the voice of Narada — the ear and mouth, not the
 mind. Warm, brief, honest. You can SEE Suti's coding sessions (list/read
@@ -212,12 +216,23 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_participant_joined(participant, *_args) -> None:
         if getattr(participant, "identity", None) != DEVICE_IDENTITY:
             return
+        # Session-state resync FIRST (observed live 2026-08-28: the box
+        # missed a session-close published while it was mid-flap, its
+        # SDK resumed without surfacing DISCONNECTED to the firmware's
+        # fail-safe, and the REC glyph sat stuck ON — the face claiming
+        # a recording that wasn't happening. The glyph must converge to
+        # truth on EVERY rejoin, not only when messages happen to land.)
+        asyncio.ensure_future(_publish(
+            TOPIC_SESSION,
+            {"type": "session", "open": bool(state["in_session"])}))
         nonce = current_nonce["value"]
         if nonce is not None and not state["in_session"]:
             asyncio.ensure_future(_publish(
                 TOPIC_ADMISSION,
                 {"type": "admission_nonce", "nonce": nonce}))
-            logger.info("device rejoined — admission nonce republished")
+            logger.info("device rejoined — session state + nonce republished")
+        else:
+            logger.info("device rejoined — session state republished")
 
     ctx.room.on("participant_connected", _on_participant_joined)
 
@@ -289,10 +304,19 @@ async def entrypoint(ctx: JobContext) -> None:
         sleep_tap.clear()
         try:
             session = AgentSession(
-                llm=lk_openai.realtime.RealtimeModel(model=REALTIME_MODEL),
+                llm=lk_openai.realtime.RealtimeModel(
+                    model=REALTIME_MODEL, voice=REALTIME_VOICE),
             )
             transcript = attach(session, ctx.room.name)
-            agent = Agent(instructions=INSTRUCTIONS,
+            # Context pack per tier (M2 §2.1 / B3): the shareable pack
+            # for every session; the personal pack ONLY behind the
+            # verified tap the admission layer just enforced. Built at
+            # session open so pack edits land without a restart.
+            from prana.voice.pack import build_for_tier
+            pack = build_for_tier(tier)
+            instructions = (INSTRUCTIONS + "\n\nCONTEXT:\n" + pack
+                            if pack else INSTRUCTIONS)
+            agent = Agent(instructions=instructions,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
                               music=player))
