@@ -335,18 +335,59 @@ async def entrypoint(ctx: JobContext) -> None:
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
                               music=player, publish=_publish))
-            await session.start(agent=agent, room=ctx.room)
-            linked = getattr(getattr(session, "_room_io", None),
-                             "linked_participant", None)
-            logger.info("realtime session open (model=%s, tier=%s, "
-                        "linked=%s)", REALTIME_MODEL, tier,
-                        getattr(linked, "identity", linked))
             # Overlay feed (Suti's design 2026-09-01): thinking state,
             # speaking state, and subtitles ride the session topic as
             # presentation hints. Fire-and-forget — display candy must
             # never add latency or failure surface to the session.
             def _hint(obj: dict) -> None:
                 asyncio.ensure_future(_publish(TOPIC_SESSION, obj))
+
+            # STREAMING captions (Suti field feedback: the bubble only
+            # appeared after speech finished — item_added is a completed
+            # event). A TextOutput sink receives the transcript deltas
+            # as they're spoken; throttled to ~4 msgs/s on the wire.
+            try:
+                from livekit.agents.voice import io as _vio
+                from prana.voice.transcripts import redact as _redact
+
+                class _CaptionSink(_vio.TextOutput):
+                    def __init__(self, nxt):
+                        super().__init__(label="narada-captions",
+                                         next_in_chain=nxt)
+                        self._buf = ""
+                        self._last = 0.0
+
+                    async def capture_text(self, text: str) -> None:
+                        self._buf += text
+                        now = time.monotonic()
+                        if now - self._last > 0.25:
+                            self._last = now
+                            _hint({"type": "caption",
+                                   "text": _redact(self._buf)[-220:],
+                                   "latest": text[-64:], "final": False})
+                        if self.next_in_chain:
+                            await self.next_in_chain.capture_text(text)
+
+                    def flush(self) -> None:
+                        if self._buf:
+                            _hint({"type": "caption",
+                                   "text": _redact(self._buf)[-220:],
+                                   "latest": "", "final": True})
+                        self._buf = ""
+                        if self.next_in_chain:
+                            self.next_in_chain.flush()
+
+                session.output.transcription = _CaptionSink(
+                    session.output.transcription)
+            except Exception as exc:
+                logger.warning("caption sink unavailable: %s", exc)
+
+            await session.start(agent=agent, room=ctx.room)
+            linked = getattr(getattr(session, "_room_io", None),
+                             "linked_participant", None)
+            logger.info("realtime session open (model=%s, tier=%s, "
+                        "linked=%s)", REALTIME_MODEL, tier,
+                        getattr(linked, "identity", linked))
 
             @session.on("agent_state_changed")
             def _on_agent_state(ev) -> None:
@@ -357,23 +398,6 @@ async def entrypoint(ctx: JobContext) -> None:
                     _hint({"type": "speaking"})
                 elif st == "listening":
                     _hint({"type": "thinking", "on": False})
-
-            @session.on("conversation_item_added")
-            def _on_caption(ev) -> None:
-                try:
-                    from prana.voice.transcripts import redact, text_of
-                    item = getattr(ev, "item", None)
-                    if str(getattr(item, "role", "")) != "assistant":
-                        return
-                    text = redact(text_of(item))[:220]
-                    if not text:
-                        return
-                    words = text.split()
-                    _hint({"type": "caption", "text": text,
-                           "latest": " ".join(words[-3:]),
-                           "final": True})
-                except Exception as exc:
-                    logger.debug("caption hook failed: %s", exc)
 
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check —
