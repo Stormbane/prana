@@ -43,6 +43,20 @@ def build_voice_tools(
     client = client or ServiceClient()
     proposals = proposals or ProposalQueue()
 
+    def _toast(icon: str, text: str) -> None:
+        """Activity pill on the face (Suti's overlay design). Fire and
+        forget — candy never blocks a tool."""
+        if publish is None:
+            return
+        import asyncio as _aio
+        from prana.voice.admission import TOPIC_SESSION
+        try:
+            _aio.ensure_future(publish(
+                TOPIC_SESSION,
+                {"type": "activity", "icon": icon, "text": text[:72]}))
+        except Exception:
+            pass
+
     @function_tool()
     async def list_coding_sessions() -> list[dict]:
         """List the coding-agent sessions Narada owns on this machine,
@@ -145,6 +159,7 @@ def build_voice_tools(
         that you noted it. Notes go to a review inbox — Narada curates
         them into memory later, so don't promise it's remembered
         forever, just that it's written down."""
+        _toast("memory", "writing to memory")
         try:
             remember.write_note(note, tier=tier, session_id=session_id)
             return {"saved": True}
@@ -187,6 +202,7 @@ def build_voice_tools(
         say so. Music pauses whenever a conversation starts."""
         if music is None:
             return {"playing": False, "reason": "no player in this mode"}
+        _toast("music", f"radio: {station}")
         return await music.play(station)
 
     @function_tool()
@@ -215,6 +231,7 @@ def build_voice_tools(
         from prana.voice.admission import TOPIC_SESSION
         pct = max(0, min(100, int(percent)))
         await publish(TOPIC_SESSION, {"type": "set_volume", "volume": pct})
+        _toast("volume", f"volume {pct}%")
         return {"set": True, "volume": pct}
 
     @function_tool()
@@ -234,6 +251,7 @@ def build_voice_tools(
         """Search the web. Returns a few titled results with snippets.
         If search isn't available, say so plainly."""
         import asyncio as _aio
+        _toast("search", f"searching: {query}")
         try:
             return await _aio.to_thread(web.search, query)
         except (web.WebUnavailable, web.WebRefused) as exc:
@@ -246,6 +264,7 @@ def build_voice_tools(
         """Read a public web page (text only, truncated). Local and
         private addresses are refused by design."""
         import asyncio as _aio
+        _toast("web", "reading a page")
         try:
             text = await _aio.to_thread(web.fetch, url)
             return {"text": text}
@@ -276,6 +295,7 @@ def build_voice_tools(
         label: Annotated[str, "what it's for, a few words"],
     ) -> dict:
         """Set a timer. It reaches Suti's Telegram when it fires."""
+        _toast("timer", f"timer: {label}")
         try:
             r = timers.create(label, minutes * 60.0, kind="timer",
                               tier=tier, session_id=session_id)

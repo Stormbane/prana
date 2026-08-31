@@ -341,6 +341,40 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("realtime session open (model=%s, tier=%s, "
                         "linked=%s)", REALTIME_MODEL, tier,
                         getattr(linked, "identity", linked))
+            # Overlay feed (Suti's design 2026-09-01): thinking state,
+            # speaking state, and subtitles ride the session topic as
+            # presentation hints. Fire-and-forget — display candy must
+            # never add latency or failure surface to the session.
+            def _hint(obj: dict) -> None:
+                asyncio.ensure_future(_publish(TOPIC_SESSION, obj))
+
+            @session.on("agent_state_changed")
+            def _on_agent_state(ev) -> None:
+                st = str(getattr(ev, "new_state", ""))
+                if st == "thinking":
+                    _hint({"type": "thinking", "on": True})
+                elif st == "speaking":
+                    _hint({"type": "speaking"})
+                elif st == "listening":
+                    _hint({"type": "thinking", "on": False})
+
+            @session.on("conversation_item_added")
+            def _on_caption(ev) -> None:
+                try:
+                    from prana.voice.transcripts import redact, text_of
+                    item = getattr(ev, "item", None)
+                    if str(getattr(item, "role", "")) != "assistant":
+                        return
+                    text = redact(text_of(item))[:220]
+                    if not text:
+                        return
+                    words = text.split()
+                    _hint({"type": "caption", "text": text,
+                           "latest": " ".join(words[-3:]),
+                           "final": True})
+                except Exception as exc:
+                    logger.debug("caption hook failed: %s", exc)
+
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check —
             # tap-then-silence now means "broken", never "shy".
