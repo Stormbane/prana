@@ -129,6 +129,12 @@ class MusicPlayer:
 
     def set_volume(self, percent: int) -> dict:
         self.volume = max(0, min(100, int(percent)))
+        # Live adjust: the publisher takes "vol N" lines on stdin.
+        if self._proc is not None and self._proc.stdin is not None:
+            try:
+                self._proc.stdin.write(f"vol {self.volume}\n".encode())
+            except Exception as exc:
+                logger.warning("volume relay failed: %s", exc)
         return {"volume": self.volume}
 
     def now_playing(self) -> dict:
@@ -166,113 +172,75 @@ class MusicPlayer:
                 logger.warning("music resume failed: %s", result)
 
     # ── pipeline ─────────────────────────────────────────────────────
+    # Since 2026-08-31 the pipeline is a SEPARATE PROCESS
+    # (music_publisher.py): a native crash in the rtc publish path
+    # killed the whole worker ~29s into the first actually-rendered
+    # playback. Isolation is the fix — the publisher may die freely;
+    # the worker only ever start/stops it.
 
-    async def _start_pipeline(self, name: str, url: str) -> bool:
-        from livekit import rtc
+    async def _start_pipeline_subprocess(self, name: str, url: str) -> bool:
+        import sys
 
         try:
             self._proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-i", url, "-vn",
-                "-f", "s16le", "-ar", str(SAMPLE_RATE),
-                "-ac", str(CHANNELS), "-",
-                stdout=asyncio.subprocess.PIPE,
+                sys.executable, "-m", "prana.voice.music_publisher",
+                name, url, str(self.volume),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
-            self.last_error = f"ffmpeg spawn: {exc}"
+            self.last_error = f"publisher spawn: {exc}"
             return False
-
-        try:
-            self._source = rtc.AudioSource(SAMPLE_RATE, CHANNELS)
-            track = rtc.LocalAudioTrack.create_audio_track(
-                "narada-music", self._source)
-            # SOURCE_MICROPHONE is load-bearing (field 2026-08-31): the
-            # box's SDK subscribes/renders only microphone-source audio.
-            # The first music track went out as UNKNOWN and played to
-            # nobody — pipeline up, room silent.
-            self._publication = await asyncio.wait_for(
-                self._room.local_participant.publish_track(
-                    track, rtc.TrackPublishOptions(
-                        source=rtc.TrackSource.SOURCE_MICROPHONE)),
-                timeout=5.0)
-        except Exception as exc:
-            self.last_error = f"publish: {exc}"
-            await self._kill_proc()
-            return False
-
         self.last_error = None
-        self._pump = asyncio.create_task(self._pump_frames(name),
-                                         name="music-pump")
-        logger.info("music: %s (%s)", name, url)
+        self._pump = asyncio.create_task(self._watch_publisher(name),
+                                         name="music-publisher-watch")
+        logger.info("music: %s (%s) [pid %d]", name, url, self._proc.pid)
         return True
 
-    async def _pump_frames(self, name: str) -> None:
-        from livekit import rtc
+    async def _watch_publisher(self, name: str) -> None:
+        proc = self._proc
+        rc = await proc.wait()
+        if self.state == PLAYING and self._proc is proc:
+            # Died on its own (stream end or crash) — report, never
+            # silence; the worker is unharmed by design.
+            self.state = IDLE
+            self.current = None
+            self.last_error = ("stream ended" if rc == 2
+                              else f"publisher exited rc={rc}")
+            logger.warning("music publisher for %s: %s", name,
+                           self.last_error)
 
-        bytes_per_frame = FRAME_SAMPLES * CHANNELS * 2
-        try:
-            while True:
-                data = await self._proc.stdout.readexactly(bytes_per_frame)
-                if self.volume < 100:
-                    samples = np.frombuffer(data, dtype=np.int16)
-                    scaled = (samples.astype(np.int32) * self.volume) // 100
-                    data = np.clip(scaled, -32768, 32767).astype(np.int16).tobytes()
-                frame = rtc.AudioFrame(
-                    data=data, sample_rate=SAMPLE_RATE,
-                    num_channels=CHANNELS,
-                    samples_per_channel=FRAME_SAMPLES)
-                await self._source.capture_frame(frame)
-        except (asyncio.IncompleteReadError, asyncio.CancelledError):
-            pass
-        except Exception as exc:
-            self.last_error = f"stream: {type(exc).__name__}"
-            logger.warning("music pump ended (%s): %s", name, exc)
-        finally:
-            # Stream ended on its own (not a pause/stop): report honestly
-            # via state; what_is_playing shows the error.
-            if self.state == PLAYING:
-                self.state = IDLE
-                self.current = None
-                if self.last_error is None:
-                    self.last_error = "stream ended"
-
-    async def _kill_proc(self) -> None:
-        if self._proc is not None:
-            try:
-                self._proc.kill()
-                await self._proc.wait()
-            except ProcessLookupError:
-                pass
-            self._proc = None
-
-    async def _stop_pipeline(self) -> None:
-        # EVERY await here is bounded (field 2026-08-31: an unbounded
-        # await in this path hung pause_for_session between "admitted by
-        # tap" and session open — the wake loop died and taps went
-        # ignored until a worker restart). Teardown is best-effort;
-        # sessions must never wait on it.
+    async def _stop_pipeline_subprocess(self) -> None:
+        proc, self._proc = self._proc, None
         if self._pump is not None:
             self._pump.cancel()
-            try:
-                await asyncio.wait_for(self._pump, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-                pass
             self._pump = None
+        if proc is None:
+            return
         try:
-            await asyncio.wait_for(self._kill_proc(), timeout=3.0)
+            if proc.stdin is not None:
+                proc.stdin.close()   # EOF -> publisher exits cleanly
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except (asyncio.TimeoutError, ProcessLookupError, Exception):
+                pass
+
+    # Seams kept for the state-machine tests (they fake these).
+    async def _start_pipeline(self, name: str, url: str) -> bool:
+        return await self._start_pipeline_subprocess(name, url)
+
+    async def _stop_pipeline(self) -> None:
+        # Bounded end to end (field 2026-08-31: an unbounded await in
+        # this path once hung admission and killed every tap).
+        try:
+            await asyncio.wait_for(self._stop_pipeline_subprocess(),
+                                   timeout=6.0)
         except (asyncio.TimeoutError, Exception):
             self._proc = None
-        if self._publication is not None:
-            try:
-                await asyncio.wait_for(
-                    self._room.local_participant.unpublish_track(
-                        self._publication.sid),
-                    timeout=5.0)
-            except Exception as exc:
-                logger.warning("unpublish failed: %s", exc)
-            self._publication = None
-        self._source = None
 
 
 def write_default_stations(path: Path = STATIONS_FILE) -> None:
