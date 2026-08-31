@@ -190,10 +190,28 @@ def test_text_extraction_caps_and_strips():
     assert "evil()" not in text
 
 
-def test_search_without_key_fails_closed(monkeypatch):
+def test_search_without_key_uses_keyless_backend(monkeypatch):
+    """No Brave key is not an outage: the keyless DDG path serves
+    (2026-08-31 — search must never sit behind a paywall)."""
     monkeypatch.setattr(web, "_load_brave_key", lambda: None)
-    with pytest.raises(WebUnavailable, match="isn't set up"):
+    monkeypatch.setattr(web, "_ddg_search",
+                        lambda q: [{"title": "t", "url": "u", "snippet": "s"}])
+    assert web.search("weather brisbane")[0]["title"] == "t"
+
+
+def test_search_no_key_and_backend_down_fails_speakably(monkeypatch):
+    def boom(q):
+        raise WebUnavailable("search backend unreachable: TimeoutError")
+    monkeypatch.setattr(web, "_load_brave_key", lambda: None)
+    monkeypatch.setattr(web, "_ddg_search", boom)
+    with pytest.raises(WebUnavailable, match="unreachable"):
         web.search("weather brisbane")
+
+
+def test_ddg_redirect_unwrap():
+    wrapped = ("/l/?uddg=https%3A%2F%2Fwww.bom.gov.au%2Fqld%2F&rut=abc")
+    assert web._ddg_url(wrapped) == "https://www.bom.gov.au/qld/"
+    assert web._ddg_url("https://direct.example/x") == "https://direct.example/x"
 
 
 def test_search_backend_seam():

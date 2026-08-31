@@ -260,16 +260,81 @@ def _brave_search(query: str, key: str) -> list[dict]:
     return out
 
 
+DDG_ENDPOINT = "html.duckduckgo.com"
+
+_DDG_RESULT = re.compile(
+    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+    re.S)
+_DDG_SNIPPET = re.compile(
+    r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', re.S)
+
+
+def _clean(html_fragment: str, cap: int) -> str:
+    import html as _html
+    return _html.unescape(_TAGS.sub("", html_fragment)).strip()[:cap]
+
+
+def _ddg_url(raw: str) -> str:
+    """DDG wraps result URLs in a /l/?uddg=<encoded> redirect."""
+    parts = urllib.parse.urlsplit(raw)
+    if parts.path.startswith("/l/"):
+        q = urllib.parse.parse_qs(parts.query)
+        if "uddg" in q:
+            return q["uddg"][0]
+    return raw
+
+
+def _ddg_search(query: str) -> list[dict]:
+    """Keyless backend: DuckDuckGo's plain-HTML endpoint. Free, no
+    browser, no account — chosen 2026-08-31 when the Brave free tier
+    grew a paywall. Same caps and the same our-code-filters-first
+    posture as every other backend behind this seam."""
+    conn = http.client.HTTPSConnection(DDG_ENDPOINT, timeout=TIMEOUT_S)
+    try:
+        body_form = urllib.parse.urlencode({"q": query, "kl": "au-en"})
+        # The endpoint answers 202 (bot challenge) to bare GETs with
+        # non-browser agents; the POST form with a browser-shaped UA is
+        # the supported-in-practice path.
+        conn.request("POST", "/html/", body=body_form, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0 Safari/537.36"),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "text/html",
+        })
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise WebUnavailable(f"search backend returned {resp.status}")
+        body = resp.read(MAX_RAW_BYTES * 3).decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException) as exc:
+        raise WebUnavailable(
+            f"search backend unreachable: {type(exc).__name__}") from None
+    finally:
+        conn.close()
+    links = _DDG_RESULT.findall(body)
+    snippets = _DDG_SNIPPET.findall(body)
+    out = []
+    for i, (href, title_html) in enumerate(links[:MAX_RESULTS]):
+        out.append({
+            "title": _clean(title_html, 120),
+            "url": _ddg_url(href)[:300],
+            "snippet": _clean(snippets[i], MAX_SNIPPET_CHARS)
+            if i < len(snippets) else "",
+        })
+    if not out:
+        raise WebUnavailable("search returned nothing parseable")
+    return out
+
+
 def search(query: str, backend: Optional[Callable] = None) -> list[dict]:
-    """Search the web. Fail-closed: no key -> WebUnavailable with a
-    speakable message."""
+    """Search the web. A Brave key upgrades the backend; without one
+    the keyless DDG path serves — search is never paywalled off."""
     query = (query or "").strip()
     if not query:
         raise WebUnavailable("empty search")
     if backend is not None:
         return backend(query)
     key = _load_brave_key()
-    if key is None:
-        raise WebUnavailable(
-            "web search isn't set up yet — the Brave API key is missing")
-    return _brave_search(query, key)
+    if key is not None:
+        return _brave_search(query, key)
+    return _ddg_search(query)
