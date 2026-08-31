@@ -95,6 +95,18 @@ class MusicPlayer:
     # ── public: tool surface ─────────────────────────────────────────
 
     async def play(self, query: str) -> dict:
+        import os
+        if os.environ.get("NARADA_MUSIC", "on").lower() == "off":
+            # Benched 2026-09-01: a second publishing participant sends
+            # the box's SDK (0.3.10/protocol 1) into an SCTP INIT storm
+            # — its data channel dies and taps/faces go haywire. Music
+            # returns when the firmware's LiveKit component is upgraded
+            # and the two-participant path is bench-verified. Honest
+            # refusal beats another broken evening.
+            return {"playing": False,
+                    "reason": ("music is benched until a firmware update — "
+                               "the radio currently destabilizes the box's "
+                               "connection")}
         stations = load_stations(self._stations_path)
         if not stations:
             return {"playing": False,
