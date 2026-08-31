@@ -636,6 +636,44 @@ def _start_health_shim() -> None:
         daemon=True, name="health-shim").start()
 
 
+BOX_SERIAL_PORT = os.environ.get("NARADA_BOX_SERIAL", "COM3")
+BOX_AUTORESET_AFTER_S = 5 * 60.0     # absent this long -> pulse reset
+BOX_AUTORESET_COOLDOWN_S = 15 * 60.0  # never reset-loop the hardware
+BOX_COMPONENT = "box3-device"        # pseudo-component in the A3 alerter
+
+
+def _autoreset_due(absent_since, last_reset: float, now: float) -> bool:
+    """Pure decision: reset only when absence is long AND the last
+    pulse was long enough ago (a reset-loop would mask real faults)."""
+    if absent_since is None:
+        return False
+    return (now - absent_since >= BOX_AUTORESET_AFTER_S
+            and now - last_reset >= BOX_AUTORESET_COOLDOWN_S)
+
+
+def _serial_reset_box(port: str = BOX_SERIAL_PORT) -> bool:
+    """Hard-reset the BOX-3 over its USB serial line (RTS pulse — the
+    same lever esptool uses). Second line of defense behind the
+    firmware's own dead-man reboot; recovered the 2026-08-30 wedge."""
+    try:
+        import time as _time
+
+        import serial
+        s = serial.Serial(port, 115200, timeout=1)
+        try:
+            s.setDTR(False)
+            s.setRTS(True)
+            _time.sleep(0.1)
+            s.setRTS(False)
+        finally:
+            s.close()
+        logger.warning("box absent — hard-reset pulsed via %s", port)
+        return True
+    except Exception as exc:
+        logger.warning("box auto-reset failed (%s): %s", port, exc)
+        return False
+
+
 def _start_room_watchdog() -> None:
     """Recycle an orphaned device room so dispatch always recovers.
 
@@ -656,7 +694,12 @@ def _start_room_watchdog() -> None:
     from livekit.protocol import models
 
     async def watch() -> None:
+        import time as _time
+
         strikes = 0
+        absent_since = None
+        last_reset = 0.0
+        alerts = None  # lazy: an alerting failure must not kill the watchdog
         while True:
             await asyncio.sleep(20)
             try:
@@ -665,6 +708,7 @@ def _start_room_watchdog() -> None:
                     rooms = await lk.room.list_rooms(
                         lkapi.ListRoomsRequest(names=[DEVICE_ROOM]))
                     orphaned = False
+                    device_present = False
                     for room in rooms.rooms:
                         parts = await lk.room.list_participants(
                             lkapi.ListParticipantsRequest(room=room.name))
@@ -674,6 +718,7 @@ def _start_room_watchdog() -> None:
                         has_agent = any(
                             p.kind == models.ParticipantInfo.Kind.AGENT
                             for p in parts.participants)
+                        device_present = device_present or has_device
                         orphaned = has_device and not has_agent
                     if orphaned:
                         strikes += 1
@@ -689,6 +734,34 @@ def _start_room_watchdog() -> None:
                         strikes = 0
                 finally:
                     await lk.aclose()
+
+                # ── body presence (field incident 2026-08-30: the box
+                # wedged off the network for days; every SUPERVISED
+                # component was healthy so nobody was paged). The body
+                # is now a pseudo-component in the A3 alerter, and the
+                # USB serial line is the second line of defense.
+                now = _time.time()
+                try:
+                    if alerts is None:
+                        from prana.host.alerts import AlertManager
+                        alerts = AlertManager()
+                    if device_present:
+                        if absent_since is not None:
+                            logger.info("box back after %.0fs absence",
+                                        now - absent_since)
+                        absent_since = None
+                        alerts.record_health(BOX_COMPONENT, ok=True)
+                    else:
+                        if absent_since is None:
+                            absent_since = now
+                            alerts.record_health(
+                                BOX_COMPONENT, ok=False,
+                                detail="device not in room")
+                        if _autoreset_due(absent_since, last_reset, now):
+                            if await asyncio.to_thread(_serial_reset_box):
+                                last_reset = now
+                except Exception as exc:
+                    logger.warning("box presence layer failed: %s", exc)
             except Exception as exc:  # watchdog must outlive any hiccup
                 logger.warning("room watchdog check failed: %s", exc)
 

@@ -65,3 +65,15 @@ def test_probe_exception_does_not_fake_health():
 
     with pytest.raises(RuntimeError):
         asyncio.run(_health_verdict(probes=(boom, _ok())))
+
+
+def test_autoreset_due_logic():
+    from prana.voice.worker import (BOX_AUTORESET_AFTER_S,
+                                    BOX_AUTORESET_COOLDOWN_S, _autoreset_due)
+    t0 = 1_000_000.0
+    assert not _autoreset_due(None, 0.0, t0)                    # present
+    assert not _autoreset_due(t0 - 60, 0.0, t0)                 # too fresh
+    assert _autoreset_due(t0 - BOX_AUTORESET_AFTER_S - 1, 0.0, t0)
+    # Cooldown: a recent pulse blocks another (no reset-looping hardware).
+    assert not _autoreset_due(t0 - 3600, t0 - 60, t0)
+    assert _autoreset_due(t0 - 3600, t0 - BOX_AUTORESET_COOLDOWN_S - 1, t0)
