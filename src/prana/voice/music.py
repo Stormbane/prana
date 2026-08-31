@@ -187,8 +187,15 @@ class MusicPlayer:
             self._source = rtc.AudioSource(SAMPLE_RATE, CHANNELS)
             track = rtc.LocalAudioTrack.create_audio_track(
                 "narada-music", self._source)
-            self._publication = await self._room.local_participant.publish_track(
-                track, rtc.TrackPublishOptions())
+            # SOURCE_MICROPHONE is load-bearing (field 2026-08-31): the
+            # box's SDK subscribes/renders only microphone-source audio.
+            # The first music track went out as UNKNOWN and played to
+            # nobody — pipeline up, room silent.
+            self._publication = await asyncio.wait_for(
+                self._room.local_participant.publish_track(
+                    track, rtc.TrackPublishOptions(
+                        source=rtc.TrackSource.SOURCE_MICROPHONE)),
+                timeout=5.0)
         except Exception as exc:
             self.last_error = f"publish: {exc}"
             await self._kill_proc()
@@ -240,18 +247,28 @@ class MusicPlayer:
             self._proc = None
 
     async def _stop_pipeline(self) -> None:
+        # EVERY await here is bounded (field 2026-08-31: an unbounded
+        # await in this path hung pause_for_session between "admitted by
+        # tap" and session open — the wake loop died and taps went
+        # ignored until a worker restart). Teardown is best-effort;
+        # sessions must never wait on it.
         if self._pump is not None:
             self._pump.cancel()
             try:
-                await self._pump
-            except (asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._pump, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
             self._pump = None
-        await self._kill_proc()
+        try:
+            await asyncio.wait_for(self._kill_proc(), timeout=3.0)
+        except (asyncio.TimeoutError, Exception):
+            self._proc = None
         if self._publication is not None:
             try:
-                await self._room.local_participant.unpublish_track(
-                    self._publication.sid)
+                await asyncio.wait_for(
+                    self._room.local_participant.unpublish_track(
+                        self._publication.sid),
+                    timeout=5.0)
             except Exception as exc:
                 logger.warning("unpublish failed: %s", exc)
             self._publication = None
