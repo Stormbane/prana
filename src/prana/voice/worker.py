@@ -334,8 +334,19 @@ async def entrypoint(ctx: JobContext) -> None:
                               tier=tier, session_id=ctx.job.id,
                               music=player, publish=_publish))
             await session.start(agent=agent, room=ctx.room)
-            logger.info("realtime session open (model=%s, tier=%s)",
-                        REALTIME_MODEL, tier)
+            linked = getattr(getattr(session, "_room_io", None),
+                             "linked_participant", None)
+            logger.info("realtime session open (model=%s, tier=%s, "
+                        "linked=%s)", REALTIME_MODEL, tier,
+                        getattr(linked, "identity", linked))
+            # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
+            # and the greeting doubles as the end-to-end audio check —
+            # tap-then-silence now means "broken", never "shy".
+            try:
+                session.generate_reply(instructions=(
+                    "Greet briefly — one warm sentence, then listen."))
+            except Exception as exc:
+                logger.warning("greeting failed: %s", exc)
             await _publish(TOPIC_SESSION,
                            {"type": "session", "open": True, "tier": tier})
             # End on whichever comes first: room closed, sleep tap, the
