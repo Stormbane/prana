@@ -96,6 +96,7 @@ VOICE_TOOL_NAMES = {
     "play_music",
     "stop_music",
     "what_is_playing",
+    "set_volume",       # speaker loudness via device protocol
     "set_music_volume",
     # B4 (ratified): reads of the public web, SSRF-contracted in
     # web.py (validated resolution, pinned connections, per-hop

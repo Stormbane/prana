@@ -33,6 +33,7 @@ def build_voice_tools(
     tier: str = "shareable",
     session_id: str = "",
     music=None,
+    publish=None,
 ) -> list:
     """Build the closed voice-tier tool list for an AgentSession.
 
@@ -203,10 +204,25 @@ def build_voice_tools(
         return music.now_playing()
 
     @function_tool()
+    async def set_volume(
+        percent: Annotated[int, "speaker loudness, 0-100"],
+    ) -> dict:
+        """Set the box's SPEAKER volume — how loud everything is,
+        voice and music alike. This is the one to use when asked to
+        turn it up or down."""
+        if publish is None:
+            return {"set": False, "reason": "no device channel in this mode"}
+        from prana.voice.admission import TOPIC_SESSION
+        pct = max(0, min(100, int(percent)))
+        await publish(TOPIC_SESSION, {"type": "set_volume", "volume": pct})
+        return {"set": True, "volume": pct}
+
+    @function_tool()
     async def set_music_volume(
         percent: Annotated[int, "0-100"],
     ) -> dict:
-        """Set music volume."""
+        """Set the music MIX level relative to speech (not overall
+        loudness — for that use set_volume)."""
         if music is None:
             return {"volume": None, "reason": "no player in this mode"}
         return music.set_volume(percent)
@@ -249,6 +265,7 @@ def build_voice_tools(
         play_music,
         stop_music,
         what_is_playing,
+        set_volume,
         set_music_volume,
         web_search,
         read_page,

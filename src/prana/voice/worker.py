@@ -332,7 +332,7 @@ async def entrypoint(ctx: JobContext) -> None:
             agent = Agent(instructions=instructions,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
-                              music=player))
+                              music=player, publish=_publish))
             await session.start(agent=agent, room=ctx.room)
             logger.info("realtime session open (model=%s, tier=%s)",
                         REALTIME_MODEL, tier)
@@ -399,11 +399,18 @@ async def entrypoint(ctx: JobContext) -> None:
         # ownership boundary applies here too (Codex review P2): dev
         # sessions must not let play_music publish alongside the live
         # conversation.
-        await player.pause_for_session()
+        try:
+            await asyncio.wait_for(player.pause_for_session(), timeout=10.0)
+        except Exception as exc:
+            logger.warning("music pause failed — proceeding: %s", exc)
         try:
             await _run_session(TIER_SHAREABLE)
         finally:
-            await player.resume_after_session()
+            try:
+                await asyncio.wait_for(
+                    player.resume_after_session(), timeout=15.0)
+            except Exception as exc:
+                logger.warning("music resume failed: %s", exc)
         ctx.shutdown(reason="session ended (dev mode)")
         return
 
@@ -460,12 +467,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
         # The session owns the audio: full music stop before, resume
         # after (B5 audio-owner state machine — never two tracks, never
-        # music into a live mic).
-        await player.pause_for_session()
+        # music into a live mic). Both transitions are BOUNDED and
+        # non-fatal: the 23:31 field incident wedged admission inside
+        # pause_for_session and killed every tap until restart. Music
+        # is a luxury; the tap is the body's front door.
+        try:
+            await asyncio.wait_for(player.pause_for_session(), timeout=10.0)
+        except Exception as exc:
+            logger.warning("music pause failed — proceeding: %s", exc)
         try:
             end_reason = await _run_session(tier)
         finally:
-            await player.resume_after_session()
+            try:
+                await asyncio.wait_for(
+                    player.resume_after_session(), timeout=15.0)
+            except Exception as exc:
+                logger.warning("music resume failed: %s", exc)
         if end_reason in ("budget-refused",):
             # fail-closed but not silently: stay in wake-watch, a later
             # cycle may succeed (e.g. next day’s budget)
