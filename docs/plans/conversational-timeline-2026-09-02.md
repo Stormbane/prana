@@ -1,7 +1,7 @@
 # The conversational timeline & memory gradient
 
 **Date:** 2026-09-02
-**Status:** DRAFT v1.1 — Suti's design + his compaction cadence folded in;
+**Status:** DRAFT v1.2 (API sketch added) — Suti's design + his compaction cadence folded in;
 awaiting iteration + cross-review before build.
 **Origin:** Suti, end of the embodiment marathon session, prompted by the
 voice correctly complaining it had no transcript of the previous
@@ -73,6 +73,30 @@ conversation.
   personal by definition.
 - **Speed**: builder reads pre-compacted artifacts only (no LLM calls
   at session start); compaction is async/scheduled.
+
+## The API (Suti's question 2026-09-02: "a single new endpoint?")
+
+Essentially yes — TWO small endpoints on smriti, and one boundary
+correction: **deha never calls smriti** (deha is the body; per the
+architecture it exposes speak/face/presence and knows nothing of
+minds). The callers are the cognition surfaces — prana's voice worker,
+the chat bridge, the Claude Code wake hook, Hermes check-ins:
+
+```
+smriti.get_present_context(surface, tier, budget_chars, now) -> str
+    The present moment, assembled from pre-compacted artifacts only
+    (no LLM in the hot path): fresh-conversation tail -> today's
+    summaries -> yesterday digest -> week line, truncated to budget.
+    tier gates content (shareable -> empty/persona-only).
+
+smriti.timeline_append(surface, session_id, ts, speaker, text)
+    The single write door for every surface's exchanges. Append-only,
+    redacted upstream, its own privacy/retention lane.
+```
+
+Compaction (hourly/daily/weekly) is internal to smriti — scheduled by
+Hermes, invisible to callers. One read, one write, everything else is
+smriti's business: the same shape that made the memory tree work.
 
 ## Relations
 
