@@ -346,39 +346,65 @@ async def entrypoint(ctx: JobContext) -> None:
             # appeared after speech finished — item_added is a completed
             # event). A TextOutput sink receives the transcript deltas
             # as they're spoken; throttled to ~4 msgs/s on the wire.
+            caption_sink = None
             try:
+                import unicodedata
+
                 from livekit.agents.voice import io as _vio
                 from prana.voice.transcripts import redact as _redact
+
+                _TYPOGRAPHY = str.maketrans({
+                    "‘": "'", "’": "'", "“": '"',
+                    "”": '"', "–": "-", "—": " - ",
+                    "…": "...", " ": " ",
+                })
+
+                def _ascii(s: str) -> str:
+                    """UNSCII is an ASCII-only pixel font — typographic
+                    characters rendered as tofu squares (field 2026-09-01).
+                    Transliterate; drop what survives."""
+                    s = s.translate(_TYPOGRAPHY)
+                    s = unicodedata.normalize("NFKD", s)
+                    return s.encode("ascii", "ignore").decode("ascii")
 
                 class _CaptionSink(_vio.TextOutput):
                     def __init__(self, nxt):
                         super().__init__(label="narada-captions",
                                          next_in_chain=nxt)
                         self._buf = ""
-                        self._last = 0.0
+                        self._t = 0.0
+                        self.showing = False
 
                     async def capture_text(self, text: str) -> None:
                         self._buf += text
                         now = time.monotonic()
-                        if now - self._last > 0.25:
-                            self._last = now
+                        if now - self._t > 0.25:
+                            self._t = now
+                            self.showing = True
                             _hint({"type": "caption",
-                                   "text": _redact(self._buf)[-220:],
-                                   "latest": text[-64:], "final": False})
+                                   "text": _ascii(_redact(self._buf))[-220:],
+                                   "latest": _ascii(text)[-64:],
+                                   "final": False})
                         if self.next_in_chain:
                             await self.next_in_chain.capture_text(text)
 
                     def flush(self) -> None:
+                        # Generation done ≠ SPEECH done (the transcript
+                        # streams ahead of the audio — field 2026-09-01:
+                        # the bubble faded mid-sentence). Show the full
+                        # text, keep it on screen; the fade fires when
+                        # the agent actually stops speaking.
                         if self._buf:
+                            self.showing = True
                             _hint({"type": "caption",
-                                   "text": _redact(self._buf)[-220:],
-                                   "latest": "", "final": True})
+                                   "text": _ascii(_redact(self._buf))[-220:],
+                                   "latest": "", "final": False})
                         self._buf = ""
                         if self.next_in_chain:
                             self.next_in_chain.flush()
 
-                session.output.transcription = _CaptionSink(
-                    session.output.transcription)
+                caption_sink = _CaptionSink(session.output.transcription)
+                session.output.transcription = caption_sink
             except Exception as exc:
                 logger.warning("caption sink unavailable: %s", exc)
 
@@ -398,6 +424,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     _hint({"type": "speaking"})
                 elif st == "listening":
                     _hint({"type": "thinking", "on": False})
+                    # The voice has actually stopped — NOW the bubble
+                    # may fade (an empty final caption keeps the shown
+                    # text and starts the fade timer).
+                    if caption_sink is not None and caption_sink.showing:
+                        caption_sink.showing = False
+                        _hint({"type": "caption", "text": "",
+                               "latest": "", "final": True})
 
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check —
