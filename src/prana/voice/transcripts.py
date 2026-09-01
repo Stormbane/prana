@@ -171,3 +171,42 @@ def attach(session, room_name: str) -> TranscriptLogger:
             logger.warning("transcript hook failed: %s", exc)
 
     return tl
+
+
+def recent_tail(max_age_s: float = 900.0, max_chars: int = 800):
+    """The tail of the most recent finished conversation, if it ended
+    within `max_age_s` — conversational short-term memory (Suti's
+    design, 2026-09-02: a tap five minutes after a cliffhanger should
+    remember the cliffhanger; an hour later it may fade).
+
+    Returns (age_seconds, text) or None. Reads only this device's own
+    transcripts; redaction was applied at write time.
+    """
+    import re
+
+    try:
+        files = sorted(TRANSCRIPT_ROOT.rglob("*.md"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for f in files[:3]:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r"^ended: (\S+)", text, re.M)
+        if not m:
+            continue  # unfinished/aborted transcript — skip
+        try:
+            ended = datetime.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        age = (datetime.now(timezone.utc) - ended).total_seconds()
+        if age > max_age_s:
+            return None  # newest finished one is too old — all are
+        turns = [ln for ln in text.splitlines() if ln.startswith("- `")]
+        if not turns:
+            return None
+        tail = "\n".join(turns)[-max_chars:]
+        return age, tail
+    return None
