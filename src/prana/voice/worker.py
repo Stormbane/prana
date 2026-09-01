@@ -915,6 +915,27 @@ def _start_room_watchdog() -> None:
                 finally:
                     await lk.aclose()
 
+                # ── the summons (Suti's design, round 4): pending
+                # undelivered utterances turn the sleeping grove into
+                # Kali — tap to hear them. Presentation only; cleared
+                # when a session opens and delivers.
+                try:
+                    from prana.state.utterance_queue import pending_utterances
+                    n_pending = len(pending_utterances(limit=5))
+                    lk2 = lkapi.LiveKitAPI()
+                    try:
+                        import json as _json
+                        await lk2.room.send_data(lkapi.SendDataRequest(
+                            room=DEVICE_ROOM,
+                            data=_json.dumps({"type": "attention",
+                                              "on": n_pending > 0}).encode(),
+                            topic="narada.session",
+                            destination_identities=[DEVICE_IDENTITY]))
+                    finally:
+                        await lk2.aclose()
+                except Exception as exc:
+                    logger.debug("attention publish failed: %s", exc)
+
                 # ── body presence (field incident 2026-08-30: the box
                 # wedged off the network for days; every SUPERVISED
                 # component was healthy so nobody was paged). The body
