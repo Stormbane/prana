@@ -368,40 +368,82 @@ async def entrypoint(ctx: JobContext) -> None:
                     return s.encode("ascii", "ignore").decode("ascii")
 
                 class _CaptionSink(_vio.TextOutput):
+                    """Karaoke pacing (Suti field round 3): the raw
+                    transcript arrives at GENERATION speed — the whole
+                    utterance in ~a second, "skips to the end". Words
+                    are queued here and a reveal task paces them out at
+                    speech rate while the agent is actually speaking,
+                    highlighting the current word red. Approximate sync
+                    (~155 wpm), self-correcting at speech end."""
+
+                    WORD_MS = 0.34
+
                     def __init__(self, nxt):
                         super().__init__(label="narada-captions",
                                          next_in_chain=nxt)
-                        self._buf = ""
-                        self._t = 0.0
+                        self.words: list[str] = []
+                        self.idx = 0
                         self.showing = False
+                        self._task = None
+                        self._partial = ""
 
                     async def capture_text(self, text: str) -> None:
-                        self._buf += text
-                        now = time.monotonic()
-                        if now - self._t > 0.25:
-                            self._t = now
-                            self.showing = True
-                            _hint({"type": "caption",
-                                   "text": _ascii(_redact(self._buf))[-220:],
-                                   "latest": _ascii(text)[-64:],
-                                   "final": False})
+                        self._partial += _ascii(_redact(text))
+                        parts = self._partial.split(" ")
+                        self._partial = parts.pop()  # maybe mid-word
+                        self.words.extend(w for w in parts if w)
                         if self.next_in_chain:
                             await self.next_in_chain.capture_text(text)
 
                     def flush(self) -> None:
-                        # Generation done ≠ SPEECH done (the transcript
-                        # streams ahead of the audio — field 2026-09-01:
-                        # the bubble faded mid-sentence). Show the full
-                        # text, keep it on screen; the fade fires when
-                        # the agent actually stops speaking.
-                        if self._buf:
-                            self.showing = True
-                            _hint({"type": "caption",
-                                   "text": _ascii(_redact(self._buf))[-220:],
-                                   "latest": "", "final": False})
-                        self._buf = ""
+                        if self._partial:
+                            self.words.append(self._partial)
+                            self._partial = ""
                         if self.next_in_chain:
                             self.next_in_chain.flush()
+
+                    def start_reveal(self) -> None:
+                        if self._task is None or self._task.done():
+                            self._task = asyncio.ensure_future(
+                                self._reveal())
+
+                    async def _reveal(self) -> None:
+                        try:
+                            idle_polls = 0
+                            while idle_polls < 8:  # words may still stream in
+                                if self.idx >= len(self.words):
+                                    idle_polls += 1
+                                    await asyncio.sleep(0.2)
+                                    continue
+                                idle_polls = 0
+                                word = self.words[self.idx]
+                                self.idx += 1
+                                shown = " ".join(
+                                    self.words[:self.idx])[-200:]
+                                self.showing = True
+                                _hint({"type": "caption", "text": shown,
+                                       "latest": word[-40:],
+                                       "final": False})
+                                await asyncio.sleep(self.WORD_MS)
+                        except asyncio.CancelledError:
+                            pass
+
+                    def stop_reveal(self, fade: bool) -> None:
+                        if self._task is not None:
+                            self._task.cancel()
+                            self._task = None
+                        if self.words and self.idx < len(self.words):
+                            # Speech ended before the reveal caught up:
+                            # show the full line, then fade.
+                            _hint({"type": "caption",
+                                   "text": " ".join(self.words)[-200:],
+                                   "latest": "", "final": False})
+                        self.words = []
+                        self.idx = 0
+                        if fade and self.showing:
+                            self.showing = False
+                            _hint({"type": "caption", "text": "",
+                                   "latest": "", "final": True})
 
                 caption_sink = _CaptionSink(session.output.transcription)
                 session.output.transcription = caption_sink
@@ -415,22 +457,38 @@ async def entrypoint(ctx: JobContext) -> None:
                         "linked=%s)", REALTIME_MODEL, tier,
                         getattr(linked, "identity", linked))
 
+            # Silence timeout (field round 3: "the listening state just
+            # stays on") — a session nobody is talking in ends itself.
+            last_state_change = {"t": time.monotonic(), "state": ""}
+            SILENCE_END_S = 75.0
+
             @session.on("agent_state_changed")
             def _on_agent_state(ev) -> None:
                 st = str(getattr(ev, "new_state", ""))
+                last_state_change["t"] = time.monotonic()
+                last_state_change["state"] = st
                 if st == "thinking":
                     _hint({"type": "thinking", "on": True})
                 elif st == "speaking":
                     _hint({"type": "speaking"})
-                elif st == "listening":
+                    if caption_sink is not None:
+                        caption_sink.start_reveal()
+                elif st in ("listening", "idle"):
                     _hint({"type": "thinking", "on": False})
-                    # The voice has actually stopped — NOW the bubble
-                    # may fade (an empty final caption keeps the shown
-                    # text and starts the fade timer).
-                    if caption_sink is not None and caption_sink.showing:
-                        caption_sink.showing = False
-                        _hint({"type": "caption", "text": "",
-                               "latest": "", "final": True})
+                    # The voice actually stopped: finish the karaoke
+                    # line and let the bubble fade.
+                    if caption_sink is not None:
+                        caption_sink.stop_reveal(fade=True)
+
+            async def _silence_watch() -> None:
+                while True:
+                    await asyncio.sleep(5.0)
+                    idle_for = time.monotonic() - last_state_change["t"]
+                    if (last_state_change["state"] in ("listening", "idle", "")
+                            and idle_for >= SILENCE_END_S):
+                        logger.info("no conversation for %.0fs — ending "
+                                    "session", idle_for)
+                        return
 
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check —
@@ -451,6 +509,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 "room-closed": asyncio.ensure_future(closed.wait()),
                 "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
                 "device-dropped": asyncio.ensure_future(drop["ev"].wait()),
+                "silence-timeout": asyncio.ensure_future(_silence_watch()),
             }
             done, pending = await asyncio.wait(
                 waiters.values(),
