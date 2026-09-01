@@ -490,14 +490,27 @@ async def entrypoint(ctx: JobContext) -> None:
                                     "session", idle_for)
                         return
 
+            # Session errors must be LOUD — the round-5 "deafness" was
+            # actually reply-silence with no diagnostic anywhere.
+            @session.on("error")
+            def _on_session_error(ev) -> None:
+                logger.error("session error: %s", getattr(ev, "error", ev))
+
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
-            # and the greeting doubles as the end-to-end audio check —
-            # tap-then-silence now means "broken", never "shy".
-            try:
-                session.generate_reply(instructions=(
-                    "Greet briefly — one warm sentence, then listen."))
-            except Exception as exc:
-                logger.warning("greeting failed: %s", exc)
+            # and the greeting doubles as the end-to-end audio check.
+            # Round-5 finding: fired immediately after start it silently
+            # produced NOTHING in every session (the realtime connection
+            # is still settling). Delayed, awaited, and loud on failure.
+            async def _greet() -> None:
+                try:
+                    await asyncio.sleep(0.8)
+                    handle = session.generate_reply(instructions=(
+                        "Greet briefly — one warm sentence, then listen."))
+                    await handle
+                    logger.info("greeting spoken")
+                except Exception as exc:
+                    logger.warning("greeting failed: %r", exc)
+            asyncio.ensure_future(_greet())
             await _publish(TOPIC_SESSION,
                            {"type": "session", "open": True, "tier": tier})
             # End on whichever comes first: room closed, sleep tap, the
