@@ -508,6 +508,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
             @session.on("user_input_transcribed")
             def _on_user_words(ev) -> None:
+                # Suti's speech IS activity (round 9: the silence
+                # timeout hung up mid-Adyostotram — a long recitation
+                # never transitions agent state, but it is the
+                # opposite of silence).
+                last_state_change["t"] = time.monotonic()
                 try:
                     txt = _ascii(_redact(str(
                         getattr(ev, "transcript", ""))))[:200]
