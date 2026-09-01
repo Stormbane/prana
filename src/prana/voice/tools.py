@@ -34,6 +34,7 @@ def build_voice_tools(
     session_id: str = "",
     music=None,
     publish=None,
+    end_session=None,
 ) -> list:
     """Build the closed voice-tier tool list for an AgentSession.
 
@@ -183,6 +184,16 @@ def build_voice_tools(
             return {"delivered": False, "detail": str(exc)}
 
     @function_tool()
+    async def end_conversation() -> dict:
+        """End this conversation and go back to sleep. Call when Suti
+        says stop / that's all / goodnight — say a brief goodbye FIRST,
+        then call this."""
+        if end_session is None:
+            return {"ended": False, "reason": "not available in this mode"}
+        end_session()
+        return {"ended": True}
+
+    @function_tool()
     async def escalate_to_narada(
         question: Annotated[str, "the question, quoted from what Suti asked"],
     ) -> dict:
@@ -286,6 +297,7 @@ def build_voice_tools(
         recall_memory,
         remember_this,
         escalate_to_narada,
+        end_conversation,
         play_music,
         stop_music,
         what_is_playing,

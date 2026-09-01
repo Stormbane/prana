@@ -1,7 +1,7 @@
 # The conversational timeline & memory gradient
 
 **Date:** 2026-09-02
-**Status:** DRAFT v1 — Suti's spoken design, transcribed and structured;
+**Status:** DRAFT v1.1 — Suti's design + his compaction cadence folded in;
 awaiting iteration + cross-review before build.
 **Origin:** Suti, end of the embodiment marathon session, prompted by the
 voice correctly complaining it had no transcript of the previous
@@ -52,11 +52,17 @@ conversation.
   existing pipelines apply. Ingest adapters per surface (voice
   transcripts → import on session close; telegram bridge → tee;
   claude-code → session-close hook or watcher).
-- **Gradient compaction**: tiered summaries maintained by scheduled
-  passes (the debrief being the daily tier): raw (hours) → per-
-  conversation summaries (days) → daily digests (weeks) → weekly
-  (months). Each tier written back into the timeline branch; older raw
-  entries retained but no longer injected.
+- **Gradient compaction (Suti's cadence, 2026-09-02)**: hierarchical
+  scheduled passes under Hermes cron —
+  - **hourly**: compress the last hour's raw utterances into
+    per-conversation summaries; NO-OP when there was no conversation
+    (cheap check first, zero cost when silent);
+  - **daily** (the debrief already IS this pass — extend it to write
+    the day-digest into the timeline);
+  - **weekly**: fold day-digests into a week line.
+  Each tier written back into the timeline branch; older raw entries
+  retained but no longer injected. Compression voice: subscription
+  `claude -p`, same as the debrief.
 - **Present-moment context builder**: one function, budget-capped
   (~1.5-2KB), assembling: last conversation tail (if fresh) → today's
   conversation summaries → yesterday-digest → this-week line. Same
