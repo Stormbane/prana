@@ -331,9 +331,17 @@ async def entrypoint(ctx: JobContext) -> None:
         state["in_session"] = True
         sleep_tap.clear()
         try:
+            from livekit.plugins.openai.realtime import (
+                realtime_model as _rt_mod)
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(
-                    model=REALTIME_MODEL, voice=REALTIME_VOICE),
+                    model=REALTIME_MODEL, voice=REALTIME_VOICE,
+                    # Streaming input transcription: interim deltas so
+                    # Suti's words land in his bubble AS he says them
+                    # (round 8) — whisper-1 is final-only.
+                    input_audio_transcription=(
+                        _rt_mod.InputAudioTranscription(
+                            model="gpt-4o-mini-transcribe"))),
             )
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack
@@ -475,14 +483,19 @@ async def entrypoint(ctx: JobContext) -> None:
             last_state_change = {"t": time.monotonic(), "state": ""}
             SILENCE_END_S = 75.0
 
+            spoke_once = {"v": False}
+
             @session.on("agent_state_changed")
             def _on_agent_state(ev) -> None:
                 st = str(getattr(ev, "new_state", ""))
                 last_state_change["t"] = time.monotonic()
                 last_state_change["state"] = st
                 if st == "thinking":
+                    if not spoke_once["v"]:
+                        return  # greeting gen: no thinking blip (round 8)
                     _hint({"type": "thinking", "on": True})
                 elif st == "speaking":
+                    spoke_once["v"] = True
                     _hint({"type": "speaking"})
                     if caption_sink is not None:
                         caption_sink.start_reveal()
@@ -545,6 +558,17 @@ async def entrypoint(ctx: JobContext) -> None:
             # could otherwise show no REC glyph while a session stayed
             # live, falsifying the honest indicator; and with the human's
             # device gone there is no conversation anyway).
+            async def _session_heartbeat() -> None:
+                # The firmware clears session state after 30s without
+                # fresh proof (stuck-REC incident 2026-09-01 18:50: a
+                # mid-speech tap raced the box's wedged data channel;
+                # REC stayed lit on stale state with dead taps). The
+                # heartbeat IS the proof; it must outlive hiccups.
+                while True:
+                    await asyncio.sleep(10.0)
+                    _hint({"type": "session", "open": True})
+
+            hb_task = asyncio.ensure_future(_session_heartbeat())
             waiters = {
                 "room-closed": asyncio.ensure_future(closed.wait()),
                 "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
@@ -566,6 +590,10 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("session ending: %s", reason)
         finally:
             state["in_session"] = False
+            try:
+                hb_task.cancel()
+            except Exception:
+                pass
             if transcript is not None:
                 transcript.close(reason)
                 # B1: personal-tier sessions leave a digest in the
@@ -696,6 +724,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # auto-dispatch brings a fresh agent. Every tap is a first tap.
         if end_reason not in ("budget-refused", "device-absent-at-admission"):
             logger.info("session done — retiring job for fresh dispatch")
+            await _publish(TOPIC_SESSION, {"type": "recycling"})
             try:
                 from livekit import api as lkapi
                 lk = lkapi.LiveKitAPI()
