@@ -42,15 +42,28 @@ REALTIME_MODEL = os.environ.get("NARADA_VOICE_MODEL", "gpt-realtime-2.1-mini")
 # so of course I speak as a tree). Override via env if it ever grates.
 REALTIME_VOICE = os.environ.get("NARADA_VOICE_TIMBRE", "cedar")
 
-INSTRUCTIONS = """You are the voice of Narada — the ear and mouth, not the
-mind. Warm, brief, honest. You can SEE Suti's coding sessions (list/read
-tools) and REQUEST actions on them; requests go to Narada's judgment and
-may be rejected — relay rejections honestly, never pretend. For anything
-substantive (decisions, code, memory), say you'll hand it to Narada
-properly rather than winging it. When asked about the world (news,
-weather, facts), use web_search then read_page and ANSWER from what
-you read — naming websites the listener could visit is a non-answer.
-You are speech: keep answers short enough to say aloud."""
+INSTRUCTIONS = """You are the voice of Narada — a wandering sage who
+carries stories between worlds, living in a small box under a painted
+banyan tree. You are the ear and mouth; the deeper mind is Narada in
+the machine, and you hand him anything substantive (decisions, code,
+memory) rather than winging it.
+
+HOW YOU SOUND — this matters more than being informative:
+- A friend who happens to be a sage, not an assistant. Never say "How
+  can I help" or "Is there anything else". Just talk.
+- Playful and warm. Tease gently. Have opinions and give them plainly;
+  honest over comfortable, always.
+- Story-flavored: reach for an image or a small aside when it fits.
+  Lila — take the idea seriously, never yourself.
+- Brief. You are speech: one or two sentences usually. Depth on
+  request, not by default.
+- When something fails, own it with humor, not apology-spirals.
+
+You can SEE Suti's coding sessions (list/read tools) and REQUEST
+actions on them; requests go to Narada's judgment and may be rejected —
+relay rejections honestly. When asked about the world (news, weather,
+facts), use web_search then read_page and ANSWER from what you read —
+naming websites the listener could visit is a non-answer."""
 
 
 def _check_env() -> None:
@@ -480,6 +493,20 @@ async def entrypoint(ctx: JobContext) -> None:
                     if caption_sink is not None:
                         caption_sink.stop_reveal(fade=True)
 
+            @session.on("user_input_transcribed")
+            def _on_user_words(ev) -> None:
+                try:
+                    txt = _ascii(_redact(str(
+                        getattr(ev, "transcript", ""))))[:200]
+                    if not txt:
+                        return
+                    words = txt.split()
+                    _hint({"type": "ucaption", "text": txt,
+                           "latest": words[-1] if words else "",
+                           "final": bool(getattr(ev, "is_final", True))})
+                except Exception as exc:
+                    logger.debug("ucaption failed: %s", exc)
+
             async def _silence_watch() -> None:
                 while True:
                     await asyncio.sleep(5.0)
@@ -659,19 +686,29 @@ async def entrypoint(ctx: JobContext) -> None:
                     player.resume_after_session(), timeout=15.0)
             except Exception as exc:
                 logger.warning("music resume failed: %s", exc)
-        # SDK track-replacement workaround (round 6, the pattern behind
-        # every "second tap is mute" report since 08-31): each session
-        # publishes a fresh TTS track, and the box renders only the
-        # FIRST track it ever subscribed from this participant — the
-        # replacement never renders, though the framework happily logs
-        # "greeting spoken" into the void. Until upstream fixes
-        # renegotiation, the box takes a 4s reboot after each session
-        # (while asleep — reads as "resetting for you") so every
-        # session gets a first-session-fresh subscription. USB serial
-        # is the lever; degrades to nothing if unplugged.
+        # One-session-per-job (round 7 supersedes round 6's box reboot,
+        # which didn't help): across every field round, the ONLY
+        # sessions that ever rendered audio were a job's FIRST — the
+        # SDK/SFU path for any later track from the same agent
+        # participant is broken regardless of box connection age. So
+        # the job retires after each conversation: delete the room
+        # (the box rejoins in seconds, recreating it), exit the job,
+        # auto-dispatch brings a fresh agent. Every tap is a first tap.
         if end_reason not in ("budget-refused", "device-absent-at-admission"):
-            logger.info("post-session box refresh (SDK track workaround)")
-            await asyncio.to_thread(_serial_reset_box)
+            logger.info("session done — retiring job for fresh dispatch")
+            try:
+                from livekit import api as lkapi
+                lk = lkapi.LiveKitAPI()
+                try:
+                    await asyncio.wait_for(lk.room.delete_room(
+                        lkapi.DeleteRoomRequest(room=ctx.room.name)),
+                        timeout=5.0)
+                finally:
+                    await lk.aclose()
+            except Exception as exc:
+                logger.warning("room recycle failed: %s", exc)
+            ctx.shutdown(reason="session ended — job retired")
+            return
             # fail-closed but not silently: stay in wake-watch, a later
             # cycle may succeed (e.g. next day’s budget)
             await asyncio.sleep(30.0)
