@@ -264,7 +264,12 @@ def build_voice_tools(
         """Read a public web page (text only, truncated). Local and
         private addresses are refused by design."""
         import asyncio as _aio
-        _toast("web", "reading a page")
+        from urllib.parse import urlsplit as _us
+        try:
+            _host = _us(url).hostname or "a page"
+        except ValueError:
+            _host = "a page"
+        _toast("web", f"reading {_host}")
         try:
             text = await _aio.to_thread(web.fetch, url)
             return {"text": text}
