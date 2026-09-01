@@ -90,6 +90,8 @@ VOICE_TOOL_NAMES = {
     # quarantine sentinel lives in test_voice_remember.py.
     "remember_this",
     "escalate_to_narada",
+    # round 10: "Narada, stop" hangs up via the normal sleep path
+    "end_conversation",
     # B5 (ratified): music is shareable-tier — playing a station
     # discloses nothing; the audio-owner state machine pauses it for
     # every session and wake-word admission is off while it plays.
