@@ -659,7 +659,19 @@ async def entrypoint(ctx: JobContext) -> None:
                     player.resume_after_session(), timeout=15.0)
             except Exception as exc:
                 logger.warning("music resume failed: %s", exc)
-        if end_reason in ("budget-refused",):
+        # SDK track-replacement workaround (round 6, the pattern behind
+        # every "second tap is mute" report since 08-31): each session
+        # publishes a fresh TTS track, and the box renders only the
+        # FIRST track it ever subscribed from this participant — the
+        # replacement never renders, though the framework happily logs
+        # "greeting spoken" into the void. Until upstream fixes
+        # renegotiation, the box takes a 4s reboot after each session
+        # (while asleep — reads as "resetting for you") so every
+        # session gets a first-session-fresh subscription. USB serial
+        # is the lever; degrades to nothing if unplugged.
+        if end_reason not in ("budget-refused", "device-absent-at-admission"):
+            logger.info("post-session box refresh (SDK track workaround)")
+            await asyncio.to_thread(_serial_reset_box)
             # fail-closed but not silently: stay in wake-watch, a later
             # cycle may succeed (e.g. next day’s budget)
             await asyncio.sleep(30.0)
