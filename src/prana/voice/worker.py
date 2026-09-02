@@ -336,6 +336,17 @@ async def entrypoint(ctx: JobContext) -> None:
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(
                     model=REALTIME_MODEL, voice=REALTIME_VOICE,
+                    # Echo-loop defense (field 2026-09-02: the box's
+                    # SR_LOW_COST AEC leaks speaker audio; the default
+                    # VAD heard Narada's own greeting as user speech,
+                    # barged in on him, and he answered his echo three
+                    # times). Higher threshold + longer silence: echo
+                    # is quieter and choppier than a real person at
+                    # the desk.
+                    turn_detection=_rt_mod.TurnDetection(
+                        type="server_vad", threshold=0.8,
+                        prefix_padding_ms=300,
+                        silence_duration_ms=700),
                     # Streaming input transcription: interim deltas so
                     # Suti's words land in his bubble AS he says them
                     # (round 8) — whisper-1 is final-only.
@@ -550,8 +561,12 @@ async def entrypoint(ctx: JobContext) -> None:
             async def _greet() -> None:
                 try:
                     await asyncio.sleep(0.8)
-                    handle = session.generate_reply(instructions=(
-                        "Greet briefly — one warm sentence, then listen."))
+                    handle = session.generate_reply(
+                        instructions=("Greet briefly — one warm "
+                                      "sentence, then listen."),
+                        # The greeting finishes its sentence: its own
+                        # echo must not cut it off mid-hello.
+                        allow_interruptions=False)
                     await handle
                     logger.info("greeting spoken")
                 except Exception as exc:
