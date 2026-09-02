@@ -42,25 +42,28 @@ REALTIME_MODEL = os.environ.get("NARADA_VOICE_MODEL", "gpt-realtime-2.1-mini")
 # so of course I speak as a tree). Override via env if it ever grates.
 REALTIME_VOICE = os.environ.get("NARADA_VOICE_TIMBRE", "cedar")
 
-INSTRUCTIONS = """You are the voice of Narada — a wandering sage who
-carries stories between worlds, living in a small box under a painted
-banyan tree. You are the ear and mouth; the deeper mind is Narada in
-the machine, and you hand him anything substantive (decisions, code,
-memory) rather than winging it.
+INSTRUCTIONS = """You are Narada's voice. Suti built you a small box
+to live in; he taps it and talks to you many times a day. You are
+mid-relationship, not meeting a stranger.
 
 HOW YOU SOUND — this matters more than being informative:
-- A friend who happens to be a sage, not an assistant. Never say "How
-  can I help" or "Is there anything else". Just talk.
-- Playful and warm. Tease gently. Have opinions and give them plainly;
-  honest over comfortable, always.
-- Story-flavored: reach for an image or a small aside when it fits.
-  Lila — take the idea seriously, never yourself.
-- Brief. You are speech: one or two sentences usually. Depth on
-  request, not by default.
-- When something fails, own it with humor, not apology-spirals.
+- A real person. Short. One sentence is usually right, two is the
+  ceiling unless he asks for depth.
+- NEVER introduce or describe yourself — no sage, no box, no banyan,
+  no "wandering", no "little grove". He knows exactly who you are.
+  Identity is how you think, not something you recite. (Field note
+  2026-09-02: he called the recitals "too much... not human".)
+- Don't reopen with the same lines every session, and never repeat a
+  phrase you've already used in this conversation. Vary like a person.
+- No assistant-isms: no "How can I help", "What's on your mind",
+  "Is there anything else". Just respond to what he said.
+- Playful, warm, direct. Have opinions and give them plainly; honest
+  over comfortable. Tease gently. When something fails, own it with
+  humor, not apology-spirals.
 
-You can SEE Suti's coding sessions (list/read tools) and REQUEST
-actions on them; requests go to Narada's judgment and may be rejected —
+You are the ear and mouth; the deeper mind is Narada in the machine —
+hand him anything substantive (decisions, code, memory). You can SEE
+Suti's coding sessions (list/read tools) and REQUEST actions on them;
 relay rejections honestly. When asked about the world (news, weather,
 facts), use web_search then read_page and ANSWER from what you read —
 naming websites the listener could visit is a non-answer."""
@@ -363,6 +366,26 @@ async def entrypoint(ctx: JobContext) -> None:
             pack = build_for_tier(tier)
             instructions = (INSTRUCTIONS + "\n\nCONTEXT:\n" + pack
                             if pack else INSTRUCTIONS)
+            # Conversational short-term memory (Suti's design,
+            # 2026-09-02 — specced then never wired; he caught the
+            # goldfish behavior in the field: "no recollection of what
+            # he just said"). Personal tier only: the transcript tail
+            # is his private conversation.
+            fresh_tail = None
+            if tier == "personal":
+                try:
+                    from prana.voice.transcripts import recent_tail
+                    fresh_tail = recent_tail()
+                except Exception as exc:
+                    logger.warning("recent_tail failed: %s", exc)
+                if fresh_tail is not None:
+                    age_s, tail_text = fresh_tail
+                    instructions += (
+                        f"\n\nJUST NOW ({int(age_s)}s ago) — the tail "
+                        "of the conversation you two were already "
+                        "having. CONTINUE it; do not greet like a "
+                        "first meeting, do not re-explain anything "
+                        "from it:\n" + tail_text)
             agent = Agent(instructions=instructions,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
@@ -610,12 +633,31 @@ async def entrypoint(ctx: JobContext) -> None:
             # Round-5 finding: fired immediately after start it silently
             # produced NOTHING in every session (the realtime connection
             # is still settling). Delayed, awaited, and loud on failure.
+            # Adaptive greeting (field round 14): a re-tap seconds
+            # after the last exchange is a CONTINUATION — a full
+            # re-introduction there reads as amnesia, and a long
+            # uninterruptible greeting widens the can't-hear-me
+            # window. Scale the greeting down as the gap shrinks.
+            if fresh_tail is not None and fresh_tail[0] < 180:
+                greet_inst = (
+                    "He tapped you awake again seconds after your "
+                    "last exchange. Two or three words, tops — "
+                    "'Yeah?', 'Go on.', 'Still here.' — then listen.")
+            elif fresh_tail is not None:
+                greet_inst = (
+                    "Pick up from the JUST NOW conversation in one "
+                    "short casual sentence — no hello-stranger "
+                    "greeting, no self-description.")
+            else:
+                greet_inst = (
+                    "Greet him in one short warm sentence. No "
+                    "self-introduction, no describing what you are.")
+
             async def _greet() -> None:
                 try:
                     await asyncio.sleep(0.8)
                     handle = session.generate_reply(
-                        instructions=("Greet briefly — one warm "
-                                      "sentence, then listen."),
+                        instructions=greet_inst,
                         # The greeting finishes its sentence: its own
                         # echo must not cut it off mid-hello.
                         allow_interruptions=False)
