@@ -337,14 +337,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 llm=lk_openai.realtime.RealtimeModel(
                     model=REALTIME_MODEL, voice=REALTIME_VOICE,
                     # Echo-loop defense (field 2026-09-02: the box's
-                    # SR_LOW_COST AEC leaks speaker audio; the default
-                    # VAD heard Narada's own greeting as user speech,
-                    # barged in on him, and he answered his echo three
-                    # times). Higher threshold + longer silence: echo
-                    # is quieter and choppier than a real person at
-                    # the desk.
+                    # AEC leaks speaker audio; the default VAD heard
+                    # Narada's own greeting as user speech, barged in
+                    # on him, and he answered his echo three times).
+                    # 0.8 proved DEAF to Suti at room distance (field
+                    # same evening, session 10:10) — 0.65 is the
+                    # compromise: above echo residue, below his voice.
                     turn_detection=_rt_mod.TurnDetection(
-                        type="server_vad", threshold=0.8,
+                        type="server_vad", threshold=0.65,
                         prefix_padding_ms=300,
                         silence_duration_ms=700),
                     # Streaming input transcription: interim deltas so
@@ -419,6 +419,8 @@ async def entrypoint(ctx: JobContext) -> None:
                         self.showing = False
                         self._task = None
                         self._partial = ""
+                        self._draining = False
+                        self.on_drained = None
 
                     async def capture_text(self, text: str) -> None:
                         self._partial += _ascii(_redact(text))
@@ -436,6 +438,7 @@ async def entrypoint(ctx: JobContext) -> None:
                             self.next_in_chain.flush()
 
                     def start_reveal(self) -> None:
+                        self._draining = False
                         if self._task is None or self._task.done():
                             self._task = asyncio.ensure_future(
                                 self._reveal())
@@ -445,6 +448,8 @@ async def entrypoint(ctx: JobContext) -> None:
                             idle_polls = 0
                             while idle_polls < 8:  # words may still stream in
                                 if self.idx >= len(self.words):
+                                    if self._draining:
+                                        break  # caught up + voice done
                                     idle_polls += 1
                                     await asyncio.sleep(0.2)
                                     continue
@@ -458,25 +463,38 @@ async def entrypoint(ctx: JobContext) -> None:
                                        "latest": word[-40:],
                                        "final": False})
                                 await asyncio.sleep(self.WORD_MS)
+                            self._finish()
                         except asyncio.CancelledError:
                             pass
 
-                    def stop_reveal(self, fade: bool) -> None:
-                        if self._task is not None:
-                            self._task.cancel()
-                            self._task = None
-                        if self.words and self.idx < len(self.words):
-                            # Speech ended before the reveal caught up:
-                            # show the full line, then fade.
+                    def _finish(self) -> None:
+                        # Reveal reached the last word: settle the full
+                        # line, fade, and hand the face back.
+                        if self.words:
                             _hint({"type": "caption",
                                    "text": " ".join(self.words)[-200:],
                                    "latest": "", "final": False})
                         self.words = []
                         self.idx = 0
-                        if fade and self.showing:
+                        self._partial = ""
+                        if self.showing:
                             self.showing = False
                             _hint({"type": "caption", "text": "",
                                    "latest": "", "final": True})
+                        cb, self.on_drained = self.on_drained, None
+                        if cb is not None:
+                            cb()
+
+                    def drain(self, on_done) -> None:
+                        # Voice output ended, but the paced karaoke may
+                        # still be behind (field round 13: the talking
+                        # face snapped to listening while words were
+                        # still revealing). Let the reveal reach the
+                        # last word, THEN call on_done.
+                        self.on_drained = on_done
+                        self._draining = True
+                        if self._task is None or self._task.done():
+                            self._finish()
 
                 caption_sink = _CaptionSink(session.output.transcription)
                 session.output.transcription = caption_sink
@@ -512,14 +530,48 @@ async def entrypoint(ctx: JobContext) -> None:
                     if caption_sink is not None:
                         caption_sink.start_reveal()
                 elif st in ("listening", "idle"):
-                    _hint({"type": "thinking", "on": False})
-                    # The voice actually stopped: finish the karaoke
-                    # line and let the bubble fade.
+                    # The voice stopped, but the karaoke may still be
+                    # revealing — keep the talking face until the last
+                    # word lands (Suti, round 13), then flip to
+                    # listening. Skip the flip if he started speaking
+                    # again meanwhile.
+                    def _face_back() -> None:
+                        if last_state_change["state"] in (
+                                "listening", "idle", ""):
+                            _hint({"type": "thinking", "on": False})
                     if caption_sink is not None:
-                        caption_sink.stop_reveal(fade=True)
+                        caption_sink.drain(_face_back)
+                    else:
+                        _face_back()
+
+            # Suti's bubble should appear the moment he starts talking
+            # (round 13) — but the realtime API only transcribes a
+            # segment once it ends, so words can't stream live. The
+            # VAD start event CAN: show a "..." placeholder instantly;
+            # the transcript replaces it when the segment closes.
+            user_words_seen = {"v": False}
+
+            @session.on("user_state_changed")
+            def _on_user_state(ev) -> None:
+                ust = str(getattr(ev, "new_state", ""))
+                if ust == "speaking":
+                    last_state_change["t"] = time.monotonic()
+                    user_words_seen["v"] = False
+                    _hint({"type": "ucaption", "text": "...",
+                           "latest": "...", "final": False})
+                elif ust == "listening":
+                    async def _fade_if_untranscribed() -> None:
+                        await asyncio.sleep(2.5)
+                        if not user_words_seen["v"]:
+                            # VAD blip with no words behind it — don't
+                            # leave a stale "..." bubble on screen.
+                            _hint({"type": "ucaption", "text": "",
+                                   "latest": "", "final": True})
+                    asyncio.ensure_future(_fade_if_untranscribed())
 
             @session.on("user_input_transcribed")
             def _on_user_words(ev) -> None:
+                user_words_seen["v"] = True
                 # Suti's speech IS activity (round 9: the silence
                 # timeout hung up mid-Adyostotram — a long recitation
                 # never transitions agent state, but it is the
