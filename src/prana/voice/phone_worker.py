@@ -37,6 +37,7 @@ DEFAULT_AGENT_NAME = "akhada-phone"
 # Distinct from the box worker's ports (health 8792 / agents 8793) so
 # both workers run on one machine without a fight.
 AGENTS_PORT = int(os.environ.get("AKHADA_VOICE_AGENTS_PORT", "8797"))
+HEALTH_PORT = int(os.environ.get("AKHADA_VOICE_HEALTH_PORT", "8796"))
 
 PHONE_NOTE = """
 
@@ -330,8 +331,19 @@ def main() -> None:
         # rather than shadow it (state.json hard constraint).
         raise SystemExit("AKHADA_AGENT_NAME must be non-empty: the phone "
                          "worker is explicit-dispatch only")
-    logger.info("akhada phone worker: agent_name=%s port=%d",
-                agent_name, AGENTS_PORT)
+    # Honest health for the supervisor (A2): reuse the box worker's
+    # shim — 200 only when the agents server answers AND an
+    # authenticated LiveKit round-trip succeeds — pointed at THIS
+    # worker's ports. This mutates the box module's port globals FOR
+    # THIS INTERPRETER: fine under the supervisor (each component is
+    # its own subprocess), wrong for any future in-process launcher
+    # that runs both mains — give the shim explicit ports before
+    # building one.
+    box.HEALTH_PORT = HEALTH_PORT
+    box.AGENTS_PORT = AGENTS_PORT
+    box._start_health_shim()
+    logger.info("akhada phone worker: agent_name=%s agents=%d health=%d",
+                agent_name, AGENTS_PORT, HEALTH_PORT)
     agents.cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
         agent_name=agent_name,
