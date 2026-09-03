@@ -99,6 +99,10 @@ VOICE_TOOL_NAMES = {
     "stop_music",
     "what_is_playing",
     "set_volume",       # speaker loudness via device protocol
+    # 2026-09-03: hearing profile for noisy rooms — flips a local flag
+    # file only (no data leaves the house); barge-in off + VAD raised
+    # while the TV is on. Presentation/behavior, not a new capability.
+    "tv_mode",
     "set_music_volume",
     # B4 (ratified): reads of the public web, SSRF-contracted in
     # web.py (validated resolution, pinned connections, per-hop
