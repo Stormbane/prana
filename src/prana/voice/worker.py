@@ -361,6 +361,7 @@ async def entrypoint(ctx: JobContext) -> None:
         session = None
         transcript = None
         reason = "unknown"
+        usage = {"in": 0, "out": 0, "cached": 0}
         state["in_session"] = True
         sleep_tap.clear()
         try:
@@ -429,6 +430,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
             ctx.room.on("track_muted", _on_track_muted)
             ctx.room.on("track_unmuted", _on_track_unmuted)
+
+            # Real cost accounting (Suti round 20: "how much did that
+            # cost?" — it was an estimate because usage wasn't logged;
+            # the 9.5-min session even hit the 40k TPM rate limit). The
+            # realtime metrics carry actual token counts; accumulate
+            # and price them at session end instead of guessing.
+            @session.on("metrics_collected")
+            def _on_metrics(ev) -> None:
+                m = getattr(ev, "metrics", ev)
+                it = getattr(m, "input_tokens", None)
+                if it is None:
+                    return  # not a realtime-model metric
+                usage["in"] += it
+                usage["out"] += getattr(m, "output_tokens", 0) or 0
+                det = getattr(m, "input_token_details", None)
+                usage["cached"] += getattr(det, "cached_tokens", 0) or 0
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack
             # for every session; the personal pack ONLY behind the
@@ -864,6 +881,22 @@ async def entrypoint(ctx: JobContext) -> None:
             else:
                 reason = next(k for k, v in waiters.items() if v in done)
             logger.info("session ending: %s", reason)
+            # Price the session (gpt-realtime-2.1 audio-dominant rates,
+            # 2026-09: $32/1M uncached in, $0.40/1M cached in, $64/1M
+            # out). Env-tunable if the model or pricing changes.
+            try:
+                p_in = float(os.environ.get("NARADA_PRICE_IN", "32"))
+                p_cached = float(os.environ.get("NARADA_PRICE_CACHED", "0.40"))
+                p_out = float(os.environ.get("NARADA_PRICE_OUT", "64"))
+                uncached = max(0, usage["in"] - usage["cached"])
+                cost = (uncached * p_in + usage["cached"] * p_cached
+                        + usage["out"] * p_out) / 1e6
+                logger.info(
+                    "session cost ~$%.4f (in=%d cached=%d out=%d, %.0fs)",
+                    cost, usage["in"], usage["cached"], usage["out"],
+                    time.monotonic() - started)
+            except Exception as exc:
+                logger.debug("cost accounting failed: %s", exc)
         finally:
             state["in_session"] = False
             try:

@@ -227,8 +227,19 @@ def build_voice_tools(
         then call this."""
         if end_session is None:
             return {"ended": False, "reason": "not available in this mode"}
-        end_session()
-        return {"ended": True}
+        # Let the goodbye finish (field 2026-09-04: "he said okay,
+        # started to say something, got cut off"). Ending the session
+        # the instant the tool returns tears down the audio mid-word,
+        # so defer the actual hangup a few seconds — enough for a
+        # short farewell to play out.
+        import asyncio as _aio
+
+        async def _graceful_end() -> None:
+            await _aio.sleep(4.0)
+            end_session()
+
+        _aio.ensure_future(_graceful_end())
+        return {"ended": True, "note": "saying goodbye, then sleeping"}
 
     @function_tool()
     async def escalate_to_narada(
@@ -419,11 +430,23 @@ def build_voice_tools(
     if tier == "personal":
         tools.extend([message_suti, set_timer, set_reminder,
                       list_timers, cancel_timer])
-        tools.extend(_akhada_tools(session_id))
+        tools.extend(_akhada_tools(session_id, _toast))
     return tools
 
 
-def _akhada_tools(session_id: str) -> list:
+# Friendly labels for akhada activity chips (Suti round 20: fitness
+# logging was invisible — no chip). Unknown tools fall back to the
+# raw name.
+_AKHADA_LABELS = {
+    "log_meal": "logging meal",
+    "log_vital": "logging vital",
+    "log_workout": "logging workout",
+    "log_weight": "logging weight",
+    "log_water": "logging water",
+}
+
+
+def _akhada_tools(session_id: str, toast=None) -> list:
     """Akhada's fitness/diet tool pack (log_meal, log_vital, ...),
     personal tier only — it is Suti's food and body data. The pack is
     an optional sibling package: absent, the voice simply has no
@@ -434,7 +457,16 @@ def _akhada_tools(session_id: str) -> list:
     except ImportError:
         logger.info("akhada not installed — no fitness tools this session")
         return []
+
+    def _on_call(name: str, _args: dict) -> None:
+        if toast is not None:
+            toast("tool", _AKHADA_LABELS.get(name, name.replace("_", " ")))
+
     try:
+        return build_tools(session_id=session_id, on_call=_on_call)
+    except TypeError:
+        # Older akhada without the on_call hook — still works, just
+        # no activity chip.
         return build_tools(session_id=session_id)
     except Exception as exc:  # a broken pack must not cost the tap
         logger.warning("akhada tools unavailable: %s", exc)
