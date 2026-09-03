@@ -206,6 +206,27 @@ async def entrypoint(ctx: JobContext) -> None:
             ident = getattr(getattr(packet, "participant", None),
                             "identity", None)
             data = getattr(packet, "data", b"")
+            # Box settings panel (Suti round 16): the TV-mode toggle
+            # arrives as a device message; the worker owns the flag
+            # and echoes a chip back as confirmation. Works in and
+            # out of sessions.
+            if ident == DEVICE_IDENTITY:
+                try:
+                    _m = json.loads(data.decode("utf-8", "replace")
+                                    if isinstance(data, (bytes, bytearray))
+                                    else str(data))
+                except Exception:
+                    _m = None
+                if isinstance(_m, dict) and _m.get("type") == "tvmode":
+                    from prana.voice.tvmode import set_tv_mode
+                    on = bool(_m.get("on"))
+                    set_tv_mode(on)
+                    logger.info("TV mode %s (box settings panel)",
+                                "ON" if on else "off")
+                    asyncio.ensure_future(_publish(TOPIC_SESSION, {
+                        "type": "chip", "key": "tv", "icon": "tv",
+                        "text": "TV mode" if on else ""}))
+                    return
             if state["in_session"]:
                 if is_sleep_tap(ident, data):
                     sleep_tap.set()
