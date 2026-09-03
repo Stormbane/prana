@@ -406,7 +406,29 @@ async def entrypoint(ctx: JobContext) -> None:
                     input_audio_transcription=(
                         _rt_mod.InputAudioTranscription(
                             model="gpt-4o-mini-transcribe"))),
+                # The cosmetic "away" state (default 15s of mutual
+                # silence) is a red herring in the deaf-after-silence
+                # report and does nothing useful for us — we own the
+                # 75s silence-timeout. Disable it so the user is only
+                # ever speaking/listening (field 2026-09-04).
+                user_away_timeout=None,
             )
+            # Deaf-after-silence diagnostic (Suti round 19: ~10s of
+            # quiet and the mic goes deaf while REC stays lit). Log the
+            # device audio track's mute transitions — this tells us
+            # whether the BOX stopped sending (mute) or the MODEL
+            # stopped detecting (VAD silent while track stays live).
+            def _on_track_muted(pub, participant) -> None:
+                if getattr(participant, "identity", None) == DEVICE_IDENTITY:
+                    logger.warning("device audio track MUTED mid-session "
+                                   "— box stopped sending")
+
+            def _on_track_unmuted(pub, participant) -> None:
+                if getattr(participant, "identity", None) == DEVICE_IDENTITY:
+                    logger.info("device audio track unmuted")
+
+            ctx.room.on("track_muted", _on_track_muted)
+            ctx.room.on("track_unmuted", _on_track_unmuted)
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack
             # for every session; the personal pack ONLY behind the
