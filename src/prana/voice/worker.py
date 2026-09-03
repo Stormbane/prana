@@ -444,12 +444,14 @@ async def entrypoint(ctx: JobContext) -> None:
                         self._partial = ""
                         self._draining = False
                         self.on_drained = None
+                        self._dropping = False
 
                     async def capture_text(self, text: str) -> None:
-                        self._partial += _ascii(_redact(text))
-                        parts = self._partial.split(" ")
-                        self._partial = parts.pop()  # maybe mid-word
-                        self.words.extend(w for w in parts if w)
+                        if not self._dropping:
+                            self._partial += _ascii(_redact(text))
+                            parts = self._partial.split(" ")
+                            self._partial = parts.pop()  # maybe mid-word
+                            self.words.extend(w for w in parts if w)
                         if self.next_in_chain:
                             await self.next_in_chain.capture_text(text)
 
@@ -462,6 +464,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
                     def start_reveal(self) -> None:
                         self._draining = False
+                        self._dropping = False
                         if self._task is None or self._task.done():
                             self._task = asyncio.ensure_future(
                                 self._reveal())
@@ -519,6 +522,29 @@ async def entrypoint(ctx: JobContext) -> None:
                         if self._task is None or self._task.done():
                             self._finish()
 
+                    def cut(self, on_done=None) -> None:
+                        # Barge-in (field round 15): he interrupted —
+                        # the remaining words must NOT keep playing
+                        # out, and residue from the cancelled reply
+                        # must not prepend the next one. Clear, fade,
+                        # hand the face back now.
+                        self.on_drained = on_done
+                        self._dropping = True
+                        if self._task is not None:
+                            self._task.cancel()
+                            self._task = None
+                        self._draining = False
+                        self.words = []
+                        self.idx = 0
+                        self._partial = ""
+                        if self.showing:
+                            self.showing = False
+                            _hint({"type": "caption", "text": "",
+                                   "latest": "", "final": True})
+                        cb, self.on_drained = self.on_drained, None
+                        if cb is not None:
+                            cb()
+
                 caption_sink = _CaptionSink(session.output.transcription)
                 session.output.transcription = caption_sink
             except Exception as exc:
@@ -553,19 +579,21 @@ async def entrypoint(ctx: JobContext) -> None:
                     if caption_sink is not None:
                         caption_sink.start_reveal()
                 elif st in ("listening", "idle"):
-                    # The voice stopped, but the karaoke may still be
-                    # revealing — keep the talking face until the last
-                    # word lands (Suti, round 13), then flip to
-                    # listening. Skip the flip if he started speaking
-                    # again meanwhile.
+                    # The voice stopped. Natural end: keep the talking
+                    # face until the karaoke's last word lands (round
+                    # 13). BARGE-IN (he's speaking right now): the
+                    # rest of the cancelled reply must not keep
+                    # scrolling (round 15) — cut immediately.
                     def _face_back() -> None:
                         if last_state_change["state"] in (
                                 "listening", "idle", ""):
                             _hint({"type": "thinking", "on": False})
-                    if caption_sink is not None:
-                        caption_sink.drain(_face_back)
-                    else:
+                    if caption_sink is None:
                         _face_back()
+                    elif user_speaking_now["v"]:
+                        caption_sink.cut(_face_back)
+                    else:
+                        caption_sink.drain(_face_back)
 
             # Suti's bubble should appear the moment he starts talking
             # (round 13) — but the realtime API only transcribes a
@@ -574,17 +602,24 @@ async def entrypoint(ctx: JobContext) -> None:
             # the transcript replaces it when the segment closes.
             user_words_seen = {"v": False}
             user_ever_spoke = {"v": False}
+            user_speaking_now = {"v": False}
 
             @session.on("user_state_changed")
             def _on_user_state(ev) -> None:
                 ust = str(getattr(ev, "new_state", ""))
+                # INFO on purpose (round 15): Suti reports the "..."
+                # placeholder never shows before his pause — this line
+                # proves whether the VAD start event fires at all.
+                logger.info("user VAD state: %s", ust)
                 if ust == "speaking":
                     last_state_change["t"] = time.monotonic()
+                    user_speaking_now["v"] = True
                     user_ever_spoke["v"] = True
                     user_words_seen["v"] = False
                     _hint({"type": "ucaption", "text": "...",
                            "latest": "...", "final": False})
                 elif ust == "listening":
+                    user_speaking_now["v"] = False
                     async def _fade_if_untranscribed() -> None:
                         await asyncio.sleep(2.5)
                         if not user_words_seen["v"]:
