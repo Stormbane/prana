@@ -89,6 +89,15 @@ def _check_env() -> None:
             f"{', '.join(missing)}. Keys live in ~/.narada/.voice.env "
             f"(brain) and ~/.narada/.livekit.env (transport)."
         )
+    # The model/voice globals were read at import time, BEFORE the env
+    # files loaded — so ~/.narada/.voice.env never actually chose the
+    # model (field 2026-09-03: every session ran the mini default while
+    # the file said gpt-realtime-2.1). Re-resolve now that the file is in.
+    global REALTIME_MODEL, REALTIME_VOICE
+    REALTIME_MODEL = os.environ.get("NARADA_VOICE_MODEL", REALTIME_MODEL)
+    REALTIME_VOICE = os.environ.get("NARADA_VOICE_TIMBRE", REALTIME_VOICE)
+    logger.info("voice brain: model=%s voice=%s backend=%s",
+                REALTIME_MODEL, REALTIME_VOICE, backend)
 
 
 async def entrypoint(ctx: JobContext) -> None:
