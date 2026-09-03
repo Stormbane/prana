@@ -416,7 +416,7 @@ async def entrypoint(ctx: JobContext) -> None:
             if tier == "personal":
                 try:
                     from prana.voice.transcripts import recent_tail
-                    fresh_tail = recent_tail()
+                    fresh_tail = recent_tail(room=ctx.room.name)
                 except Exception as exc:
                     logger.warning("recent_tail failed: %s", exc)
                 if fresh_tail is not None:
@@ -1269,6 +1269,10 @@ def _start_room_watchdog() -> None:
                 # component was healthy so nobody was paged). The body
                 # is now a pseudo-component in the A3 alerter, and the
                 # USB serial line is the second line of defense.
+                # SIM workers (box emulator soak) must never page A3
+                # or pulse the real box's serial line.
+                if os.environ.get("NARADA_SIM") == "1":
+                    continue
                 now = _time.time()
                 try:
                     if alerts is None:
@@ -1335,8 +1339,21 @@ def main() -> None:
     # AGENTS_PORT) says 200 during its entire retry loop, which is how a
     # dead LiveKit hid behind a green probe for a week.
     _start_health_shim()
+    async def _accept_own_room_only(req) -> None:
+        # Soak isolation (2026-09-03): the emulator runs a second
+        # worker against a sim room on this same LiveKit server. Each
+        # worker serves ONLY its configured room, or they would steal
+        # each other's jobs (JT_ROOM dispatch is worker-agnostic).
+        room_name = getattr(getattr(req, "room", None), "name", "")
+        if room_name == DEVICE_ROOM:
+            await req.accept()
+        else:
+            logger.info("declining job for foreign room %r", room_name)
+            await req.reject()
+
     agents.cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
+        request_fnc=_accept_own_room_only,
         host=HEALTH_HOST,
         port=AGENTS_PORT,
     ))

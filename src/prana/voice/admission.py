@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEVICE_IDENTITY = "narada-box3"
+DEVICE_IDENTITY = os.environ.get("NARADA_DEVICE_IDENTITY", "narada-box3")
 TIER_SHAREABLE = "shareable"
 TIER_PERSONAL = "personal"
 _VALID_TIERS = (TIER_SHAREABLE, TIER_PERSONAL)

@@ -173,7 +173,8 @@ def attach(session, room_name: str) -> TranscriptLogger:
     return tl
 
 
-def recent_tail(max_age_s: float = 900.0, max_chars: int = 800):
+def recent_tail(max_age_s: float = 900.0, max_chars: int = 800,
+                room: str = "narada-body"):
     """The tail of the most recent finished conversation, if it ended
     within `max_age_s` — conversational short-term memory (Suti's
     design, 2026-09-02: a tap five minutes after a cliffhanger should
@@ -185,7 +186,11 @@ def recent_tail(max_age_s: float = 900.0, max_chars: int = 800):
     import re
 
     try:
-        files = sorted(TRANSCRIPT_ROOT.rglob("*.md"),
+        # This room ONLY: the box-emulator soak writes transcripts for
+        # its sim room, and a sim conversation must never leak into
+        # the real body's "JUST NOW" continuity.
+        files = sorted((f for f in TRANSCRIPT_ROOT.rglob("*.md")
+                        if f.name.endswith(f"-{room}.md")),
                        key=lambda f: f.stat().st_mtime, reverse=True)
     except OSError:
         return None
