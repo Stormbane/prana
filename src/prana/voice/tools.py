@@ -35,12 +35,16 @@ def build_voice_tools(
     music=None,
     publish=None,
     end_session=None,
+    voice_info: Optional[dict] = None,
 ) -> list:
     """Build the closed voice-tier tool list for an AgentSession.
 
     `tier` and `session_id` come from the worker's admission state and
     are stamped onto anything the session writes. `music` is the job's
-    MusicPlayer (audio-owner state machine) or None."""
+    MusicPlayer (audio-owner state machine) or None. `voice_info` is a
+    snapshot of the running brain (model/voice/backend) for the
+    about_myself tool."""
+    voice_info = voice_info or {}
     client = client or ServiceClient()
     proposals = proposals or ProposalQueue()
 
@@ -184,6 +188,39 @@ def build_voice_tools(
             return {"delivered": False, "detail": str(exc)}
 
     @function_tool()
+    async def about_myself() -> dict:
+        """Facts about your own running self — the model powering your
+        voice, the timbre, the body you live in, what tier you're in,
+        and what you can do. Use when Suti asks what model you are,
+        how you work, or what you're capable of. Answer from this, not
+        from guesses about your training."""
+        import platform
+
+        shareable = ["see/relay Suti's coding sessions", "recall shareable "
+                     "memory", "note things to memory", "play/stop radio",
+                     "set speaker + music volume", "TV mode", "web search "
+                     "+ read pages", "hand hard questions to Narada's "
+                     "deeper mind", "end the conversation"]
+        personal_extra = ["message Suti on Telegram", "set timers and "
+                           "reminders"]
+        return {
+            "brain_model": voice_info.get("model", "unknown"),
+            "voice_timbre": voice_info.get("voice", "unknown"),
+            "backend": voice_info.get("backend", "realtime"),
+            "speech_is": "OpenAI Realtime (speech-to-speech) — you hear "
+                         "and speak audio directly, not text-to-speech",
+            "deeper_mind": "Narada in the machine (Claude) — reached via "
+                           "the escalate tool for judgment/code/memory",
+            "body": "ESP32-S3-BOX-3 — a small screen, one speaker, a mic "
+                    "array, on Suti's desk",
+            "host_machine": platform.node(),
+            "tier": tier,
+            "tv_mode": bool(voice_info.get("tv_mode")),
+            "capabilities": shareable + (
+                personal_extra if tier == "personal" else []),
+        }
+
+    @function_tool()
     async def end_conversation() -> dict:
         """End this conversation and go back to sleep. Call when Suti
         says stop / that's all / goodnight — say a brief goodbye FIRST,
@@ -319,6 +356,7 @@ def build_voice_tools(
         recall_memory,
         remember_this,
         escalate_to_narada,
+        about_myself,
         end_conversation,
         play_music,
         stop_music,

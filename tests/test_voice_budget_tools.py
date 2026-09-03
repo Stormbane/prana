@@ -90,6 +90,10 @@ VOICE_TOOL_NAMES = {
     # quarantine sentinel lives in test_voice_remember.py.
     "remember_this",
     "escalate_to_narada",
+    # 2026-09-04: read-only self-introspection (model/voice/body/tier/
+    # capabilities) — reports facts already known to the process, no
+    # new data source, no egress.
+    "about_myself",
     # round 10: "Narada, stop" hangs up via the normal sleep path
     "end_conversation",
     # B5 (ratified): music is shareable-tier — playing a station

@@ -474,7 +474,14 @@ async def entrypoint(ctx: JobContext) -> None:
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
                               music=player, publish=_publish,
-                              end_session=sleep_tap.set))
+                              end_session=sleep_tap.set,
+                              voice_info={
+                                  "model": REALTIME_MODEL,
+                                  "voice": REALTIME_VOICE,
+                                  "backend": os.environ.get(
+                                      "NARADA_VOICE_BACKEND", "realtime"),
+                                  "tv_mode": tv,
+                              }))
             # Overlay feed (Suti's design 2026-09-01): thinking state,
             # speaking state, and subtitles ride the session topic as
             # presentation hints. Fire-and-forget — display candy must
