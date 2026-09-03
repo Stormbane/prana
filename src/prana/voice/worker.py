@@ -1439,8 +1439,27 @@ def main() -> None:
     # automatic worker, so every narada-body job still lands on it.
     agent_name = os.environ.get("NARADA_AGENT_NAME", "")
 
+    async def _request(req) -> None:
+        # Automatic dispatch means this worker is offered EVERY new
+        # room — including akhada's per-tap phone rooms (observed
+        # 2026-09-04: the box worker auto-joined a phone room, sat in
+        # wake-watch on the phone's conversation audio, and its agent
+        # participant defeated the phone worker's is-anyone-here
+        # guard). Phone rooms belong to the explicit-dispatch phone
+        # worker alone; decline them outright. reject() is safe here
+        # BECAUSE this is the only automatic worker: the auto job it
+        # kills was created for it alone — the phone worker's job
+        # comes from its own explicit dispatch, separately.
+        room = getattr(getattr(req, "room", None), "name", "") or ""
+        if room.startswith("akhada-phone-"):
+            logger.info("declining auto-dispatch into phone room %s", room)
+            await req.reject()
+            return
+        await req.accept()
+
     opts = dict(
         entrypoint_fnc=entrypoint,
+        request_fnc=_request,
         host=HEALTH_HOST,
         port=AGENTS_PORT,
     )
