@@ -189,6 +189,25 @@ components:
     restart_grace_s: 5.0
     health_url: http://127.0.0.1:8799/api/today
 
+  # -----------------------------------------------------------------
+  # akhada-brain - the typed-chat brain: claude -p (Max subscription)
+  # answering the app's free text over akhada's shell log, with
+  # CHAT-mode tools (reads + draft_proposal - it cannot commit writes;
+  # chips do). Liveness = ~/.narada/akhada/brain.alive; when down,
+  # typed chat degrades to an honest stub. Loop 2026-09-04 (iter 8);
+  # activates on the next host restart.
+  # -----------------------------------------------------------------
+  - name: akhada-brain
+    description: "Akhada typed-chat brain (claude -p over the shell log)"
+    enabled: true
+    command:
+      - python
+      - -u
+      - scripts/akhada_shell_brain.py
+    cwd: ${PRANA_ROOT}
+    env: {}
+    restart_grace_s: 5.0
+
   # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current
   # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
