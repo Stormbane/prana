@@ -342,13 +342,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 tv = tv_mode_on()
             except Exception:
                 pass
-            session_kwargs = {}
             if tv:
                 # TV mode (Suti, 2026-09-03): the TV is a person to an
-                # energy gate. Trade barge-in for immunity — tap still
-                # stops him.
-                session_kwargs["allow_interruptions"] = False
-                logger.info("TV mode ON: barge-in off, threshold 0.85")
+                # energy gate. Server-side ONLY — the deprecated
+                # AgentSession(allow_interruptions=...) kwarg killed
+                # session setup silently in the field (both TV-mode
+                # taps died pre-open, 20:39/20:40). interrupt_response
+                # =False means the realtime server never cancels his
+                # reply for heard speech; tap still stops him. 0.75
+                # (not 0.85 — 0.8 was already proven deaf to Suti):
+                # a modestly raised bar plus no barge-in is the trade.
+                logger.info("TV mode ON: interrupt_response off, "
+                            "threshold 0.75")
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(
                     model=REALTIME_MODEL, voice=REALTIME_VOICE,
@@ -359,19 +364,18 @@ async def entrypoint(ctx: JobContext) -> None:
                     # 0.8 proved DEAF to Suti at room distance (field
                     # same evening, session 10:10) — 0.65 is the
                     # compromise: above echo residue, below his voice.
-                    # TV mode raises it to 0.85: speak up over the TV.
                     turn_detection=_rt_mod.TurnDetection(
                         type="server_vad",
-                        threshold=0.85 if tv else 0.65,
+                        threshold=0.75 if tv else 0.65,
                         prefix_padding_ms=300,
-                        silence_duration_ms=700),
+                        silence_duration_ms=700,
+                        interrupt_response=not tv),
                     # Streaming input transcription: interim deltas so
                     # Suti's words land in his bubble AS he says them
                     # (round 8) — whisper-1 is final-only.
                     input_audio_transcription=(
                         _rt_mod.InputAudioTranscription(
                             model="gpt-4o-mini-transcribe"))),
-                **session_kwargs,
             )
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack
@@ -402,6 +406,18 @@ async def entrypoint(ctx: JobContext) -> None:
                         "having. CONTINUE it; do not greet like a "
                         "first meeting, do not re-explain anything "
                         "from it:\n" + tail_text)
+            # Akhada (personal only): the day's food/training standing,
+            # goals, and the logging rules — built from the store, no
+            # model in the loop. Absent package or broken store = no
+            # fitness context, never a failed session.
+            if tier == "personal":
+                try:
+                    from akhada.adapters.livekit_tools import wake_context
+                    instructions += "\n\nFITNESS (Akhada):\n" + wake_context()
+                except ImportError:
+                    pass
+                except Exception as exc:
+                    logger.warning("akhada context failed: %s", exc)
             agent = Agent(instructions=instructions,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
@@ -837,6 +853,16 @@ async def entrypoint(ctx: JobContext) -> None:
         current_nonce["value"] = nonce  # for rejoin republish
         await _publish(TOPIC_ADMISSION,
                        {"type": "admission_nonce", "nonce": nonce})
+        # Mode chips survive session recycles only if every fresh job
+        # re-asserts them (the box wipes chips on disconnect so a
+        # stale pill can't lie).
+        try:
+            from prana.voice.tvmode import tv_mode_on
+            await _publish(TOPIC_SESSION, {
+                "type": "chip", "key": "tv", "icon": "tv",
+                "text": "TV mode" if tv_mode_on() else ""})
+        except Exception as exc:
+            logger.debug("chip republish failed: %s", exc)
 
         # B5 fail-safe gate: while music plays, wake-word admission is
         # OFF (lyrics must not open billed sessions — the numeric
@@ -891,6 +917,13 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.warning("music pause failed — proceeding: %s", exc)
         try:
             end_reason = await _run_session(tier)
+        except Exception:
+            # A session crash must be LOUD and must still retire the
+            # job (field 2026-09-03 20:39: TV-mode sessions died here
+            # with no log line at all — the job just vanished and the
+            # box sat orphaned until the watchdog's black-dog recycle).
+            logger.exception("session crashed — retiring job")
+            end_reason = "crashed"
         finally:
             try:
                 await asyncio.wait_for(

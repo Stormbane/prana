@@ -256,7 +256,14 @@ def build_voice_tools(
         Takes effect from the NEXT tap — tell Suti that."""
         from prana.voice.tvmode import set_tv_mode
         set_tv_mode(bool(on))
-        _toast("tool", f"TV mode {'ON' if on else 'off'}")
+        # Persistent chip, not a fading toast (Suti 2026-09-03): a
+        # mode that stays on deserves a pill that stays up.
+        if publish is not None:
+            import asyncio as _aio
+            from prana.voice.admission import TOPIC_SESSION
+            _aio.ensure_future(publish(TOPIC_SESSION, {
+                "type": "chip", "key": "tv", "icon": "tv",
+                "text": "TV mode" if on else ""}))
         return {"tv_mode": bool(on),
                 "applies": "from the next tap onward"}
 
@@ -374,4 +381,23 @@ def build_voice_tools(
     if tier == "personal":
         tools.extend([message_suti, set_timer, set_reminder,
                       list_timers, cancel_timer])
+        tools.extend(_akhada_tools(session_id))
     return tools
+
+
+def _akhada_tools(session_id: str) -> list:
+    """Akhada's fitness/diet tool pack (log_meal, log_vital, ...),
+    personal tier only — it is Suti's food and body data. The pack is
+    an optional sibling package: absent, the voice simply has no
+    fitness tools. Every write in it is idempotent and append-only on
+    the akhada side; nothing here can reach the sessions service."""
+    try:
+        from akhada.adapters.livekit_tools import build_tools
+    except ImportError:
+        logger.info("akhada not installed — no fitness tools this session")
+        return []
+    try:
+        return build_tools(session_id=session_id)
+    except Exception as exc:  # a broken pack must not cost the tap
+        logger.warning("akhada tools unavailable: %s", exc)
+        return []
