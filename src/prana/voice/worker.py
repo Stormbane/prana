@@ -669,8 +669,12 @@ async def entrypoint(ctx: JobContext) -> None:
                     user_speaking_now["v"] = True
                     user_ever_spoke["v"] = True
                     user_words_seen["v"] = False
-                    _hint({"type": "ucaption", "text": "...",
-                           "latest": "...", "final": False})
+                    # His words can't stream DURING speech — the
+                    # realtime API only transcribes a turn after it
+                    # ends (round 18). Show a live "hearing you" cue
+                    # now; the real words fill in when he pauses.
+                    _hint({"type": "ucaption", "text": "(hearing you)",
+                           "latest": "", "final": False})
                 elif ust == "listening":
                     user_speaking_now["v"] = False
                     async def _fade_if_untranscribed() -> None:
