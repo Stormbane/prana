@@ -11,9 +11,13 @@ Persisted as a flag file so it survives the one-session-per-job
 recycle; each session reads it at build time.
 """
 
+import os
 from pathlib import Path
 
-FLAG = Path.home() / ".narada" / "voice-tv-mode.flag"
+# The soak worker (NARADA_SIM=1) gets its own flag so a sim toggle
+# never touches — or inherits — Suti's real TV-mode state.
+_SUFFIX = "-sim" if os.environ.get("NARADA_SIM") == "1" else ""
+FLAG = Path.home() / ".narada" / f"voice-tv-mode{_SUFFIX}.flag"
 
 
 def set_tv_mode(on: bool) -> None:
