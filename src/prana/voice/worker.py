@@ -1417,6 +1417,16 @@ def _start_timer_sweeper() -> None:
                      name="timer-sweeper").start()
 
 
+# Akhada's phone rooms are the explicit-dispatch phone worker's alone;
+# this prefix must match akhada.dashboard.voice.ROOM_PREFIX — drift
+# here re-opens the ghost-agent hole (field 2026-09-04).
+PHONE_ROOM_PREFIX = "akhada-phone-"
+
+
+def is_phone_room(name: str) -> bool:
+    return (name or "").startswith(PHONE_ROOM_PREFIX)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _check_env()
@@ -1451,7 +1461,7 @@ def main() -> None:
         # kills was created for it alone — the phone worker's job
         # comes from its own explicit dispatch, separately.
         room = getattr(getattr(req, "room", None), "name", "") or ""
-        if room.startswith("akhada-phone-"):
+        if is_phone_room(room):
             logger.info("declining auto-dispatch into phone room %s", room)
             await req.reject()
             return
