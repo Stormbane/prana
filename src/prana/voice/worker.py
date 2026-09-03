@@ -336,6 +336,19 @@ async def entrypoint(ctx: JobContext) -> None:
         try:
             from livekit.plugins.openai.realtime import (
                 realtime_model as _rt_mod)
+            tv = False
+            try:
+                from prana.voice.tvmode import tv_mode_on
+                tv = tv_mode_on()
+            except Exception:
+                pass
+            session_kwargs = {}
+            if tv:
+                # TV mode (Suti, 2026-09-03): the TV is a person to an
+                # energy gate. Trade barge-in for immunity — tap still
+                # stops him.
+                session_kwargs["allow_interruptions"] = False
+                logger.info("TV mode ON: barge-in off, threshold 0.85")
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(
                     model=REALTIME_MODEL, voice=REALTIME_VOICE,
@@ -346,8 +359,10 @@ async def entrypoint(ctx: JobContext) -> None:
                     # 0.8 proved DEAF to Suti at room distance (field
                     # same evening, session 10:10) — 0.65 is the
                     # compromise: above echo residue, below his voice.
+                    # TV mode raises it to 0.85: speak up over the TV.
                     turn_detection=_rt_mod.TurnDetection(
-                        type="server_vad", threshold=0.65,
+                        type="server_vad",
+                        threshold=0.85 if tv else 0.65,
                         prefix_padding_ms=300,
                         silence_duration_ms=700),
                     # Streaming input transcription: interim deltas so
@@ -356,6 +371,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     input_audio_transcription=(
                         _rt_mod.InputAudioTranscription(
                             model="gpt-4o-mini-transcribe"))),
+                **session_kwargs,
             )
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack

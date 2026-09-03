@@ -246,6 +246,21 @@ def build_voice_tools(
         return {"set": True, "volume": pct}
 
     @function_tool()
+    async def tv_mode(
+        on: Annotated[bool, "true while the TV/background noise is on"],
+    ) -> dict:
+        """TV mode: while on, Narada can't be interrupted by voice
+        (tap still stops him) and he ignores TV-level speech — only a
+        raised voice reaches him. Use when the TV keeps triggering or
+        interrupting him; turn off when the room is quiet again.
+        Takes effect from the NEXT tap — tell Suti that."""
+        from prana.voice.tvmode import set_tv_mode
+        set_tv_mode(bool(on))
+        _toast("tool", f"TV mode {'ON' if on else 'off'}")
+        return {"tv_mode": bool(on),
+                "applies": "from the next tap onward"}
+
+    @function_tool()
     async def set_music_volume(
         percent: Annotated[int, "0-100"],
     ) -> dict:
@@ -302,6 +317,7 @@ def build_voice_tools(
         stop_music,
         what_is_playing,
         set_volume,
+        tv_mode,
         set_music_volume,
         web_search,
         read_page,
