@@ -573,12 +573,14 @@ async def entrypoint(ctx: JobContext) -> None:
             # VAD start event CAN: show a "..." placeholder instantly;
             # the transcript replaces it when the segment closes.
             user_words_seen = {"v": False}
+            user_ever_spoke = {"v": False}
 
             @session.on("user_state_changed")
             def _on_user_state(ev) -> None:
                 ust = str(getattr(ev, "new_state", ""))
                 if ust == "speaking":
                     last_state_change["t"] = time.monotonic()
+                    user_ever_spoke["v"] = True
                     user_words_seen["v"] = False
                     _hint({"type": "ucaption", "text": "...",
                            "latest": "...", "final": False})
@@ -683,12 +685,27 @@ async def entrypoint(ctx: JobContext) -> None:
                     await asyncio.sleep(10.0)
                     _hint({"type": "session", "open": True})
 
+            async def _no_audio_watch() -> None:
+                # Deaf-session self-heal (field 2026-09-03: a tap
+                # racing admission wedges the box's upstream — REC on,
+                # listening face, but neither voice nor taps get out).
+                # If the VAD has never once heard him this session,
+                # end early; the retire recycles a fresh room, which
+                # is the only known cure for the wedge.
+                await asyncio.sleep(30.0)
+                if not user_ever_spoke["v"]:
+                    logger.warning("no user audio 30s into session — "
+                                   "assuming upstream wedge, recycling")
+                    return
+                await asyncio.Event().wait()  # heard him: stand down
+
             hb_task = asyncio.ensure_future(_session_heartbeat())
             waiters = {
                 "room-closed": asyncio.ensure_future(closed.wait()),
                 "sleep-tap": asyncio.ensure_future(sleep_tap.wait()),
                 "device-dropped": asyncio.ensure_future(drop["ev"].wait()),
                 "silence-timeout": asyncio.ensure_future(_silence_watch()),
+                "no-audio": asyncio.ensure_future(_no_audio_watch()),
             }
             done, pending = await asyncio.wait(
                 waiters.values(),

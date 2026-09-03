@@ -106,6 +106,12 @@ def is_sleep_tap(sender_identity: Optional[str],
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8", errors="replace")
         msg = json.loads(payload)
-        return isinstance(msg, dict) and msg.get("type") == "tap"
+        # A tap carrying a nonce is a WAKE echo, not a stop: a fast
+        # second tap lands before the box learns the session opened,
+        # so it arrives wake-shaped — and must not end the session it
+        # raced (field 2026-09-03: back-to-back taps killed newborn
+        # sessions). Sleep taps are bare {"type": "tap"}.
+        return (isinstance(msg, dict) and msg.get("type") == "tap"
+                and "nonce" not in msg)
     except Exception:
         return False
