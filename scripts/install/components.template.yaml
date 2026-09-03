@@ -167,6 +167,28 @@ components:
     # round-trip.
     health_url: http://127.0.0.1:8796/
 
+  # -----------------------------------------------------------------
+  # akhada-dashboard - akhada's web surface: the data pages, the /talk
+  # page, and the voice token/dispatch endpoints. Binds 0.0.0.0 so the
+  # phone reaches it over the tailnet (the house LAN + tailnet is the
+  # ruled trust boundary for this personal tool; no product surface).
+  # Added by the loop 2026-09-04 (iteration 4); activates on the next
+  # host restart.
+  # -----------------------------------------------------------------
+  - name: akhada-dashboard
+    description: "Akhada dashboard + talk page + voice token endpoints"
+    enabled: true
+    command:
+      - python
+      - -m
+      - akhada
+      - dashboard
+      - --lan
+    cwd: C:/Projects/akhada
+    env: {}
+    restart_grace_s: 5.0
+    health_url: http://127.0.0.1:8799/api/today
+
   # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current
   # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
