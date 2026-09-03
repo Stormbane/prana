@@ -28,6 +28,42 @@ logger = logging.getLogger(__name__)
 
 TRANSCRIPT_ROOT = Path.home() / ".narada" / "heartbeat" / "voice-transcripts"
 RECORDING_MARKER = Path.home() / ".narada" / "heartbeat" / ".voice-recording-active"
+MARKER_STALE_S = 60 * 60.0   # sidecar entry older than this = crashed session
+_MARKER_LOCK_TIMEOUT_S = 3.0
+
+
+def _acquire_marker_lock(lock: Path):
+    """O_EXCL lockfile with stale-lock stealing (the budget ledger's
+    pattern): holders keep it for milliseconds; the indicator must
+    never wedge on a crashed holder. Returns an fd, or None if even
+    stealing failed — marker updates are best-effort, never fatal."""
+    import time as _time
+    deadline = _time.monotonic() + _MARKER_LOCK_TIMEOUT_S
+    while True:
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            return os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _time.monotonic() >= deadline:
+                logger.warning("stealing stale marker lock %s", lock)
+                try:
+                    lock.unlink()
+                except OSError:
+                    return None
+                deadline = _time.monotonic() + _MARKER_LOCK_TIMEOUT_S
+            _time.sleep(0.02)
+        except OSError:
+            return None
+
+
+def _release_marker_lock(fd) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+        (RECORDING_MARKER.with_name(RECORDING_MARKER.name + ".lock")).unlink()
+    except OSError:
+        pass
 RETENTION_DAYS = 30
 
 # Secret patterns redacted before any utterance is written to disk.
@@ -116,20 +152,61 @@ class TranscriptLogger:
             _lock_owner_only(self.path)
         except OSError as exc:
             logger.warning("transcript init failed (%s): %s", self.path, exc)
+        self._room = room_name
         self._set_recording_marker(True, room_name)
 
     def _set_recording_marker(self, active: bool, room: str = "") -> None:
-        """A file the body / a status LED can read to show recording state."""
+        """A file the body / a status LED can read to show recording state.
+
+        Reference-counted per room (Codex review, rung 1b): with two
+        workers (box + phone) — or a soak's sim beside a real session —
+        one session ending must not switch the shared indicator off
+        while another is still recording. Each room holds a marker file
+        in a sidecar dir; the legacy single file mirrors "any active".
+        The whole update runs under a cross-process lock (one worker's
+        close must not clobber another worker's fresh entry), keys are
+        hash-suffixed (truncation must not alias two rooms onto one
+        reference), and entries older than the TTL are reaped (a killed
+        worker must not pin the indicator on forever — sessions are
+        capped at 10 min, so 1 h is generously stale)."""
+        import hashlib
+
+        room = room or self._room
+        key = f"{_safe(room)}-{hashlib.sha1(room.encode()).hexdigest()[:8]}"
+        marker_dir = RECORDING_MARKER.with_name(RECORDING_MARKER.name + ".d")
+        fd = _acquire_marker_lock(RECORDING_MARKER.with_name(
+            RECORDING_MARKER.name + ".lock"))
         try:
             if active:
+                marker_dir.mkdir(parents=True, exist_ok=True)
+                (marker_dir / key).write_text(
+                    f"recording since {datetime.now(timezone.utc).isoformat()}\n",
+                    encoding="utf-8")
+            else:
+                (marker_dir / key).unlink(missing_ok=True)
+            remaining = []
+            if marker_dir.exists():
+                cutoff = datetime.now(timezone.utc).timestamp() \
+                    - MARKER_STALE_S
+                for p in marker_dir.iterdir():
+                    try:
+                        if p.stat().st_mtime < cutoff:
+                            p.unlink(missing_ok=True)  # crashed session
+                        else:
+                            remaining.append(p.name)
+                    except OSError:
+                        remaining.append(p.name)  # unknown: keep, fail safe
+            if remaining:
                 RECORDING_MARKER.parent.mkdir(parents=True, exist_ok=True)
                 RECORDING_MARKER.write_text(
-                    f"recording since {datetime.now(timezone.utc).isoformat()} "
-                    f"({room})\n", encoding="utf-8")
+                    f"recording: {', '.join(sorted(remaining))}\n",
+                    encoding="utf-8")
             elif RECORDING_MARKER.exists():
                 RECORDING_MARKER.unlink()
         except OSError:
             pass
+        finally:
+            _release_marker_lock(fd)
 
     def log(self, role: str, text: str) -> None:
         text = redact((text or "").strip())

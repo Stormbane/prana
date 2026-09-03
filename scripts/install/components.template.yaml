@@ -142,6 +142,32 @@ components:
     health_url: http://127.0.0.1:8792/
 
   # ─────────────────────────────────────────────────────────────────
+  # voice-phone — akhada's phone door: explicit-dispatch worker for
+  # akhada-phone-* rooms only (the /talk page joins, akhada's dashboard
+  # dispatches). No wake gate: the LiveKit token is the admission.
+  # Shares the voice-minutes ledger with the box worker.
+  # ─────────────────────────────────────────────────────────────────
+  - name: voice-phone
+    description: "Akhada phone voice — explicit-dispatch worker (talk page)"
+    enabled: true
+    command:
+      - python
+      - -m
+      - prana.voice.phone_worker
+      - start
+    cwd: ${PRANA_ROOT}
+    env:
+      AKHADA_AGENT_NAME: "akhada-phone"
+      AKHADA_VOICE_AGENTS_PORT: "8797"
+      AKHADA_VOICE_HEALTH_PORT: "8796"
+    restart_grace_s: 10.0
+    wait_for_url: http://127.0.0.1:7880/
+    # Honest health: the box worker's shim on this worker's own port —
+    # 200 only with the agents server up AND an authenticated LiveKit
+    # round-trip.
+    health_url: http://127.0.0.1:8796/
+
+  # ─────────────────────────────────────────────────────────────────
   # deha-brain — the body. Hardware abstraction over the current
   # embodiment (BOX-3 ESP32 + radar + camera + mic + display + speakers).
   #
