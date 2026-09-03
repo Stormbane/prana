@@ -438,6 +438,20 @@ async def entrypoint(ctx: JobContext) -> None:
             pack = build_for_tier(tier)
             instructions = (INSTRUCTIONS + "\n\nCONTEXT:\n" + pack
                             if pack else INSTRUCTIONS)
+            # Accent (Suti, 2026-09-04): there is no Indian-accented
+            # voice ID — all ten realtime voices are American English —
+            # but the model can shape accent on instruction (OpenAI's
+            # own example: "speak in a French accent"). Env-tunable so
+            # it's a one-line change to adjust or clear, no code edit.
+            # This is delivery, not words — it does not script what
+            # Narada says, only how cedar colors it.
+            accent = os.environ.get("NARADA_VOICE_ACCENT",
+                                    "warm, natural Indian English")
+            if accent:
+                instructions += (
+                    f"\n\nACCENT: speak with a {accent} accent — "
+                    "unforced and consistent, the way someone who grew "
+                    "up speaking it sounds, never a caricature.")
             # Conversational short-term memory (Suti's design,
             # 2026-09-02 — specced then never wired; he caught the
             # goldfish behavior in the field: "no recollection of what
