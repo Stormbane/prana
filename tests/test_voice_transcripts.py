@@ -57,6 +57,55 @@ def test_recording_marker_lifecycle(tmp_path, monkeypatch):
     assert not marker.exists()  # cleared when session ends
 
 
+def test_recording_marker_refcounts_concurrent_sessions(tmp_path, monkeypatch):
+    # Two workers (box + phone), or a soak's sim beside a real session:
+    # one ending must not switch the shared indicator off while the
+    # other still records (Codex review, rung 1b).
+    marker = tmp_path / "marker"
+    monkeypatch.setattr(tmod, "RECORDING_MARKER", marker)
+    a = TranscriptLogger("narada-body", root=tmp_path)
+    b = TranscriptLogger("akhada-phone-sim-1", root=tmp_path)
+    assert marker.exists()
+    b.close()
+    assert marker.exists()  # the box session is still recording
+    assert "narada-body" in marker.read_text()
+    a.close()
+    assert not marker.exists()
+
+
+def test_recording_marker_keys_do_not_alias(tmp_path, monkeypatch):
+    # _safe() truncates to 40 chars — two long room names must still
+    # hold two references (hash suffix), or one close drops the other.
+    marker = tmp_path / "marker"
+    monkeypatch.setattr(tmod, "RECORDING_MARKER", marker)
+    long_a = "akhada-phone-" + "x" * 60 + "a"
+    long_b = "akhada-phone-" + "x" * 60 + "b"
+    a = TranscriptLogger(long_a, root=tmp_path)
+    b = TranscriptLogger(long_b, root=tmp_path)
+    b.close()
+    assert marker.exists()  # a's reference survives b's close
+    a.close()
+    assert not marker.exists()
+
+
+def test_recording_marker_reaps_crashed_sessions(tmp_path, monkeypatch):
+    # A killed worker never calls close(); its sidecar entry must not
+    # pin the indicator on forever.
+    import os
+    marker = tmp_path / "marker"
+    monkeypatch.setattr(tmod, "RECORDING_MARKER", marker)
+    dead = TranscriptLogger("crashed-room", root=tmp_path)  # no close()
+    sidecar = marker.parent / (marker.name + ".d")
+    (entry,) = sidecar.iterdir()
+    old = 1.0  # epoch 1970 — very stale
+    os.utime(entry, (old, old))
+    live = TranscriptLogger("live-room", root=tmp_path)
+    assert not entry.exists()  # reaped on the next marker update
+    live.close()
+    assert not marker.exists()  # only the reaped ghost remained
+    del dead
+
+
 def test_retention_prunes_old(tmp_path):
     d = tmp_path / "2020_01"
     d.mkdir(parents=True)
