@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 SIM_ROOM = "narada-body-sim"
 SIM_IDENTITY = "narada-box3-sim"
+SIM_AGENT_NAME = "narada-sim"
 SIM_HEALTH_PORT = "8892"
 SIM_AGENTS_PORT = "8893"
 
@@ -44,9 +45,29 @@ def sim_env() -> dict:
         "NARADA_VOICE_AGENTS_PORT": SIM_AGENTS_PORT,
         "NARADA_SIM": "1",
         "NARADA_MUSIC": "off",
-        "NARADA_WAKE_GATING": "off",  # tap-only admission in the sim
+        # Gating stays ON: the whole point is to exercise the tap
+        # admission path (nonce -> tap -> session). Turning it off
+        # would open sessions with no tap and test nothing.
+        # agent_name excludes the sim worker from AUTOMATIC room
+        # dispatch — it can never receive (or kill) a real-box job.
+        "NARADA_AGENT_NAME": SIM_AGENT_NAME,
     })
     return env
+
+
+async def dispatch_sim_agent(cfg: dict) -> None:
+    """Explicitly dispatch the sim agent into the sim room. The sim
+    worker has an agent_name, so it gets NO automatic jobs — the soak
+    must ask for it. Idempotent enough: a duplicate dispatch just
+    starts another job the worker's one-session-per-job retires."""
+    from livekit import api as lkapi
+    lk = lkapi.LiveKitAPI()
+    try:
+        await lk.agent_dispatch.create_dispatch(
+            lkapi.CreateAgentDispatchRequest(
+                room=SIM_ROOM, agent_name=SIM_AGENT_NAME))
+    finally:
+        await lk.aclose()
 
 
 async def main(cycles: int) -> int:
@@ -60,6 +81,7 @@ async def main(cycles: int) -> int:
         "api_secret": os.environ["LIVEKIT_API_SECRET"],
         "room": SIM_ROOM,
         "identity": SIM_IDENTITY,
+        "on_connected": lambda: dispatch_sim_agent(cfg),
     }
 
     print(f"starting sim worker (room={SIM_ROOM})...")

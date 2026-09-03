@@ -182,6 +182,13 @@ async def run_cycle(cfg: dict, cycle: int, scenario: str) -> CycleResult:
     try:
         await emu.connect()
 
+        # The sim worker has an agent_name, so it gets NO automatic
+        # dispatch — ask for it now that we (the device) are in the
+        # room, so its nonce publish lands with us present to hear it.
+        hook = cfg.get("on_connected")
+        if hook is not None:
+            await hook()
+
         # 1. admission nonce (a fresh job publishes one on arming)
         deadline = time.monotonic() + 25
         while emu.nonce is None and time.monotonic() < deadline:
