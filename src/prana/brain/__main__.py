@@ -16,7 +16,7 @@ import uvicorn
 from prana.brain.api import create_app
 from prana.brain.backend import SdkBackend
 from prana.brain.config import BrainConfig
-from prana.brain.tokens import BRAIN_TOKENS_FILE, load_brain_tokens, verify_gitcrypt_covers
+from prana.brain.tokens import load_brain_tokens
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,8 +33,9 @@ def main() -> None:
         sys.stderr.write(f"FATAL: wake context missing: {config.wake_context}\n")
         sys.exit(2)
     try:
+        # load_brain_tokens verifies git-crypt coverage before it will
+        # create or read the file.
         load_brain_tokens()
-        verify_gitcrypt_covers(BRAIN_TOKENS_FILE)
     except (RuntimeError, OSError) as exc:
         sys.stderr.write(f"FATAL: token storage contract: {exc}\n")
         sys.exit(2)

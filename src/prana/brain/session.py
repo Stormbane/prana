@@ -54,24 +54,36 @@ class BrainSession:
         self.session_dir = session_dir
         self.last_used = time.monotonic()
         self._turn_lock = asyncio.Lock()
+        self._reserved = False
         self._cancelled = False
 
     @property
     def busy(self) -> bool:
-        return self._turn_lock.locked()
+        return self._reserved or self._turn_lock.locked()
+
+    def reserve(self) -> None:
+        """Synchronously claim the session for one turn — atomic within
+        the event loop, so the busy-check and the claim can't be split
+        by an await (the double-execution race the diff review caught).
+        The executing task releases it via ``release()``."""
+        if self.busy:
+            raise SessionBusy(self.session_id)
+        self._reserved = True
+
+    def release(self) -> None:
+        self._reserved = False
 
     async def run_turn(
         self, prompt: str, *, deadline_s: float,
         on_start: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
-        """Yield assistant text; raise SessionBusy if a turn is active.
+        """Yield assistant text. Caller must hold the reservation
+        (``reserve()``); the lock is the in-flight backstop.
 
         The wall-clock bound ends the turn with an EXPLICIT error (the
         zombie-heartbeat rule): the caller sees a raised TimeoutError,
         never a silent truncation dressed as a completion.
         """
-        if self._turn_lock.locked():
-            raise SessionBusy(self.session_id)
         async with self._turn_lock:
             self._cancelled = False
             self.last_used = time.monotonic()

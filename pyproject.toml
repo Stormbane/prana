@@ -37,6 +37,11 @@ dependencies = [
     "mcp>=1.0",
     # Long-standing undeclared imports (chat bridge) + voice budget/gate
     "python-dotenv>=1.0",
+    # Brain server (default-enabled host component — base deps, same
+    # rationale as psutil above)
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "claude-agent-sdk>=0.2",
     # <2: torch/scipy in this env are compiled against numpy 1.x; numpy 2
     # breaks them (librosa/audiomentations will try to pull it — don't let them)
     "numpy>=1.26,<2",

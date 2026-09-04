@@ -233,6 +233,84 @@ def test_concurrent_turn_same_session_is_409(brain):
     assert codes == [200, 409]
 
 
+def test_same_request_id_race_never_runs_twice(brain):
+    """Two concurrent requests with one request_id: one runs, the other
+    gets 409/replay — never a second execution (diff-review P1)."""
+    client, _ = brain
+    slow = lambda **kw: FakeBackend(**{**kw, "delay": 0.4})  # noqa: E731
+    client.app.state.pool._factory = slow
+
+    import threading
+    results = {}
+    kw = {"narada": {"session_id": "race1", "request_id": "dup"}}
+
+    def fire(tag):
+        results[tag] = _post(client, **kw)
+
+    t1 = threading.Thread(target=fire, args=("a",))
+    t1.start()
+    time.sleep(0.3)
+    n_backends = len(FakeBackend.instances)
+    fire("b")
+    t1.join()
+    codes = sorted([results["a"].status_code, results["b"].status_code])
+    assert codes == [200, 409]
+    assert len(FakeBackend.instances) == n_backends  # no second agent run
+
+
+def test_backend_error_is_explicit_failure(brain):
+    """A backend that errors mid-turn must yield an explicit 500 and a
+    `failed` record — partial text never masquerades as completed."""
+    client, config = brain
+
+    class ErrorBackend(FakeBackend):
+        async def run_turn(self, prompt):
+            yield "partial "
+            raise RuntimeError("agent turn ended in error (subtype=max_turns)")
+
+    client.app.state.pool._factory = ErrorBackend
+    resp = _post(client, narada={"session_id": "err1", "request_id": "e1"})
+    assert resp.status_code == 500
+    assert "error" in resp.json()
+    turns = json.loads(
+        (config.sessions_root / "prana" / "err1" / "turns.json").read_text(
+            encoding="utf-8"))
+    assert turns[0]["state"] == "failed"
+
+
+def test_non_dict_body_and_narada_are_400(brain):
+    client, _ = brain
+    headers = {"Authorization": "Bearer tok-prana"}
+    assert client.post("/v1/chat/completions", json=["not", "a", "dict"],
+                       headers=headers).status_code == 400
+    assert _post(client, narada="not-a-dict").status_code == 400
+
+
+def test_stateless_deadline_is_explicit_error(tmp_path, monkeypatch):
+    wake = tmp_path / "wake.md"
+    wake.write_text("w", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "s", wake_context=wake,
+                         turn_deadline_s=0.2)
+    monkeypatch.setattr("prana.brain.api.load_brain_tokens",
+                        lambda: {"prana": "tok-prana", "app": "a", "voice": "v"})
+    slow = lambda **kw: FakeBackend(**{**kw, "delay": 5.0})  # noqa: E731
+    app = create_app(config, slow)
+    with TestClient(app) as client:
+        resp = _post(client)  # stateless: no session id
+        assert resp.status_code == 500
+        assert "wall-clock" in resp.json()["error"]["message"]
+
+
+def test_auth_failures_rate_limited(brain):
+    client, _ = brain
+    for _ in range(10):
+        assert _post(client, token="wrong").status_code == 401
+    assert _post(client, token="wrong").status_code == 429
+    # And the lockout is per-address for everyone, including good tokens
+    # from that address, until the window passes.
+    assert _post(client).status_code == 429
+
+
 # ── cancel endpoint ─────────────────────────────────────────────────────
 
 

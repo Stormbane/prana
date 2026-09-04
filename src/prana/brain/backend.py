@@ -78,6 +78,16 @@ class SdkBackend:
                 sid = getattr(msg, "session_id", None)
                 if sid:
                     self._native_session_id = sid
+                # The SDK reports max_turns / API errors as a result
+                # with is_error set rather than raising. Ending the
+                # iterator normally here would let partial text be
+                # persisted as a `completed` turn — the masquerade the
+                # house rules forbid. Raise so the turn records failed.
+                if getattr(msg, "is_error", False):
+                    subtype = getattr(msg, "subtype", "unknown")
+                    raise RuntimeError(
+                        f"agent turn ended in error (subtype={subtype})"
+                    )
                 break
 
     async def cancel(self) -> None:
