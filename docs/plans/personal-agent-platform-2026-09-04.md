@@ -92,10 +92,8 @@ and akhada use it instead of akhada carrying its own copy.
   screen (akhada plan-of-record's Capacitor-ready contract, inherited).
 
 **New project directory — YES.** It is a distinct JS/TS codebase with its
-own toolchain, shared across apps. Working dir `C:\Projects\pwa-shell`
-until Suti rules the Sanskrit name. Candidates for the ruling: **mukha**
-(मुख, face/interface — the face you talk to), **dwara** (द्वार,
-gateway/portal), **rupa** (रूप, form/appearance). Suti rules.
+own toolchain, shared across apps. Dir `C:\Projects\narada-phone-app`
+(**Narada Phone App** — ruled by Suti 2026-09-04).
 
 **Plan-of-record impact:** akhada's plan-of-record §3 currently places
 the PWA client (`voice/`) *inside* akhada. This spec moves it to the
@@ -131,7 +129,7 @@ a product:
 | Project (dir) | Role | Language | Status |
 |---|---|---|---|
 | `prana` | Brain server (model gateway + identity + memory wiring + tools + agentic loop), host supervisor, routing, box voice worker. **Tailscale/deploy config here.** | Python | exists; brain-server work continues here |
-| `pwa-shell` (name TBD) | Reusable client: text + images + voice (LiveKit JS). Narada app and akhada app by config. | JS/TS | **new — create** |
+| `narada-phone-app` | Reusable client: text + images + voice (LiveKit JS). Narada app and akhada app by config. | JS/TS | **new — created (context/CLAUDE.md only; no app code yet)** |
 | `akhada` | Fitness backend: store, tools, MCP server, check-ins, BT goals consumer. Local MCP now; cloud MCP is the gated horizon. | Python | exists; needs docs + client extraction reflected |
 | `smriti` | Memory MCP (recall + write). | Python | exists |
 | `narada-box3` | ESP32-S3-BOX-3 firmware (a hardware client of the brain/voice). | C/ESP-IDF | exists |
@@ -140,7 +138,7 @@ a product:
 ## Where each shell should open
 
 - **Brain server work** → `prana` (continue from the current session).
-- **PWA work** → `pwa-shell` (new; has its own CLAUDE.md pointing here).
+- **PWA work** → `narada-phone-app` (new; has its own CLAUDE.md pointing here).
 - **akhada work** → `akhada` (docs updated to point here + reflect the
   shared shell + reaffirm product-gating).
 
