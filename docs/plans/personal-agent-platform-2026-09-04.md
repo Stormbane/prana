@@ -1,8 +1,11 @@
 # The personal-agent platform — topology & architecture
 
-**Date:** 2026-09-04
-**Status:** DRAFT — Suti's decisions folded in; **awaiting cross-review**
-before the code moves. Not canon yet.
+**Date:** 2026-09-04 (revised 2026-09-05 after cross-review round 1)
+**Status:** CROSS-REVIEWED — rounds 1+2 complete (2026-09-05). Round 1:
+5 high findings, all accepted → §1a added. Round 2: 3 confirmed
+resolved, 2 residuals accepted and folded in (token storage, idempotency
+state machine). Plan debate closed per protocol; **code moves**. Final
+arbiter: tests + Suti.
 **Origin:** Suti, exploring how to build his own phone app for Narada
 (text + images + voice) and speed up the slow Telegram bridge — which
 converged into one platform question spanning prana, akhada, smriti,
@@ -57,7 +60,150 @@ realized:
   backend for cost-sensitive/background work.
 
 **Lives in:** `prana`. Telegram demotes to just another client of this
-server (or retires). The box's voice worker can route through it too.
+server — a **stopgap** client: the plan of record (Suti, 2026-09-05) is
+that the narada-phone-app PWA eventually replaces it entirely, so the
+API surface below is primarily the contract the phone app codes against.
+The box's voice worker can route through it too.
+
+## Layer 1a — the brain-server contract (added 2026-09-05, cross-review round 1)
+
+The endpoint is not "a stateless completions API that happens to have an
+agent behind it." It is an agent server with an OpenAI-shaped front door.
+The following five contracts are **prerequisites to code**, answering the
+round-1 findings.
+
+### Sessions (conversation isolation)
+
+- The server **owns sessions**. A session = one warm agent context
+  (identity + transcript + held-open MCP connections), keyed by a
+  server-recognized id: `telegram-<chat_id>`, `phone-<uuid>`,
+  `cli-<name>`. Clients name their session via the Narada extension
+  (body field `narada: {session_id: ...}`); the id is namespaced by the
+  authenticated client credential — one client cannot open another's
+  session.
+- **One active turn per session.** A second request on a busy session is
+  rejected `409` (with `Retry-After`), never interleaved. Distinct
+  sessions run concurrently, capped by a global concurrency limit
+  (config; default 4).
+- **No session id → stateless mode:** context comes only from the
+  request's `messages` array; no server-side binding, no memory writes
+  attributed to a conversation. This is the unmodified-OpenAI-client
+  degraded mode, and it is legitimate (curl smoke tests live here).
+- **Durability:** session transcripts persist under
+  `~/.narada/brain/sessions/`; a server restart re-hydrates on first
+  touch (cold-ish first turn, warm after). Idle sessions are reaped
+  after a TTL (config; default 60 min) — reap closes the agent client,
+  never deletes the transcript.
+
+### Authentication (application-layer, fail-closed)
+
+- **Every request requires `Authorization: Bearer <token>`.** Static
+  per-client tokens generated on first run into
+  `~/.narada/.brain-tokens.json`, following the proven
+  `.sessions-tokens.json` pattern. Storage contract, stated precisely:
+  `~/.narada` IS a versioned repo, but it is **git-crypt-encrypted by
+  default** (`** filter=git-crypt` in `.gitattributes`; only
+  `.gitattributes`/`.gitignore` are cleartext), so tracked secrets are
+  ciphertext at rest and on the remote. The brain server verifies at
+  startup that (a) the tokens file exists and parses, and (b) the
+  git-crypt default-encrypt attribute still applies to it
+  (`git check-attr filter` → `git-crypt`) — refusing to start (fail
+  closed) if the encryption contract has been broken. Tokens never
+  appear in prana's own repo, logs, or error messages. Tailnet
+  reachability and CORS are transport constraints, not authorization —
+  an unauthenticated request is `401` even from an allowed device.
+- **Tokens carry a tier**, reusing the sessions caller-tier pattern
+  (enforced in code, never prompt-only): `prana` tier = full toolset;
+  `voice`/`app` tiers = the reduced toolsets already defined for those
+  surfaces. The tier decides which MCP tools the session's agent is
+  wired with at session creation.
+- Logging never prints tokens; failed auth is logged with client
+  address; repeated failures rate-limit.
+
+### Turn lifecycle (retries, disconnects, bounds)
+
+- **Turn identity — the idempotency state machine (frozen here):**
+  clients MAY send `narada: {request_id: ...}`. When a turn with a
+  request id is **accepted**, the server durably records — alongside the
+  session transcript, before the agent loop starts — an idempotency
+  record: `{request_id, fingerprint, state, result?}` where
+  `fingerprint` = SHA-256 over the canonicalized request (new message
+  content + model + session id). States: `accepted → running →`
+  terminal `completed | failed | cancelled | interrupted`. Rules:
+  - Retry, same id + same fingerprint → return the recorded terminal
+    state/result verbatim; if still `running`, `409` (turn in flight).
+  - Same id + **different** fingerprint → `422` reject (an id is never
+    silently rebound to a different request).
+  - **Recovery:** on startup, any record found non-terminal is marked
+    `interrupted`; a retry sees `interrupted` explicitly and must send a
+    NEW request id to rerun — the server never guesses whether the dead
+    turn's effects happened.
+  - Window: the session's last N=8 turns; eviction is oldest-first.
+  Without a request id, a retry is a new turn — acceptable because
+  **mutations remain proposal-gated downstream** (akhada writes are
+  chip-confirmed proposals; the sessions MCP mutation tier requires
+  prana approval), so a duplicated turn cannot silently duplicate a
+  committed write; duplicate *proposals* are visible and dismissible.
+- **Disconnect ≠ cancel.** If the client drops mid-stream, the turn runs
+  to completion and lands in the session transcript; the client's next
+  turn (or a retry by request id) sees the truth. Explicit cancellation:
+  `POST /v1/narada/sessions/{id}/cancel` stops the loop at the next tool
+  boundary (in-flight tool call completes; nothing new starts) and the
+  turn is recorded as cancelled — a cancelled turn never masquerades as
+  a completed one.
+- **Bounds, fail-closed:** max tool iterations per turn (default 20) and
+  a wall-clock deadline (default 240 s). Hitting a bound ends the turn
+  with an **explicit error finish** — never a silent truncation dressed
+  as a normal completion (the zombie-heartbeat rule applied to turns).
+
+### Wire contract (baseline + versioned extensions)
+
+- **Baseline = strict OpenAI `/v1/chat/completions`,** streaming and
+  non-streaming: standard chunks, `finish_reason`, `usage`. An
+  unmodified OpenAI SDK pointed at the server must work — this is a
+  release test, not an aspiration. Tool use is **internal** to the
+  server (the agent loop runs server-side); baseline clients see text.
+- **Extensions are namespaced and versioned:** everything Narada-specific
+  rides in a single `narada` object (request: `session_id`,
+  `request_id`; response/chunks: tool-progress notes, structured cards,
+  proposal events), with `narada.v` as the schema version. OpenAI SDKs
+  ignore unknown fields — baseline clients are unaffected by design.
+- **The extension schema is a contract doc, not folklore:** before the
+  phone app's talk screen codes against cards/proposals, the chunk-level
+  schema (event types, ordering, replay/reconnect semantics) is written
+  to `docs/contracts/brain-wire-v1.md` in prana and referenced from
+  narada-phone-app. **MVP builds the baseline only**; the extension doc
+  gates the phone app's rich rendering, not Telegram.
+- **akhada's existing shell-log/turn-polling protocol** (the typed-chat
+  brain) is acknowledged as a parallel, pre-existing path. It is NOT
+  extended; when the phone app's chat moves to the brain server, that
+  path retires with the surfaces that used it. No third protocol.
+
+### Runtime decision (Agent SDK vs Messages API)
+
+**Ruled: Claude Agent SDK (Python), one persistent `ClaudeSDKClient` per
+session.** Rationale: it reuses the exact MCP wiring already proven
+(smriti/akhada/sessions configs), inherits the tool loop, permissions,
+and context management instead of hand-rolling them, and a held-open
+client kills the per-message spawn+reconnect floor — warmth is
+per-session, which matches real usage (long-lived Telegram chat, one
+phone conversation).
+
+- **Concurrency model:** a session pool of SDK clients — never one
+  global agent client shared across sessions (finding 1). The pool is
+  the unit of the global concurrency cap and the idle reaper.
+- **Validation spike is build step 1** (blocking): measure first-token
+  latency warm vs `claude -p` cold, verify a client survives multi-turn
+  streaming + held MCP connections over ≥30 min idle-and-resume, verify
+  cancellation. **Recorded fallback:** if the SDK cannot hold sessions
+  warm or stream cleanly, drop to Messages API + a hand-rolled MCP
+  bridge (anthropic + mcp libs are already installed); the outer
+  HTTP/session/auth/turn contract above is identical either way — the
+  fork is internal.
+- **Billing stays a config axis:** the SDK path can run on the API key
+  (chosen default: speed) or the Max subscription via CLI auth (cheap
+  background work) — per-session, set at session creation from the
+  client tier config.
 
 ## Layer 2 — transport (Tailscale)
 
@@ -170,12 +316,65 @@ a product:
 - **akhada work** → `akhada` (docs updated to point here + reflect the
   shared shell + reaffirm product-gating).
 
-## Open questions for Suti
+## Open questions — resolved (2026-09-04/05)
 
-1. **PWA name** — mukha / dwara / rupa / other? (rules the folder + package)
-2. **Product-gating confirmed?** — this spec treats akhada-as-product as
-   the post-D5 horizon, architecture-ready but not built. Correct?
-3. **Brain server + cost** — default chat model tier (Sonnet vs Haiku)?
-   Keep the `claude -p` subscription path as a selectable cheap backend?
-4. **Cross-review before code?** (Recommended — this amends ADR-092's
-   plan-of-record and defines cross-repo seams.)
+1. **PWA name** — ruled: `narada-phone-app` (2026-09-04).
+2. **Product-gating** — confirmed: akhada-as-product stays the post-D5
+   horizon; seams only.
+3. **Brain server + cost** — Sonnet default chat tier; API for speed;
+   subscription path stays selectable (see §1a runtime decision).
+4. **Cross-review** — approved and run; round 1 below.
+
+## Cross-review round 1 (Codex adversarial, 2026-09-05)
+
+Verdict: **needs-attention** ("no-ship" as originally written) — five
+high findings. All five **accepted**; §1a is the answer. Dispositions:
+
+1. **No conversation-isolation contract** — ACCEPT. One warm agent
+   shared across clients is a race. Fixed: server-owned sessions, one
+   agent client per session, one active turn per session, namespaced
+   session ids bound to the authenticated client. (§1a Sessions)
+2. **No application-layer auth** — ACCEPT. The spec admitted tailnet ≠
+   authorization but left auth unresolved. Fixed: bearer tokens with
+   caller tiers, fail-closed, tier decides the wired toolset. (§1a
+   Authentication)
+3. **Ambiguous turns on disconnect/retry** — ACCEPT, right-sized. A full
+   durable replay ledger is more than the MVP needs; the accepted core
+   is request-id idempotency, one-active-turn, disconnect-runs-to-
+   completion, explicit cancel, fail-closed bounds. Duplicate-mutation
+   blast radius is additionally bounded by the existing proposal gates
+   (akhada chips, sessions mutation tier). (§1a Turn lifecycle)
+4. **"OpenAI-compatible" can't carry agent events as specified** —
+   ACCEPT. Fixed by splitting the contract: strict-OpenAI baseline
+   (release-tested with an unmodified SDK) + versioned `narada`
+   extension namespace, with the chunk schema frozen in
+   `docs/contracts/brain-wire-v1.md` before the phone app codes against
+   it. MVP ships baseline only. The akhada shell-log protocol is
+   acknowledged and slated to retire, not extend. (§1a Wire contract)
+5. **Backend choice unresolved where it determines topology** — ACCEPT.
+   Ruled in-spec: Agent SDK with per-session clients (pool, cap,
+   reaper), blocking validation spike as build step 1, Messages API
+   loop as the recorded fallback behind the same outer contract. (§1a
+   Runtime decision)
+
+## Cross-review round 2 (confirmation check, 2026-09-05)
+
+Verdict: findings 1/4/5 (isolation, wire, runtime) **confirmed
+resolved**; two residual highs on the round-1 revision text, both
+**accepted** and folded in. Plan debate stops here per protocol.
+
+1. **Token-storage contradiction** ("`~/.narada`, never in the repo" vs
+   `~/.narada` being a versioned repo) — ACCEPT. Investigated: the
+   existing `.sessions-tokens.json` is tracked but the whole repo is
+   git-crypt-encrypted by default (`** filter=git-crypt`), ciphertext
+   on the GitHub remote. The spec now states the real contract:
+   `.brain-tokens.json` under the same default-encrypt attribute, plus
+   a fail-closed startup check that the git-crypt attribute still
+   covers it. (§1a Authentication)
+2. **Idempotency record not bound to payload / not durable across all
+   outcomes** — ACCEPT. The state machine is now frozen in-spec:
+   durable record at turn-accept (id + request fingerprint + state),
+   terminal states incl. `interrupted` assigned on crash recovery,
+   fingerprint-mismatch reuse rejected `422`, retry of an interrupted
+   turn requires a new id — the server never guesses whether a dead
+   turn's effects happened. (§1a Turn lifecycle)
