@@ -47,6 +47,10 @@ cron scheduler supervised by the host.
 
 ```
 src/prana/
+  brain/        — warm brain server (LIVE 2026-09-05): Narada-the-agent
+                  behind an OpenAI-compatible /v1/chat/completions on
+                  127.0.0.1:8811; per-session warm Agent SDK clients,
+                  bearer-token tiers, frozen turn contract (spec §1a)
   spawn.py      — hardened subprocess wrappers (shared: bridge + heartbeat)
   host/         — orchestrator behind the Narada_Host task: supervisor,
                   components.yaml registry, lockfile, log, install CLI
