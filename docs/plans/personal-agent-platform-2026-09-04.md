@@ -65,6 +65,17 @@ Tailscale is the private mesh that lets the phone reach the home brain
 server securely, no public exposure. **It is the same tailnet Suti is
 already building for akhada — do not build it twice.**
 
+**Browser transport contract (added post cross-review 2026-09-04):**
+serving a *browser* client is a different proof than curl/Telegram/ESP32.
+The prana deployment must provide: HTTPS + WSS endpoints (no mixed
+content); a CORS origin allowlist covering the PWA's hosted origin(s)
+**and** packaged-app origins (`capacitor://localhost`,
+`https://localhost`); OPTIONS/preflight handling; explicit
+allowed-headers policy (content-type, and the auth header once auth is
+ruled); and real-browser smoke tests over LAN + Tailscale. Additionally:
+least-privilege tailnet ACLs so only Suti's devices reach the brain and
+voice-session ports — tailnet reachability alone is not authorization.
+
 **Where it lives — NOT in the PWA folder.** Tailscale is a *host/deploy*
 concern of the machine being exposed. The `tailscale serve` config that
 publishes the brain-server API (and static PWA assets, and akhada's local
@@ -100,6 +111,23 @@ the PWA client (`voice/`) *inside* akhada. This spec moves it to the
 shared shell. Because no akhada client code exists yet, the extraction is
 clean — but the plan-of-record must be amended (and this spec
 cross-reviewed) so canon and code agree.
+
+### Layer 3 horizon — the domain-companion shell (Suti, 2026-09-04)
+
+The shell's reuse axis is wider than "Narada app + akhada app." It is
+the **generic client for domain agents**: any Beautiful-Tree domain can
+get a companion app — fitness first, then e.g. a tailor's
+measurement-taker (talk to collect a person's measurements) or a
+dating-goals coach (discuss dates, preferences, beliefs; analyze
+partners) — each being **manifest + brain endpoint**, zero client fork.
+The mechanism: domain-specific data structures, knowledge graphs, and
+suggested interactions are served by the domain's brain **as data**
+(structured cards + the proposal protocol), rendered by the shell's
+generic card registry. Domain logic never enters the client codebase.
+Architecture detail lives in
+`C:\Projects\narada-phone-app\docs\architecture-grill-2026-09-04.md`.
+This horizon changes no gating: every product-shaped domain app remains
+behind its own governance (akhada behind D5 per ADR-092).
 
 ## Layer 4 — akhada (portable domain module)
 
