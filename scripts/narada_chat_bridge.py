@@ -89,13 +89,31 @@ def _write_sessions_mcp_config() -> Path | None:
         from prana.sessions.mcp import _load_or_create_tokens
 
         token = _load_or_create_tokens()["prana"]
+        # Explicit, minimal MCP set (2026-09-04: chat was cold-starting
+        # every MCP server on the machine each message — including the
+        # DEAD narada-speak, whose failed deha-8765 connect added
+        # timeout latency to every Telegram reply). List exactly what
+        # chat needs; --strict-mcp-config (in _run_claude) then loads
+        # ONLY these and skips the global set entirely.
         config = {
             "mcpServers": {
                 "narada-sessions": {
                     "command": sys.executable,
                     "args": ["-m", "prana.sessions.mcp", "--tier", "prana"],
                     "env": {"PRANA_SESSIONS_TOKEN": token},
-                }
+                },
+                # memory (recall + write) and fitness logging — the two
+                # live MCPs chat actually uses. narada-speak is omitted
+                # deliberately: it points at the decommissioned deha
+                # server and chat does not speak through the box.
+                "smriti": {
+                    "command": "python",
+                    "args": ["-m", "smriti.mcp_server"],
+                },
+                "akhada": {
+                    "command": "python",
+                    "args": ["-m", "akhada.adapters.mcp_server"],
+                },
             }
         }
         SESSIONS_MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -158,9 +176,16 @@ async def _run_claude(message: str, workdir: Path) -> tuple[bool, str]:
         "--max-turns", str(MAX_TURNS),
         "--output-format", "text",
         "--dangerously-skip-permissions",
+        # Chat wants speed over raw depth — the flagship default
+        # (fable-5) is slow for a quick Telegram reply. Sonnet is fast
+        # and plenty for conversation + coaching; env-tunable to
+        # opus/fable for depth or haiku for max speed (2026-09-04).
+        "--model", os.environ.get("NARADA_CHAT_MODEL", "sonnet"),
     ]
     if _SESSIONS_MCP is not None:
-        cmd += ["--mcp-config", str(_SESSIONS_MCP)]
+        # STRICT: load only our three servers, not the whole machine's
+        # MCP set — the single biggest per-message speedup.
+        cmd += ["--mcp-config", str(_SESSIONS_MCP), "--strict-mcp-config"]
     if _has_prior_session(workdir):
         cmd.append("--continue")
 
