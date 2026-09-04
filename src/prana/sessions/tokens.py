@@ -73,14 +73,16 @@ def _read(path: Path) -> dict[str, str]:
         return {}
 
 
-def load_or_create_tokens(path: Path = TOKENS_FILE) -> dict[str, str]:
+def load_or_create_tokens(
+    path: Path = TOKENS_FILE, keys: tuple[str, ...] = TOKEN_KEYS
+) -> dict[str, str]:
     tokens = _read(path)
-    if all(tokens.get(k) for k in TOKEN_KEYS):
+    if all(tokens.get(k) for k in keys):
         return tokens
     path.parent.mkdir(parents=True, exist_ok=True)
     with _file_lock(path):
         tokens = _read(path)  # re-read under the lock: a peer may have won
-        missing = [k for k in TOKEN_KEYS if not tokens.get(k)]
+        missing = [k for k in keys if not tokens.get(k)]
         if not missing:
             return tokens
         for key in missing:

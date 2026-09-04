@@ -68,6 +68,13 @@ SESSIONS_MCP_CONFIG = Path.home() / ".narada" / ".sessions-mcp.json"
 CLAUDE_TIMEOUT = 300  # seconds; claude -p calls cap at 5 min
 MAX_TURNS = 20
 
+# The warm brain server (prana.brain, 2026-09-05). When it answers, each
+# message is one HTTP call against a held-warm agent session instead of
+# a fresh claude -p spawn. The claude -p path below remains as the
+# LOUDLY-LOGGED fallback — same cognition, slower road; never silent.
+BRAIN_URL = os.environ.get("NARADA_BRAIN_URL", "http://127.0.0.1:8811")
+BRAIN_TIMEOUT = 300  # brain turn deadline is 240s; leave headroom
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -145,6 +152,93 @@ def _scrubbed_env() -> dict:
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
     return env
+
+
+def _brain_token() -> str | None:
+    """prana-tier bearer token for the brain server; None disables the
+    brain path (chat still works via claude -p)."""
+    try:
+        import json as _json
+
+        tokens = _json.loads(
+            (Path.home() / ".narada" / ".brain-tokens.json").read_text(
+                encoding="utf-8")
+        )
+        return tokens.get("prana") or None
+    except (OSError, ValueError):
+        return None
+
+
+_BRAIN_TOKEN: str | None = _brain_token()
+
+
+def _brain_generation(chat_id: int) -> int:
+    """/new bumps a per-chat generation; the brain session id embeds it,
+    so a fresh generation = a fresh server-side session."""
+    gen_file = _per_chat_workdir(chat_id) / ".brain-generation"
+    try:
+        return int(gen_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _bump_brain_generation(chat_id: int) -> int:
+    gen = _brain_generation(chat_id) + 1
+    gen_file = _per_chat_workdir(chat_id) / ".brain-generation"
+    gen_file.write_text(str(gen), encoding="utf-8")
+    return gen
+
+
+def _run_brain_sync(message: str, chat_id: int, message_id: int) -> tuple[bool, str]:
+    """One turn against the warm brain server. Raises on transport
+    failure so the caller can fall back; returns (ok, text) for
+    in-protocol outcomes."""
+    import urllib.error
+    import urllib.request
+
+    gen = _brain_generation(chat_id)
+    session_id = f"telegram-{chat_id}" if gen == 0 else f"telegram-{chat_id}-g{gen}"
+    payload = json.dumps({
+        "messages": [{"role": "user", "content": message}],
+        "narada": {
+            "session_id": session_id,
+            # Telegram message ids are unique per chat: a natural
+            # idempotency key — a retried delivery replays, never reruns.
+            "request_id": f"tg-{message_id}",
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{BRAIN_URL}/v1/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_BRAIN_TOKEN}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=BRAIN_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return True, body["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as exc:
+        # The server answered: an in-protocol failure (busy turn, failed
+        # turn, auth) — surface it, do NOT double-run via claude -p.
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return False, f"(brain {exc.code}: {detail})"
+
+
+async def _run_brain(message: str, chat_id: int, message_id: int) -> tuple[bool, str] | None:
+    """Brain-first path. None = server unreachable, caller falls back."""
+    if _BRAIN_TOKEN is None:
+        return None
+    try:
+        return await asyncio.to_thread(_run_brain_sync, message, chat_id, message_id)
+    except Exception as exc:
+        logger.warning(
+            "brain server unreachable (%s) — falling back to claude -p "
+            "(slow path). Is the brain component running?", exc,
+        )
+        return None
 
 
 _SESSION_MARKER = ".narada-session-active"
@@ -272,8 +366,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
-    workdir = _per_chat_workdir(chat_id)
-    ok, response = await _run_claude(user_text, workdir)
+    brain_result = await _run_brain(user_text, chat_id, update.message.message_id)
+    if brain_result is not None:
+        ok, response = brain_result
+    else:
+        workdir = _per_chat_workdir(chat_id)
+        ok, response = await _run_claude(user_text, workdir)
 
     _log_exchange(chat_id, user_text, response, ok)
 
@@ -303,15 +401,14 @@ async def on_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_allowed(update):
         return
     chat_id = update.effective_chat.id
+    gen = _bump_brain_generation(chat_id)
     workdir = _per_chat_workdir(chat_id)
     marker = workdir / _SESSION_MARKER
     if marker.exists():
         marker.unlink()
-        await update.message.reply_text(
-            "(cleared marker — next message starts a fresh claude session)"
-        )
-    else:
-        await update.message.reply_text("(no prior session marked)")
+    await update.message.reply_text(
+        f"(fresh session — brain generation {gen}, claude marker cleared)"
+    )
 
 
 def main() -> None:
