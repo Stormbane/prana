@@ -145,8 +145,9 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
     parts: list[str] = []
 
     async def on_start() -> None:
+        # Acceptance already happened synchronously in the handler
+        # (atomic with the reservation); here the turn merely starts.
         if request_id is not None:
-            session.turns.accept(request_id, fp)
             session.turns.transition(request_id, "running")
         session.append_transcript("user", prompt)
 
@@ -169,11 +170,6 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
             async for chunk in gen:
                 parts.append(chunk)
                 run._emit(("delta", chunk))
-    except SessionBusy:
-        # Backstop for the pre-check race; nothing was accepted/started.
-        run.state, run.error = "busy", "session has an active turn"
-        run._emit(("end", "busy", run.error))
-        return
     except TimeoutError as exc:
         finish("failed", str(exc))
         return
@@ -181,6 +177,8 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
         logger.exception("turn failed (session=%s)", session.session_id)
         finish("failed", repr(exc))
         return
+    finally:
+        session.release()
     text = "".join(parts)
     if session.was_cancelled:
         finish("cancelled", text)
@@ -207,14 +205,39 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
     tokens = load_brain_tokens()
     app.state.pool = pool
 
+    # Auth rate limit (spec §1a: "repeated failures rate-limit"):
+    # per-address sliding count; lockout after the threshold.
+    auth_failures: dict[str, list[float]] = {}
+    AUTH_FAIL_LIMIT, AUTH_FAIL_WINDOW_S = 10, 60.0
+
+    def _auth_failed(addr: str) -> None:
+        now = time.monotonic()
+        window = [t for t in auth_failures.get(addr, ())
+                  if now - t < AUTH_FAIL_WINDOW_S]
+        window.append(now)
+        auth_failures[addr] = window
+        logger.warning("auth failure from %s (%d in window)", addr, len(window))
+
+    def _auth_locked(addr: str) -> bool:
+        now = time.monotonic()
+        window = [t for t in auth_failures.get(addr, ())
+                  if now - t < AUTH_FAIL_WINDOW_S]
+        auth_failures[addr] = window
+        return len(window) >= AUTH_FAIL_LIMIT
+
     async def require_tier(request: Request) -> str:
+        addr = request.client.host if request.client else "?"
+        if _auth_locked(addr):
+            raise HTTPException(
+                429, "too many authentication failures",
+                headers={"Retry-After": str(int(AUTH_FAIL_WINDOW_S))})
         header = request.headers.get("authorization", "")
         if not header.startswith("Bearer "):
+            _auth_failed(addr)
             raise HTTPException(401, "missing bearer token")
         tier = tier_for_token(header[len("Bearer "):].strip(), tokens)
         if tier is None:
-            logger.warning("auth failure from %s",
-                           request.client.host if request.client else "?")
+            _auth_failed(addr)
             raise HTTPException(401, "invalid token")
         return tier
 
@@ -245,6 +268,8 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             body = await request.json()
         except ValueError:
             return _openai_error(400, "body is not valid JSON")
+        if not isinstance(body, dict):
+            return _openai_error(400, "body must be a JSON object")
 
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -254,7 +279,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             return _openai_error(400, "no user message with text content found")
 
         stream = bool(body.get("stream", False))
-        narada: dict[str, Any] = body.get("narada") or {}
+        narada: Any = body.get("narada") or {}
+        if not isinstance(narada, dict):
+            return _openai_error(400, "narada extension must be an object")
         session_id = narada.get("session_id")
         request_id = narada.get("request_id")
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -282,10 +309,17 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                         "server_error", headers={"Retry-After": "5"})
                 return _replay(record, completion_id, stream)
 
-        if session.busy:
+        # Reserve + accept in one event-loop tick (no await between the
+        # record check above and here) — atomic w.r.t. every other
+        # handler, so a same-request_id race can never execute twice.
+        try:
+            session.reserve()
+        except SessionBusy:
             return _openai_error(
                 409, "session has an active turn", "server_error",
                 headers={"Retry-After": "5"})
+        if request_id is not None:
+            session.turns.accept(request_id, fp)  # durable at ACCEPT
 
         run = TurnRun()
         run.task = asyncio.create_task(_execute_turn(
@@ -300,9 +334,6 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         if run.state == "completed":
             return JSONResponse(
                 _completion_body(config.model, run.text, completion_id))
-        if run.state == "busy":
-            return _openai_error(409, run.error or "busy", "server_error",
-                                 headers={"Retry-After": "5"})
         return _openai_error(
             500, f"turn {run.state}: {run.error or ''}".strip(),
             "server_error")
@@ -368,10 +399,29 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         await backend.start()
 
         async def _gen():
+            # Same wall-clock bound as session turns — a stuck stateless
+            # request must not wedge a semaphore slot forever (P2, diff
+            # review 2026-09-05).
             agen = backend.run_turn(context)
+            started = time.monotonic()
             try:
                 async with pool.turn_semaphore:
-                    async for text in agen:
+                    while True:
+                        remaining = config.turn_deadline_s - (
+                            time.monotonic() - started)
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                f"turn exceeded {config.turn_deadline_s:.0f}s"
+                                " wall-clock bound")
+                        try:
+                            text = await asyncio.wait_for(
+                                agen.__anext__(), timeout=remaining)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            raise TimeoutError(
+                                f"turn exceeded {config.turn_deadline_s:.0f}s"
+                                " wall-clock bound") from None
                         yield text
             finally:
                 await agen.aclose()
@@ -385,6 +435,10 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                     async for text in _gen():
                         yield _chunk(config.model, completion_id,
                                      {"content": text})
+                except TimeoutError as exc:
+                    yield _stream_error(str(exc))
+                    yield "data: [DONE]\n\n"
+                    return
                 except Exception:
                     logger.exception("stateless turn failed")
                     yield _stream_error("agent turn failed")
@@ -395,6 +449,8 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             return StreamingResponse(_s(), media_type="text/event-stream")
         try:
             parts = [t async for t in _gen()]
+        except TimeoutError as exc:
+            return _openai_error(500, str(exc), "server_error")
         except Exception:
             logger.exception("stateless turn failed")
             return _openai_error(500, "agent turn failed", "server_error")

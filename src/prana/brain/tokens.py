@@ -21,6 +21,10 @@ TIERS = ("prana", "app", "voice")
 
 
 def load_brain_tokens(path: Path = BRAIN_TOKENS_FILE) -> dict[str, str]:
+    """Verify the encryption contract BEFORE any token generation — a
+    first run must never drop plaintext secrets into the versioned repo
+    and only then discover git-crypt is broken (diff review 2026-09-05)."""
+    verify_gitcrypt_covers(path)
     return load_or_create_tokens(path, keys=TIERS)
 
 

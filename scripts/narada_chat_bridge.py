@@ -227,18 +227,45 @@ def _run_brain_sync(message: str, chat_id: int, message_id: int) -> tuple[bool, 
         return False, f"(brain {exc.code}: {detail})"
 
 
+def _never_reached_server(exc: Exception) -> bool:
+    """True only when the request provably never arrived — the sole case
+    where falling back to claude -p cannot duplicate a turn."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, (ConnectionRefusedError, socket.gaierror))
+    return isinstance(exc, ConnectionRefusedError)
+
+
 async def _run_brain(message: str, chat_id: int, message_id: int) -> tuple[bool, str] | None:
-    """Brain-first path. None = server unreachable, caller falls back."""
+    """Brain-first path. None = provably-unreachable, caller may fall
+    back to claude -p. Ambiguous transport failures (timeout, reset,
+    truncated body — the turn may have run) retry ONCE with the same
+    request_id (the server replays, never reruns) and then surface an
+    honest error instead of falling back: a fallback that reruns a
+    maybe-completed turn is the masquerade the house rules forbid."""
     if _BRAIN_TOKEN is None:
         return None
     try:
         return await asyncio.to_thread(_run_brain_sync, message, chat_id, message_id)
     except Exception as exc:
-        logger.warning(
-            "brain server unreachable (%s) — falling back to claude -p "
-            "(slow path). Is the brain component running?", exc,
-        )
-        return None
+        if _never_reached_server(exc):
+            logger.warning(
+                "brain server unreachable (%s) — falling back to claude -p "
+                "(slow path). Is the brain component running?", exc,
+            )
+            return None
+        logger.warning("ambiguous brain failure (%s) — retrying same "
+                       "request_id (replay-safe)", exc)
+        try:
+            return await asyncio.to_thread(
+                _run_brain_sync, message, chat_id, message_id)
+        except Exception as exc2:
+            logger.error("brain retry also failed: %s", exc2)
+            return False, (
+                "(brain connection lost mid-turn; not re-running to avoid "
+                "a duplicate. Say it again to retry.)")
 
 
 _SESSION_MARKER = ".narada-session-active"
