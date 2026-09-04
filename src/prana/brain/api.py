@@ -164,12 +164,23 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
         run._emit(("end", state, result))
 
     try:
-        async with pool.turn_semaphore:
+        # The deadline covers semaphore queueing too — a turn stuck
+        # behind a full pool must still end explicitly (recheck P2).
+        try:
+            await asyncio.wait_for(pool.turn_semaphore.acquire(),
+                                   timeout=deadline_s)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"turn queued behind a full pool for {deadline_s:.0f}s"
+            ) from None
+        try:
             gen = session.run_turn(prompt, deadline_s=deadline_s,
                                    on_start=on_start)
             async for chunk in gen:
                 parts.append(chunk)
                 run._emit(("delta", chunk))
+        finally:
+            pool.turn_semaphore.release()
     except TimeoutError as exc:
         finish("failed", str(exc))
         return
@@ -318,13 +329,19 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             return _openai_error(
                 409, "session has an active turn", "server_error",
                 headers={"Retry-After": "5"})
-        if request_id is not None:
-            session.turns.accept(request_id, fp)  # durable at ACCEPT
-
-        run = TurnRun()
-        run.task = asyncio.create_task(_execute_turn(
-            run, session, pool, prompt, request_id,
-            config.turn_deadline_s, fp))
+        try:
+            if request_id is not None:
+                session.turns.accept(request_id, fp)  # durable at ACCEPT
+            run = TurnRun()
+            run.task = asyncio.create_task(_execute_turn(
+                run, session, pool, prompt, request_id,
+                config.turn_deadline_s, fp))
+        except BaseException:
+            # If durable acceptance (or task creation) fails, the
+            # reservation must not outlive it — a leaked reservation
+            # 409s the session until restart (recheck P1).
+            session.release()
+            raise
 
         if stream:
             return StreamingResponse(
@@ -405,7 +422,16 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             agen = backend.run_turn(context)
             started = time.monotonic()
             try:
-                async with pool.turn_semaphore:
+                # Deadline covers semaphore queueing too (recheck P2).
+                try:
+                    await asyncio.wait_for(pool.turn_semaphore.acquire(),
+                                           timeout=config.turn_deadline_s)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        "turn queued behind a full pool for "
+                        f"{config.turn_deadline_s:.0f}s — wall-clock bound"
+                    ) from None
+                try:
                     while True:
                         remaining = config.turn_deadline_s - (
                             time.monotonic() - started)
@@ -423,6 +449,8 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                                 f"turn exceeded {config.turn_deadline_s:.0f}s"
                                 " wall-clock bound") from None
                         yield text
+                finally:
+                    pool.turn_semaphore.release()
             finally:
                 await agen.aclose()
                 await backend.close()
