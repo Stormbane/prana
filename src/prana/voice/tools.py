@@ -26,6 +26,66 @@ from prana.voice.escalate import escalate
 
 logger = logging.getLogger(__name__)
 
+# Rest timers (akhada gym-session plan G4): bounded so a misheard
+# number can't set an hour-long silent hold or a 0-second ring loop.
+REST_MIN_S = 5.0
+REST_MAX_S = 1800.0
+
+
+def make_rest_timer(speak, toast=None):
+    """The rest-timer pair as plain async callables — a REST timer
+    rings where the audio is, spoken in-session via `speak`, unlike
+    set_timer which reaches Telegram. One at a time; a new one
+    replaces the old; the task dies with the session's event loop.
+    Factored out of build_voice_tools so it tests without livekit."""
+    import asyncio as _aio
+    state: dict = {"task": None}
+    toast = toast or (lambda *a: None)
+
+    async def set_rest(seconds: float, label: str = "") -> dict:
+        if speak is None:
+            return {"set": False,
+                    "reason": "no live voice on this surface — use set_timer"}
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"set": False, "reason": "seconds must be a number"}
+        if not (REST_MIN_S <= seconds <= REST_MAX_S):
+            return {"set": False,
+                    "reason": f"rest timers run {REST_MIN_S:g}s to "
+                              f"{REST_MAX_S / 60:g} minutes"}
+        old = state.get("task")
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def _ring() -> None:
+            try:
+                await _aio.sleep(seconds)
+                toast("timer", "rest over" + (f": {label}" if label else ""))
+                await speak(
+                    "His rest timer just ran out"
+                    + (f" (next: {label})" if label else "")
+                    + ". Tell him time's up — three or four words, "
+                    "gym-partner energy, then quiet.")
+            except _aio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("rest timer failed to speak: %r", exc)
+
+        state["task"] = _aio.ensure_future(_ring())
+        toast("timer", f"rest {seconds:g}s")
+        return {"set": True, "seconds": seconds}
+
+    async def cancel_rest() -> dict:
+        t = state.get("task")
+        if t is not None and not t.done():
+            t.cancel()
+            state["task"] = None
+            return {"cancelled": True}
+        return {"cancelled": False, "reason": "no rest timer running"}
+
+    return set_rest, cancel_rest
+
 
 def build_voice_tools(
     client: Optional[ServiceClient] = None,
@@ -36,6 +96,7 @@ def build_voice_tools(
     publish=None,
     end_session=None,
     voice_info: Optional[dict] = None,
+    speak=None,
 ) -> list:
     """Build the closed voice-tier tool list for an AgentSession.
 
@@ -43,7 +104,9 @@ def build_voice_tools(
     are stamped onto anything the session writes. `music` is the job's
     MusicPlayer (audio-owner state machine) or None. `voice_info` is a
     snapshot of the running brain (model/voice/backend) for the
-    about_myself tool."""
+    about_myself tool. `speak` is an async callable(instructions) that
+    makes the agent speak proactively in THIS session — the rest
+    timer's ring; None on surfaces that can't."""
     voice_info = voice_info or {}
     client = client or ServiceClient()
     proposals = proposals or ProposalQueue()
@@ -202,7 +265,8 @@ def build_voice_tools(
                      "+ read pages", "hand hard questions to Narada's "
                      "deeper mind", "end the conversation"]
         personal_extra = ["message Suti on Telegram", "set timers and "
-                           "reminders"]
+                           "reminders", "rest timers that speak up "
+                           "in-session (training)"]
         return {
             "brain_model": voice_info.get("model", "unknown"),
             "voice_timbre": voice_info.get("voice", "unknown"),
@@ -406,6 +470,23 @@ def build_voice_tools(
         except timers.TimerError as exc:
             return {"set": False, "reason": str(exc)}
 
+    _set_rest, _cancel_rest = make_rest_timer(speak, _toast)
+
+    @function_tool()
+    async def set_rest_timer(
+        seconds: Annotated[float, "rest length in seconds, e.g. 90"],
+        label: Annotated[str, "optional: what's next, a few words"] = "",
+    ) -> dict:
+        """Between-sets rest timer: I speak up IN THIS CONVERSATION when
+        the rest is over ('rest ninety'). A new one replaces the old.
+        For anything longer-range use set_timer (Telegram)."""
+        return await _set_rest(seconds, label)
+
+    @function_tool()
+    async def cancel_rest_timer() -> dict:
+        """Cancel the running rest timer."""
+        return await _cancel_rest()
+
     @function_tool()
     async def list_timers() -> list[dict]:
         """List pending timers and reminders."""
@@ -429,7 +510,8 @@ def build_voice_tools(
     # audio owner gives the body a local announcement channel.
     if tier == "personal":
         tools.extend([message_suti, set_timer, set_reminder,
-                      list_timers, cancel_timer])
+                      list_timers, cancel_timer,
+                      set_rest_timer, cancel_rest_timer])
         tools.extend(_akhada_tools(session_id, _toast))
     return tools
 
