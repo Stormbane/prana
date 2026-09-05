@@ -501,10 +501,18 @@ async def entrypoint(ctx: JobContext) -> None:
                     pass
                 except Exception as exc:
                     logger.warning("akhada context failed: %s", exc)
+            async def _session_speak(inst: str) -> None:
+                # The rest timer's ring (akhada gym-session G4): a
+                # proactive spoken line in THIS session, same mechanism
+                # as the greeting.
+                handle = session.generate_reply(instructions=inst)
+                await handle
+
             agent = Agent(instructions=instructions,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
                               music=player, publish=_publish,
+                              speak=_session_speak,
                               end_session=sleep_tap.set,
                               voice_info={
                                   "model": REALTIME_MODEL,
