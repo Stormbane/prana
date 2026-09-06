@@ -311,6 +311,109 @@ def test_auth_failures_rate_limited(brain):
     assert _post(client).status_code == 429
 
 
+# ── CORS (browser transport contract) ───────────────────────────────────
+
+ALLOWED_ORIGIN = "capacitor://localhost"
+
+
+def test_preflight_allowed_origin(brain):
+    client, _ = brain
+    resp = client.options(
+        "/v1/chat/completions",
+        headers={"Origin": ALLOWED_ORIGIN,
+                 "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": "content-type,authorization"})
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    allowed = resp.headers["access-control-allow-headers"].lower()
+    assert "authorization" in allowed and "content-type" in allowed
+
+
+def test_preflight_unknown_origin_refused(brain):
+    client, _ = brain
+    resp = client.options(
+        "/v1/chat/completions",
+        headers={"Origin": "https://evil.example",
+                 "Access-Control-Request-Method": "POST"})
+    assert resp.status_code == 400
+    assert "access-control-allow-origin" not in resp.headers
+
+
+def test_actual_post_carries_cors_header(brain):
+    client, _ = brain
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": "Bearer tok-prana",
+                 "Origin": ALLOWED_ORIGIN})
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+
+
+# ── multimodal ──────────────────────────────────────────────────────────
+
+DATA_URI = "data:image/jpeg;base64,aGVsbG8="
+
+
+def _image_msg(text="what is this?", uri=DATA_URI):
+    parts = [{"type": "image_url", "image_url": {"url": uri}}]
+    if text:
+        parts.append({"type": "text", "text": text})
+    return [{"role": "user", "content": parts}]
+
+
+def test_image_blocks_reach_backend(brain):
+    client, _ = brain
+
+    received = {}
+
+    class RecordingBackend(FakeBackend):
+        async def run_turn(self, prompt):
+            received["prompt"] = prompt
+            yield "a photo"
+
+    client.app.state.pool._factory = RecordingBackend
+    resp = _post(client, messages=_image_msg(),
+                 narada={"session_id": "img1"})
+    assert resp.status_code == 200
+    blocks = received["prompt"]
+    assert isinstance(blocks, list)
+    assert blocks[0] == {"type": "image", "source": {
+        "type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="}}
+    assert blocks[1] == {"type": "text", "text": "what is this?"}
+
+
+def test_image_only_message_accepted_in_session(brain):
+    client, _ = brain
+    resp = _post(client, messages=_image_msg(text=None),
+                 narada={"session_id": "img2"})
+    assert resp.status_code == 200
+
+
+def test_image_without_session_is_clear_400(brain):
+    client, _ = brain
+    resp = _post(client, messages=_image_msg())
+    assert resp.status_code == 400
+    assert "session" in resp.json()["error"]["message"]
+
+
+def test_remote_image_url_is_clear_400(brain):
+    client, _ = brain
+    resp = _post(client,
+                 messages=_image_msg(uri="https://example.com/cat.jpg"),
+                 narada={"session_id": "img3"})
+    assert resp.status_code == 400
+    assert "data:" in resp.json()["error"]["message"]
+
+
+def test_same_request_id_different_image_is_422(brain):
+    client, _ = brain
+    kw = {"narada": {"session_id": "img4", "request_id": "r1"}}
+    assert _post(client, messages=_image_msg(), **kw).status_code == 200
+    other = _image_msg(uri="data:image/png;base64,b3RoZXI=")
+    assert _post(client, messages=other, **kw).status_code == 422
+
+
 # ── cancel endpoint ─────────────────────────────────────────────────────
 
 
