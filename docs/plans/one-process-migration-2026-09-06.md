@@ -100,7 +100,71 @@ is identical. Final live state: deadman Ready/armed, ledger clean, all
 five probed components 200. **Consolidation (steps 3–4) is now
 unblocked** per the addendum's gate.
 
-## Step 3 — smriti logd handoff: NOT STARTED (blocked on step 2 drills)
-## Step 4 — Hermes absorbs morning/nightly: NOT STARTED (blocked on 3;
-   prerequisite: diagnose why both jobs currently exit 1)
+## Step 4a — external job-freshness watcher (2026-09-07, done)
+
+The addendum requires overdue-job detection checked OUTSIDE the
+scheduler. Built it BEFORE the Hermes cutover so the silent-failure gap
+closes immediately, against the current Windows tasks — the exact gap
+that just bit us (the wake briefing said "NIGHTLY HAD FAILURES" and
+nothing paged Suti).
+
+- `scripts/install/job-watch.ps1` — pure PS 5.1, read-only + page-only
+  (never restarts a job). Reads a config of watched jobs; for each,
+  queries the Windows task and pages once per distinct problem
+  (failed / overdue / missing), latches per-job on confirmed delivery,
+  announces recovery and clears the latch. Registered as the SECOND
+  action on `Narada_Deadman` (one external entry, two dumb scripts run
+  in sequence each tick) — no edits to the reviewed host-liveness core.
+- Config `job-watch.template.json` → seeded to
+  `%LOCALAPPDATA%\narada\job-watch.json` by the installer (never
+  overwrites an edited config).
+- Tests: 11 (mock harness shadows `Get-ScheduledTaskInfo` +
+  `Invoke-RestMethod`; healthy/failed/overdue/missing/running/
+  still-broken/recovery/page-failure/multi-job/overdue-only). Suite
+  298 passed.
+- Live drill: dry-run correctly flagged nightly's stale pre-fix failure
+  and stayed silent on morning/logd; after triggering nightly, the full
+  `Narada_Deadman` task ran both actions in sequence, result 0, nothing
+  falsely latched.
+
+**Finding for the smriti side (cross-repo):** `smriti morning` exits
+**1 when the message was already sent today** — a success invariant
+("morning was sent today" holds), not a failure. Exit code alone is
+therefore an ambiguous health signal for it (1 = already-sent vs 1 =
+real error are indistinguishable). Worked around here by watching
+morning `overdue-only` (did it fire within 26h — the true health
+signal for a once-daily idempotent job). The clean fix belongs in
+smriti: reserve nonzero for real errors and exit 0 (or a distinct
+"already done" code) on the benign case. `smriti nightly` has clean
+exit semantics (verified exit 0 with all stages ok, 2026-09-07) and is
+watched `result+overdue`.
+
+## Step 3 — smriti logd handoff: NOT STARTED — needs a smriti-side decision
+
+The addendum assumed logd was a simple daemon to supervise. It is not:
+`smriti logd --ensure` (the `smriti-logd` task, every 10 min) does TWO
+things — (a) keepalive for the logd daemon, and (b) **keepalive for the
+qmd recall daemon**, added in smriti commit `60449be` (2026-09-06).
+Naively supervising `smriti logd` under the prana host and disabling
+the task would silently drop the qmd keepalive — undoing a fresh design
+decision from the smriti session. **This needs coordination with the
+smriti owner**, not a unilateral handoff. Options to weigh with Suti:
+(i) supervise the logd daemon under the host AND give qmd its own
+supervised component; (ii) leave logd on its self-recovering `--ensure`
+tick (it already restarts itself) and only *watch* it via step 4a —
+which is now done. Option (ii) may make step 3 unnecessary.
+
+## Step 4 — Hermes absorbs morning/nightly: NOT STARTED — needs a decision
+
+Prerequisites now met (both jobs verified working; external overdue
+detection built). But the cutover moves live memory-hygiene onto
+Hermes, whose own heartbeat job has been **paused since 2026-08-06** —
+the addendum's finding 2 ("a new single point of failure worse than
+Windows Scheduler's independence") is live here. **Open question for
+Suti:** is the Hermes cutover worth it, or is the better end-state
+"keep morning/nightly on Windows Scheduler (independent, proven) but
+now watched from outside by step 4a"? The watcher delivers step 4's
+safety value without taking the cutover risk. Recommend NOT cutting
+over unless there is a concrete reason to consolidate the scheduler.
+
 ## Step 5 — cognition convergence: tracked in its own plans

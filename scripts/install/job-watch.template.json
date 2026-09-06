@@ -1,0 +1,8 @@
+{
+  "_comment": "Scheduled jobs the deadman's job-watch pass checks from outside. max_age_hours: how long since the last run before it is called overdue. check: 'result+overdue' (default) also pages on a nonzero exit code; 'overdue-only' ignores the exit code (use for jobs whose code is ambiguous, e.g. smriti-morning exits 1 on 'already sent today'). Installed to %LOCALAPPDATA%/narada/job-watch.json; edit there. During the one-process migration these are Windows tasks; after the Hermes cutover (step 4) the watcher reads Hermes run records with the same shape.",
+  "jobs": [
+    { "task": "smriti-nightly", "max_age_hours": 26, "check": "result+overdue" },
+    { "task": "smriti-morning", "max_age_hours": 26, "check": "overdue-only" },
+    { "task": "smriti-logd",    "max_age_hours": 0.5, "check": "overdue-only" }
+  ]
+}
