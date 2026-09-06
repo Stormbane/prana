@@ -29,6 +29,17 @@ def log_dir() -> Path:
     return state_dir() / "logs"
 
 
+def heartbeat_file() -> Path:
+    """Liveness beacon the external deadman check watches.
+
+    Written by the supervisor's event loop every HEARTBEAT_INTERVAL_S;
+    staleness (not process existence) is the deadman's hang signal, so
+    a wedged event loop is indistinguishable from a dead host — by
+    design (platform spec, one-process addendum, singleton 2).
+    """
+    return state_dir() / "host.heartbeat"
+
+
 def lockfile_path() -> Path:
     """Single-instance lockfile so we don't double-launch."""
     return state_dir() / "host.lock"

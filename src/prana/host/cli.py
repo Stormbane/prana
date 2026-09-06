@@ -121,6 +121,24 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return _run_powershell(script)
 
 
+def _cmd_install_deadman(args: argparse.Namespace) -> int:
+    """Register the external Narada_Deadman watchdog task (disabled by default)."""
+    if sys.platform != "win32":
+        sys.stderr.write("FATAL: install-deadman is currently Windows-only.\n")
+        return 5
+    script = _resolve_install_script("install-deadman.ps1")
+    ps_args: list[str] = []
+    if args.force:
+        ps_args.append("-Force")
+    if args.enable:
+        ps_args.append("-Enable")
+    if args.uninstall:
+        ps_args.append("-Uninstall")
+    if args.dry_run:
+        ps_args.append("-DryRun")
+    return _run_powershell(script, *ps_args)
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     """Report state of the running orchestrator + its components."""
     setup_logging(verbose=False)
@@ -173,6 +191,16 @@ def main() -> int:
 
     uninstall = sub.add_parser("uninstall", help="Remove the Narada Host scheduled task.")
     uninstall.set_defaults(func=_cmd_uninstall)
+
+    deadman = sub.add_parser(
+        "install-deadman",
+        help="Register the Narada_Deadman watchdog task (disabled until armed with --enable).")
+    deadman.add_argument("--force", action="store_true", help="Re-register even if task exists.")
+    deadman.add_argument("--enable", action="store_true",
+                         help="Arm immediately (host must be on a heartbeat-writing build).")
+    deadman.add_argument("--uninstall", action="store_true", help="Remove the deadman task.")
+    deadman.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything.")
+    deadman.set_defaults(func=_cmd_install_deadman)
 
     args = parser.parse_args()
     return args.func(args)

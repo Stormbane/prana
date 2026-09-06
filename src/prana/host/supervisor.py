@@ -15,6 +15,7 @@ Supervisor coordinates:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -29,10 +30,12 @@ from typing import Optional
 
 from prana.host.component import Component
 from prana.host.log import component_logger
+from prana.host.paths import heartbeat_file
 from prana.sessions.jobobject import JobObject
 
 
 SHUTDOWN_GRACE_S = 5.0
+HEARTBEAT_INTERVAL_S = 30.0
 RATE_LIMIT_WINDOW_S = 60.0
 RATE_LIMIT_MAX_EXITS = 3
 RATE_LIMIT_COOLDOWN_S = 300.0  # 5 min
@@ -394,6 +397,9 @@ class Supervisor:
             self._tasks["__alerts__"] = asyncio.create_task(
                 self.alerts.run(self._shutdown_event), name="alerts-sweep")
 
+        self._tasks["__heartbeat__"] = asyncio.create_task(
+            self._heartbeat_loop(), name="host-heartbeat")
+
         self._logger.info("supervisor up — %d component(s)", len(self.runners))
 
         await self._shutdown_event.wait()
@@ -405,6 +411,35 @@ class Supervisor:
             task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._logger.info("shutdown complete")
+
+    async def _heartbeat_loop(self) -> None:
+        """Write the liveness beacon the external deadman watches.
+
+        Runs ON the supervisor's event loop deliberately: a wedged loop
+        (deadlocked await, blocked-forever sync call) stops the beacon
+        even though the process still exists. Staleness is the hang
+        signal. Failure to write is logged but never stops supervision —
+        the beacon is a shadow of the system, not a dependency of it.
+        """
+        path = heartbeat_file()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self._logger.exception("heartbeat dir create failed — running unbeaconed")
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        while not self._shutdown_event.is_set():
+            try:
+                payload = json.dumps({"ts": time.time(), "pid": os.getpid()})
+                tmp.write_text(payload, encoding="utf-8")
+                os.replace(tmp, path)  # atomic: the deadman never reads a torn file
+            except OSError:
+                self._logger.exception("heartbeat write failed")
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(), timeout=HEARTBEAT_INTERVAL_S)
+            except asyncio.TimeoutError:
+                pass
 
     def install_signal_handlers(self) -> None:
         """Trap Ctrl-C / SIGTERM and trigger graceful shutdown."""
