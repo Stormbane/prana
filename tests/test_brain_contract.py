@@ -350,6 +350,41 @@ def test_actual_post_carries_cors_header(brain):
     assert resp.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
 
 
+def test_cors_origins_file_merges_without_env(tmp_path, monkeypatch):
+    """The deploy-editable origins file is additive to defaults + env
+    and picked up at process start — no host bounce needed."""
+    monkeypatch.setenv("NARADA_BRAIN_CORS_ORIGINS", "https://from-env.example")
+    f = tmp_path / "cors-origins.txt"
+    f.write_text("# dev origins\nhttp://localhost:5173\n\nhttp://localhost:4174\n",
+                 encoding="utf-8")
+    config = BrainConfig(cors_origins_file=f)
+    origins = config.cors_origins
+    assert "capacitor://localhost" in origins
+    assert "https://from-env.example" in origins
+    assert "http://localhost:5173" in origins
+    assert "http://localhost:4174" in origins
+    assert "*" not in origins
+
+
+def test_static_pwa_mounted_when_dir_exists(tmp_path, monkeypatch):
+    wake = tmp_path / "wake.md"
+    wake.write_text("w", encoding="utf-8")
+    static = tmp_path / "pwa"
+    static.mkdir()
+    (static / "index.html").write_text("<html>narada</html>", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "s", wake_context=wake,
+                         static_dir=static)
+    monkeypatch.setattr("prana.brain.api.load_brain_tokens",
+                        lambda: {"prana": "t", "app": "a", "voice": "v"})
+    app = create_app(config, FakeBackend)
+    with TestClient(app) as client:
+        resp = client.get("/app/")
+        assert resp.status_code == 200
+        assert "narada" in resp.text
+        # The API surface is untouched by the mount.
+        assert client.get("/health").json()["ok"] is True
+
+
 # ── multimodal ──────────────────────────────────────────────────────────
 
 DATA_URI = "data:image/jpeg;base64,aGVsbG8="

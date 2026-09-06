@@ -272,6 +272,15 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["content-type", "authorization"],
     )
+    # Static PWA at /app on the brain's own origin (same-origin with
+    # the API — the installed app needs no CORS). Mounted only when the
+    # deploy has published assets (deploy/publish-pwa.ps1).
+    if config.static_dir.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/app", StaticFiles(directory=str(config.static_dir),
+                                      html=True), name="pwa")
+
     tokens = load_brain_tokens()
     app.state.pool = pool
 
