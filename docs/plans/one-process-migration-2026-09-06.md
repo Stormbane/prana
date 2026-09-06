@@ -126,6 +126,15 @@ nothing paged Suti).
   and stayed silent on morning/logd; after triggering nightly, the full
   `Narada_Deadman` task ran both actions in sequence, result 0, nothing
   falsely latched.
+- Cross-review (Codex gpt-6-astra): diff review found 3 (config-failure
+  silently disables monitoring; in-flight running/queued misclassified;
+  lost recovery page) — all fixed. Recheck found 1 residual (empty/null
+  config parses to `$null` in PS 5.1 — the SAME trap as the deadman
+  ledger) — fixed. Final recheck: **approve**. Commits `b62ba03` →
+  `195574e` → `41ec317`.
+- Launcher: both `Narada_Deadman` actions run through `run-hidden.vbs`
+  (a parallel session's fix, verified + adopted here) so the 5-minute
+  tick never flashes a console. Exit-code propagation checked (7 and 0).
 
 **Finding for the smriti side (cross-repo):** `smriti morning` exits
 **1 when the message was already sent today** — a success invariant
