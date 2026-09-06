@@ -74,16 +74,31 @@ the corrupt-state refusal) → fixed in `69675bb`. Final recheck:
 **approve**. Task XML verified: PT5M interval, no Duration —
 repetition indefinite. 17 deadman tests; suite 260 passed.
 
-**Remaining to close step 2 — needs a host bounce (Suti's timing):**
-1. Restart `Narada_Host` (picks up the beacon code), verify
-   `host.heartbeat` appears and refreshes.
-2. `Enable-ScheduledTask Narada_Deadman` — the watchdog goes live.
-3. **Hung-host drill:** suspend the host process, verify the deadman
-   stops+restarts it within ~10 min and the page arrives.
-4. **Exhaustion drill:** with the ledger pre-loaded (3 recent
-   restarts), verify stand-down + the single exhaustion page.
-Consolidation (steps 3–4) stays blocked until the drills pass, per the
-addendum's gate.
+**Step-2 gate — CLOSED (2026-09-06, all drills passed live):**
+1. ✅ `Narada_Host` bounced; `host.heartbeat` appeared within 30 s and
+   refreshes every 30 s. Brain + LiveKit back at 200 automatically.
+2. ✅ `Narada_Deadman` armed; first scheduled run logged
+   `healthy (age 19s)`, exit 0.
+3. ✅ **Hung-host drill:** host process suspended (event loop frozen,
+   process alive — the true hang signal); beacon went stale; the
+   deadman detected `beacon stale 44s` on a Running task, stopped the
+   frozen host (job object took the component tree with it), started a
+   fresh one (pid 7260 → 16264 → healthy), Telegram page delivered,
+   ledger recorded exactly 1 restart. Old suspended pid confirmed
+   killed.
+4. ✅ **Exhaustion drill:** ledger seeded with 3 recent restarts, host
+   suspended to stale the beacon. Run 1: stood down (host pid
+   unchanged — refused to restart), paged once, latched. Run 2: silent
+   (`exhaustion latched`), no page, no restart — the latch holds
+   despite the drill using `-StaleSeconds 30`.
+5. ✅ **Recovery:** host resumed → fresh beacon → deadman cleared the
+   ledger and sent the all-clear page.
+
+The manual drill invocations used `-StaleSeconds 30` (vs the task's
+300 s default) to keep the drill tight; the stale-detection code path
+is identical. Final live state: deadman Ready/armed, ledger clean, all
+five probed components 200. **Consolidation (steps 3–4) is now
+unblocked** per the addendum's gate.
 
 ## Step 3 — smriti logd handoff: NOT STARTED (blocked on step 2 drills)
 ## Step 4 — Hermes absorbs morning/nightly: NOT STARTED (blocked on 3;
