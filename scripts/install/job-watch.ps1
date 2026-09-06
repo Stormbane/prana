@@ -119,8 +119,15 @@ if (-not (Test-Path $ConfigPath)) {
     } catch {
         $watcherProblem = "job-watch config unreadable ($ConfigPath): $($_.Exception.Message) - coverage DISABLED"
     }
-    if ($null -ne $config -and $null -eq $config.jobs) {
-        $watcherProblem = "job-watch config has no 'jobs' list ($ConfigPath) - coverage DISABLED"
+    # PS 5.1 parses empty / whitespace-only / JSON-null content to $null
+    # WITHOUT throwing (the same trap as the deadman ledger) -- a
+    # truncated config must be a watcher problem, not a silent no-op.
+    if ($null -eq $watcherProblem) {
+        if ($null -eq $config) {
+            $watcherProblem = "job-watch config is empty or null ($ConfigPath) - coverage DISABLED"
+        } elseif ($null -eq $config.jobs) {
+            $watcherProblem = "job-watch config has no 'jobs' list ($ConfigPath) - coverage DISABLED"
+        }
     }
 }
 

@@ -183,6 +183,18 @@ def test_config_without_jobs_key_pages(tmp_path):
     assert "MOCK-PAGE" in out
 
 
+@pytest.mark.parametrize("raw", ["", "   \n  ", "null"])
+def test_empty_or_null_config_pages_and_preserves_state(tmp_path, raw):
+    # PS 5.1 parses these to $null without throwing — must page and
+    # preserve existing latches, not silently wipe them.
+    out, saved = _run(tmp_path, tasks={}, raw_config=raw,
+                      state={"smriti-nightly": "result=1@123"})
+    assert "empty or null" in out
+    assert "MOCK-PAGE" in out
+    assert saved.get("smriti-nightly") == "result=1@123"  # preserved
+    assert saved.get("__watcher__")
+
+
 def test_watcher_config_recovery_announced(tmp_path):
     out, saved = _run(tmp_path,
                       tasks={"smriti-nightly": {"LastTaskResult": 0, "LastRunIso": _ago(2)}},
