@@ -258,6 +258,26 @@ def test_mocked_exhaustion_page_failure_does_not_latch(tmp_path):
     assert _read_state(state_file)["paged_exhausted"] is False
 
 
+def test_mocked_empty_ledger_refuses_restart(tmp_path):
+    # A zero-byte ledger (legacy truncated write, full disk) parses to
+    # $null without an exception — it must refuse like corrupt state.
+    state_file = tmp_path / "deadman-state.json"
+    state_file.write_text("", encoding="utf-8")
+    out, _ = _run_mocked(tmp_path, beat_age_s=600, state_path=state_file)
+    assert "REFUSING restart" in out
+    assert "MOCK-START" not in out
+    assert state_file.read_text(encoding="utf-8") == ""  # not modified
+
+
+def test_mocked_healthy_repairs_empty_ledger(tmp_path):
+    state_file = tmp_path / "deadman-state.json"
+    state_file.write_text("", encoding="utf-8")
+    out, _ = _run_mocked(tmp_path, beat_age_s=10, state_path=state_file)
+    assert "clearing restart ledger" in out
+    saved = _read_state(state_file)
+    assert saved["restarts"] == [] and saved["paged_exhausted"] is False
+
+
 def test_mocked_healthy_repairs_corrupt_state(tmp_path):
     state_file = tmp_path / "deadman-state.json"
     state_file.write_text("{ not json !!", encoding="utf-8")

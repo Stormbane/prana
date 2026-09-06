@@ -72,11 +72,17 @@ function Read-DeadmanState {
     }
     try {
         $raw = Get-Content $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json
-        $restarts = @()
-        if ($null -ne $raw.restarts) { $restarts = @($raw.restarts | ForEach-Object { [double]$_ }) }
-        $paged = $false
-        if ($null -ne $raw.paged_exhausted) { $paged = [bool]$raw.paged_exhausted }
-        return @{ restarts = $restarts; paged_exhausted = $paged }
+        # Empty/whitespace/JSON-null files parse to $null WITHOUT an
+        # exception in PS 5.1, and a truncated ledger must not grant a
+        # fresh restart budget (recheck finding): require both fields.
+        if ($null -eq $raw -or $null -eq $raw.restarts -or $null -eq $raw.paged_exhausted) {
+            Write-DeadmanLog "state INVALID (empty or missing fields)"
+            return $null
+        }
+        return @{
+            restarts = @($raw.restarts | ForEach-Object { [double]$_ })
+            paged_exhausted = [bool]$raw.paged_exhausted
+        }
     } catch {
         Write-DeadmanLog "state UNREADABLE: $($_.Exception.Message)"
         return $null
