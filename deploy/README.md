@@ -38,14 +38,33 @@ request regardless of who can route to it.
 & "C:\Software\Tailscale\tailscale.exe" serve --https=8443 off
 ```
 
+## The PWA (static assets)
+
+The built narada-phone-app is served BY THE BRAIN at `/app` on its own
+origin — same-origin with the API, so the installed app needs no CORS:
+
+```
+https://intergalactic.tail807360.ts.net:8443/app/
+```
+
+Publish flow: `npm run deploy:demo` in narada-phone-app, then
+`./publish-pwa.ps1` here (copies `out/narada` →
+`%LOCALAPPDATA%\narada\pwa`, the brain's static mount). Not under
+`~/.narada` — that repo is memory, not an asset store. (`tailscale
+serve` path-mode would need local admin; the brain mount avoids it.)
+
 ## CORS pairing
 
-The brain's origin allowlist is env-driven
-(`NARADA_BRAIN_CORS_ORIGINS`, comma-separated) and set in
-`~/.narada/host/components.yaml` on the `brain` component. It carries
-the tailnet origins + the packaged-app origins
-(`capacitor://localhost`, `https://localhost`). Wildcards are
-forbidden by the spec's browser transport contract.
+The allowlist merges three additive sources, deduplicated, no
+wildcards (spec's browser transport contract):
+
+1. Code defaults: `capacitor://localhost`, `https://localhost`.
+2. `NARADA_BRAIN_CORS_ORIGINS` env (components.yaml) — the supervisor
+   holds env in memory, so changes here need a **host bounce**.
+3. `~/.narada/brain/cors-origins.txt` (one per line, `#` comments) —
+   picked up whenever the brain **process** restarts: kill it and the
+   supervisor respawns it in ~5s. The deploy-time knob; the phone
+   app's dev origins live here.
 
 ## ACL note
 
