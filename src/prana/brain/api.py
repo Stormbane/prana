@@ -85,19 +85,64 @@ def _stream_error(message: str) -> str:
             + "\n\n")
 
 
-def _last_user_content(messages: list) -> str | None:
+class UnsupportedImage(ValueError):
+    """An image part the server can't accept — reported as a clear 400,
+    never silently dropped (phone-app compat ask, 2026-09-06)."""
+
+
+def _parse_data_uri(url: str) -> dict:
+    """`data:image/jpeg;base64,...` → a Claude image source block.
+    Remote URLs are refused: the brain does not fetch on a client's
+    behalf."""
+    if not url.startswith("data:"):
+        raise UnsupportedImage(
+            "image_url must be a data: URI (the server does not fetch "
+            "remote images)")
+    try:
+        header, data = url.split(",", 1)
+        media_type = header[len("data:"):].split(";", 1)[0]
+    except ValueError:
+        raise UnsupportedImage("malformed data: URI in image_url") from None
+    if not header.endswith(";base64") or not media_type.startswith("image/"):
+        raise UnsupportedImage(
+            "image_url data: URI must be base64-encoded with an image/* "
+            "media type")
+    return {"type": "base64", "media_type": media_type, "data": data}
+
+
+def _last_user_content(messages: list) -> tuple[str, list[dict]] | None:
+    """Returns (text, image_sources) from the newest user message, or
+    None. Raises UnsupportedImage for image parts we must not drop."""
     for msg in reversed(messages):
         if isinstance(msg, dict) and msg.get("role") == "user":
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
-                return content
+                return content, []
             if isinstance(content, list):  # multimodal array form
-                parts = [p.get("text", "") for p in content
-                         if isinstance(p, dict) and p.get("type") == "text"]
-                joined = "\n".join(p for p in parts if p)
-                if joined.strip():
-                    return joined
+                texts: list[str] = []
+                images: list[dict] = []
+                for p in content:
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get("type") == "text" and p.get("text"):
+                        texts.append(p["text"])
+                    elif p.get("type") == "image_url":
+                        url = (p.get("image_url") or {}).get("url", "")
+                        images.append(_parse_data_uri(url))
+                if texts or images:
+                    return "\n".join(texts), images
     return None
+
+
+def _content_blocks(text: str, images: list[dict]) -> list[dict] | str:
+    """Claude content blocks for a multimodal turn; plain string when
+    there are no images (the SDK fast path)."""
+    if not images:
+        return text
+    blocks: list[dict] = [{"type": "image", "source": src} for src in images]
+    if text.strip():
+        blocks.append({"type": "text", "text": text})
+    return blocks
 
 
 def _render_history(messages: list) -> str:
@@ -140,8 +185,11 @@ class TurnRun:
 
 
 async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
-                        prompt: str, request_id: str | None,
-                        deadline_s: float, fp: str) -> None:
+                        content, transcript_text: str,
+                        request_id: str | None, deadline_s: float) -> None:
+    """`content`: string or Claude content blocks for the backend;
+    `transcript_text` is what lands in the transcript (image bytes
+    summarized, never dumped)."""
     parts: list[str] = []
 
     async def on_start() -> None:
@@ -149,7 +197,7 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
         # (atomic with the reservation); here the turn merely starts.
         if request_id is not None:
             session.turns.transition(request_id, "running")
-        session.append_transcript("user", prompt)
+        session.append_transcript("user", transcript_text)
 
     def finish(state: str, result: str) -> None:
         run.state, run.text = state, "".join(parts)
@@ -174,7 +222,7 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
                 f"turn queued behind a full pool for {deadline_s:.0f}s"
             ) from None
         try:
-            gen = session.run_turn(prompt, deadline_s=deadline_s,
+            gen = session.run_turn(content, deadline_s=deadline_s,
                                    on_start=on_start)
             async for chunk in gen:
                 parts.append(chunk)
@@ -213,6 +261,17 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
 
     app = FastAPI(title="narada-brain", docs_url=None, redoc_url=None,
                   lifespan=lifespan)
+    # Browser transport contract (spec Layer 2): explicit allowlist,
+    # explicit headers, preflight handled by the middleware. CORS
+    # constrains browsers only — bearer auth stays the authorization.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.cors_origins),
+        allow_methods=["GET", "POST"],
+        allow_headers=["content-type", "authorization"],
+    )
     tokens = load_brain_tokens()
     app.state.pool = pool
 
@@ -285,9 +344,13 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             return _openai_error(400, "messages must be a non-empty list")
-        prompt = _last_user_content(messages)
-        if prompt is None:
-            return _openai_error(400, "no user message with text content found")
+        try:
+            parsed = _last_user_content(messages)
+        except UnsupportedImage as exc:
+            return _openai_error(400, str(exc))
+        if parsed is None:
+            return _openai_error(400, "no user message with content found")
+        prompt, images = parsed
 
         stream = bool(body.get("stream", False))
         narada: Any = body.get("narada") or {}
@@ -298,6 +361,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
         if session_id is None:
+            if images:
+                return _openai_error(
+                    400, "image input requires a narada.session_id session")
             return await _stateless(prompt, messages, stream, completion_id)
 
         if not valid_session_id(str(session_id)):
@@ -306,7 +372,16 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         # can never open another credential's session (spec §1a).
         session = await pool.get_or_create(str(session_id), tier)
 
-        fp = fingerprint(session.session_id, config.model, prompt)
+        # Fingerprint binds the images too — same id + different image
+        # must 422 like different text (spec §1a state machine).
+        fp_payload = prompt
+        if images:
+            import hashlib as _hashlib
+
+            fp_payload += "|" + "|".join(
+                _hashlib.sha256(i["data"].encode("utf-8")).hexdigest()
+                for i in images)
+        fp = fingerprint(session.session_id, config.model, fp_payload)
         if request_id is not None:
             request_id = str(request_id)
             record = session.turns.get(request_id)
@@ -332,10 +407,12 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         try:
             if request_id is not None:
                 session.turns.accept(request_id, fp)  # durable at ACCEPT
+            transcript_text = prompt if not images else (
+                f"{prompt} [{len(images)} image(s) attached]".strip())
             run = TurnRun()
             run.task = asyncio.create_task(_execute_turn(
-                run, session, pool, prompt, request_id,
-                config.turn_deadline_s, fp))
+                run, session, pool, _content_blocks(prompt, images),
+                transcript_text, request_id, config.turn_deadline_s))
         except BaseException:
             # If durable acceptance (or task creation) fails, the
             # reservation must not outlive it — a leaked reservation

@@ -53,6 +53,18 @@ class BrainConfig:
     max_concurrent_sessions: int = int(os.environ.get("NARADA_BRAIN_CONCURRENCY", "4"))
     idle_ttl_s: float = float(os.environ.get("NARADA_BRAIN_IDLE_TTL_S", str(60 * 60)))
     idempotency_window: int = 8
+    # Browser transport contract (spec Layer 2): explicit origin
+    # allowlist, never "*". Packaged-app origins are the code default;
+    # the tailnet origin(s) ride in via env from the deploy config
+    # (components.yaml), keeping the ts.net name out of the codebase.
+    cors_origins: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            o.strip() for o in os.environ.get(
+                "NARADA_BRAIN_CORS_ORIGINS",
+                "capacitor://localhost,https://localhost",
+            ).split(",") if o.strip()
+        )
+    )
     sessions_root: Path = field(
         default_factory=lambda: Path.home() / ".narada" / "brain" / "sessions"
     )

@@ -74,7 +74,7 @@ class BrainSession:
         self._reserved = False
 
     async def run_turn(
-        self, prompt: str, *, deadline_s: float,
+        self, prompt, *, deadline_s: float,  # str | list[content-block]
         on_start: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[str]:
         """Yield assistant text. Caller must hold the reservation

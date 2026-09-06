@@ -65,10 +65,22 @@ class SdkBackend:
     async def start(self) -> None:
         await self._client.connect()
 
-    async def run_turn(self, prompt: str) -> AsyncIterator[str]:
+    async def run_turn(self, prompt) -> AsyncIterator[str]:
+        """`prompt`: a plain string, or a list of Claude content blocks
+        (text + base64 image blocks) for multimodal turns."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-        await self._client.query(prompt)
+        if isinstance(prompt, str):
+            await self._client.query(prompt)
+        else:
+            async def _one_message():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": prompt},
+                    "parent_tool_use_id": None,
+                    "session_id": "default",
+                }
+            await self._client.query(_one_message())
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
