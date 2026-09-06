@@ -378,3 +378,81 @@ resolved**; two residual highs on the round-1 revision text, both
    fingerprint-mismatch reuse rejected `422`, retry of an interrupted
    turn requires a new id — the server never guesses whether a dead
    turn's effects happened. (§1a Turn lifecycle)
+
+## Addendum — the one-process question (2026-09-06; cross-review pending)
+
+**The question (Suti, 2026-09-06):** now that the brain server exists
+and works, should *everything* — the smriti daemon, Hermes heartbeats,
+the Windows Scheduler tasks, cron entries — fold INTO the Narada brain?
+One process to rule them all?
+
+**The ruling (counsel delivered 2026-09-06):** single point of
+**cognition**, yes — that is this spec's convergence and it stands.
+Single **process**, no. The watchdog cannot live inside the watched.
+The resilience doctrine that kept this box alive (resilience-and-reach
+§1: *never silent*; the LiveKit/Docker outage; the zombie-heartbeat
+lesson) rests on a dumb supervisor sitting OUTSIDE the smart thing.
+Fold the supervisor into the brain and a brain hang takes the restart
+machinery down with it — the exact failure shape that hid brain-death
+for 2.5 months, rebuilt at bigger scale.
+
+### The shape: five small singletons, not one big organism
+
+Each concern gets exactly ONE owner; nothing gets a second copy of any
+concern; no singleton absorbs another.
+
+1. **One registry — `~/.narada/host/components.yaml`.** Anything that
+   must stay alive is declared here; a live process outside the
+   registry is a bug, not a convenience. Standing evidence: the smriti
+   daemon is not in the registry, and it was down for two full working
+   sessions (2026-09-05/06) with nothing noticing — while every
+   registered component survived the same window.
+2. **One supervisor — the prana host** (`prana.host`, the `Narada_Host`
+   scheduled task). Deliberately dumb: spawn, probe, restart, page.
+   It is the ONLY scheduler-level autostart entry; everything else runs
+   as its supervised child. It never thinks; the brain never supervises.
+3. **One brain — the warm brain server** (`prana.brain`, 8811). All
+   surfaces' cognition converges here: the chat bridge is already
+   brain-first; the akhada typed-chat brain (`akhada-brain`, a parallel
+   `claude -p` cognition path) and the voice workers' cognition follow
+   as migrations, not rewrites. No new cognition paths are opened.
+4. **One scheduler — Hermes** (`agent-gateway`). Fires time-triggered
+   jobs; never executes cognition itself — a scheduled job that needs
+   thought calls the brain like any other client. Absorbs the orphaned
+   Windows tasks (`smriti-morning`, `smriti-nightly`) and any cron
+   entries, so time-based triggering has one home and one log.
+5. **One memory — smriti.** The daemon (and `smriti-logd`) become
+   supervised components in the registry with honest health probes —
+   the September outage becomes structurally impossible to miss.
+
+### What this rules out
+
+- A mega-process: brain + supervisor + scheduler + memory in one
+  runtime. Rejected — couples the failure domains this architecture
+  exists to separate.
+- The brain absorbing supervision or scheduling "since it's already
+  warm." Warmth is not a reason; the brain is the *most* likely process
+  to be killed, redeployed, or wedged mid-experiment.
+- Direct Windows Scheduler / Startup-folder entries for anything except
+  the supervisor itself (the one bootstrap exception).
+
+### Migration (small steps, each independently shippable)
+
+1. **Audit** — inventory every live process and autostart path
+   (Scheduler tasks, Startup folder, cron, manually-started daemons);
+   diff against the registry. Current known deltas: `smriti-logd`,
+   `smriti-morning`, `smriti-nightly` tasks; the smriti MCP/index
+   daemon.
+2. **Registry entries** — add smriti daemon + logd as supervised
+   components with health probes (extend smriti with a health surface
+   if none exists; A2's "probes must tell the truth" applies).
+3. **Scheduler absorption** — move `smriti-morning`/`smriti-nightly`
+   into Hermes jobs; delete the Windows tasks only after one verified
+   Hermes-fired run of each.
+4. **Cognition convergence** (existing trajectory, restated): typed-chat
+   akhada-brain and voice cognition migrate onto the brain server;
+   tracked in their own plans, not this addendum.
+
+**Status:** counsel recorded; NOT yet cross-reviewed. This addendum
+reopens plan debate for its own scope only (§1a and the closed rounds
+above are untouched). Cross-review before migration step 2 lands.
