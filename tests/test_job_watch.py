@@ -29,10 +29,15 @@ JOB_WATCH_PS1 = _SCRIPTS / "job-watch.ps1"
 HARNESS_PS1 = Path(__file__).resolve().parent / "jobwatch_mock_harness.ps1"
 
 
-def _run(tmp_path: Path, *, tasks: dict, config: list, state: dict | None = None,
-         page_fail: bool = False) -> tuple[str, dict]:
+def _run(tmp_path: Path, *, tasks: dict, config: list | None = None,
+         raw_config: str | None = None, write_config: bool = True,
+         state: dict | None = None, page_fail: bool = False) -> tuple[str, dict]:
     cfg = tmp_path / "job-watch.json"
-    cfg.write_text(json.dumps({"jobs": config}), encoding="utf-8")
+    if write_config:
+        if raw_config is not None:
+            cfg.write_text(raw_config, encoding="utf-8")
+        else:
+            cfg.write_text(json.dumps({"jobs": config or []}), encoding="utf-8")
     state_file = tmp_path / "job-watch-state.json"
     if state is not None:
         state_file.write_text(json.dumps(state), encoding="utf-8")
@@ -152,6 +157,71 @@ def test_overdue_only_still_catches_a_stalled_job(tmp_path):
     assert "OVERDUE" in out
     assert "MOCK-PAGE" in out
     assert "smriti-morning" in saved
+
+
+def test_missing_config_pages_and_preserves_state(tmp_path):
+    # An absent config disables ALL coverage — must page, not no-op, and
+    # must NOT wipe existing job latches.
+    out, saved = _run(tmp_path, tasks={}, write_config=False,
+                      state={"smriti-nightly": "result=1@123"})
+    assert "coverage" in out and "DISABLED" in out
+    assert "MOCK-PAGE" in out
+    assert saved.get("smriti-nightly") == "result=1@123"  # preserved
+    assert saved.get("__watcher__")  # watcher latch set
+
+
+def test_malformed_config_pages(tmp_path):
+    out, saved = _run(tmp_path, tasks={}, raw_config="{ not json !!")
+    assert "unreadable" in out
+    assert "MOCK-PAGE" in out
+    assert saved.get("__watcher__")
+
+
+def test_config_without_jobs_key_pages(tmp_path):
+    out, saved = _run(tmp_path, tasks={}, raw_config='{"other": 1}')
+    assert "no 'jobs' list" in out
+    assert "MOCK-PAGE" in out
+
+
+def test_watcher_config_recovery_announced(tmp_path):
+    out, saved = _run(tmp_path,
+                      tasks={"smriti-nightly": {"LastTaskResult": 0, "LastRunIso": _ago(2)}},
+                      config=[{"task": "smriti-nightly", "max_age_hours": 26}],
+                      state={"__watcher__": "job-watch config missing - coverage DISABLED"})
+    assert "config readable again" in out or "coverage restored" in out
+    assert "__watcher__" not in saved
+
+
+def test_running_holds_prior_failure_latch(tmp_path):
+    # A result+overdue job that failed, then shows running: must NOT
+    # announce recovery — the retry hasn't completed. Latch held.
+    out, saved = _run(tmp_path,
+                      tasks={"smriti-nightly": {"LastTaskResult": 267009, "LastRunIso": _ago(0.1)}},
+                      config=[{"task": "smriti-nightly", "max_age_hours": 26}],
+                      state={"smriti-nightly": "result=1@123"})
+    assert "in-flight" in out
+    assert "recovered" not in out
+    assert "MOCK-PAGE" not in out
+    assert saved.get("smriti-nightly") == "result=1@123"  # held
+
+
+def test_queued_not_treated_as_failure(tmp_path):
+    # 267045 = SCHED_S_TASK_QUEUED, an in-flight state, not a failure.
+    out, saved = _run(tmp_path,
+                      tasks={"smriti-nightly": {"LastTaskResult": 267045, "LastRunIso": _ago(0.1)}},
+                      config=[{"task": "smriti-nightly", "max_age_hours": 26}])
+    assert "MOCK-PAGE" not in out
+    assert saved == {}
+
+
+def test_recovery_page_failure_retries(tmp_path):
+    # Recovery all-clear undelivered -> latch retained so next tick retries.
+    out, saved = _run(tmp_path,
+                      tasks={"smriti-nightly": {"LastTaskResult": 0, "LastRunIso": _ago(2)}},
+                      config=[{"task": "smriti-nightly", "max_age_hours": 26}],
+                      state={"smriti-nightly": "result=1@123"}, page_fail=True)
+    assert "will retry" in out
+    assert saved.get("smriti-nightly") == "result=1@123"  # retained
 
 
 def test_multiple_jobs_independent(tmp_path):
