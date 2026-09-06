@@ -63,6 +63,17 @@ Commit `6fc625f`:
   through real powershell in dry-run: fresh/stale/missing/exhausted/
   already-paged/window-pruning/recovery). Full suite 251 passed.
 
+**Implementation cross-review (Codex gpt-6-astra, 2026-09-06):**
+diff review of `6fc625f` → needs-attention, 3 findings, all accepted
+and fixed in `29bb691` (persist-the-ledger-BEFORE-restart with refusal
+on unwritable/corrupt state; exhaustion as a true latch cleared only by
+verified recovery; latch set only on confirmed page delivery) + a mock
+harness so the mutating paths run in tests. Recheck found one residual
+(empty/truncated ledger parses to $null without exception, bypassing
+the corrupt-state refusal) → fixed in `69675bb`. Final recheck:
+**approve**. Task XML verified: PT5M interval, no Duration —
+repetition indefinite. 17 deadman tests; suite 260 passed.
+
 **Remaining to close step 2 — needs a host bounce (Suti's timing):**
 1. Restart `Narada_Host` (picks up the beacon code), verify
    `host.heartbeat` appears and refreshes.
