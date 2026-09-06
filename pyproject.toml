@@ -37,6 +37,9 @@ dependencies = [
     "mcp>=1.0",
     # Long-standing undeclared imports (chat bridge) + voice budget/gate
     "python-dotenv>=1.0",
+    # House speakers (prana.cast) — base dep, not a voice extra: the
+    # CLI must work without the voice loop installed
+    "pychromecast>=14",
     # Brain server (default-enabled host component — base deps, same
     # rationale as psutil above)
     "fastapi>=0.115",

@@ -103,6 +103,13 @@ VOICE_TOOL_NAMES = {
     "stop_music",
     "what_is_playing",
     "set_volume",       # speaker loudness via device protocol
+    # 2026-09-07 (Suti): Google Cast to the house speakers — same
+    # disclosure class as play_music (a station name), LAN-only
+    # (mDNS + local speaker API, streams fetched by the speaker
+    # itself). Casts deliberately keep playing through sessions.
+    "cast_music",
+    "cast_stop",
+    "cast_volume",
     # 2026-09-03: hearing profile for noisy rooms — flips a local flag
     # file only (no data leaves the house); barge-in off + VAD raised
     # while the TV is on. Presentation/behavior, not a new capability.

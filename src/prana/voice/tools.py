@@ -357,6 +357,45 @@ def build_voice_tools(
         _toast("volume", f"volume {pct}%")
         return {"set": True, "volume": pct}
 
+    # House speakers (Google Cast) — the capability lives in
+    # prana.cast; these are deliberately thin callers (Suti 2026-09-07:
+    # "the speech engine should be just the organ of speech, not
+    # another brain"). Casts keep playing through voice sessions by
+    # design — the speakers are outside the room's audio path.
+    @function_tool()
+    async def cast_music(
+        station: Annotated[str, "station name, or part of one"],
+        speaker: Annotated[str, "house speaker or group name; empty = "
+                                "the default speaker"] = "",
+    ) -> dict:
+        """Play a radio station on the house's Google speakers (not the
+        box). If it answers with a speaker list, ask Suti which one."""
+        import asyncio as _aio
+        from prana import cast as _cast
+        _toast("music", f"casting: {station}")
+        return await _aio.to_thread(_cast.play, station, speaker)
+
+    @function_tool()
+    async def cast_stop(
+        speaker: Annotated[str, "speaker to stop; empty = everywhere "
+                                "I started music"] = "",
+    ) -> dict:
+        """Stop the music on the house speakers."""
+        import asyncio as _aio
+        from prana import cast as _cast
+        return await _aio.to_thread(_cast.stop, speaker)
+
+    @function_tool()
+    async def cast_volume(
+        percent: Annotated[int, "speaker loudness, 0-100"],
+        speaker: Annotated[str, "which speaker; empty = the default"] = "",
+    ) -> dict:
+        """Set a HOUSE speaker's volume (for the box's own speaker use
+        set_volume)."""
+        import asyncio as _aio
+        from prana import cast as _cast
+        return await _aio.to_thread(_cast.volume, percent, speaker)
+
     @function_tool()
     async def tv_mode(
         on: Annotated[bool, "true while the TV/background noise is on"],
@@ -437,6 +476,9 @@ def build_voice_tools(
         stop_music,
         what_is_playing,
         set_volume,
+        cast_music,
+        cast_stop,
+        cast_volume,
         tv_mode,
         set_music_volume,
         web_search,
