@@ -23,6 +23,7 @@ $ErrorActionPreference = 'Stop'
 $TaskName = 'Narada_Deadman'
 $TaskDescription = 'External watchdog for Narada_Host - restarts a hung/dead host + pages on exhaustion; second action watches scheduled-job freshness'
 $scriptPath = Join-Path $PSScriptRoot 'deadman.ps1'
+$shimPath = Join-Path $PSScriptRoot 'run-hidden.vbs'
 $jobWatchPath = Join-Path $PSScriptRoot 'job-watch.ps1'
 $jobWatchTemplate = Join-Path $PSScriptRoot 'job-watch.template.json'
 $jobWatchConfig = Join-Path $env:LOCALAPPDATA 'narada\job-watch.json'
@@ -41,6 +42,10 @@ if (-not (Test-Path $scriptPath)) {
     Write-Error "deadman.ps1 not found next to this installer: $scriptPath"
     exit 1
 }
+if (-not (Test-Path $shimPath)) {
+    Write-Error "run-hidden.vbs not found next to this installer: $shimPath"
+    exit 1
+}
 
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -ne $existing -and -not $Force) {
@@ -51,10 +56,18 @@ if ($null -ne $existing -and -not $Force) {
 # Two actions on ONE task (Task Scheduler runs them sequentially): the
 # host-liveness watchdog, then the scheduled-job freshness watcher. One
 # external entry, two composable dumb scripts.
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-$jobWatchAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$jobWatchPath`""
+#
+# Both launch through the run-hidden.vbs shim: a powershell.exe action
+# flashes a console window on every tick even with -WindowStyle Hidden
+# (the console exists before PowerShell can hide it), and a 5-minute
+# watchdog blinking at the operator all day reads as malware. wscript
+# is GUI-subsystem — no console is ever created; the shim waits and
+# propagates the exit code, so LastTaskResult and the sequential
+# action order are unchanged.
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+    -Argument "`"$shimPath`" powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+$jobWatchAction = New-ScheduledTaskAction -Execute 'wscript.exe' `
+    -Argument "`"$shimPath`" powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$jobWatchPath`""
 # Start a minute from now, repeat forever on the interval.
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes $intervalMinutes)
