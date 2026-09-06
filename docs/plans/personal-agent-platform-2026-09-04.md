@@ -409,8 +409,15 @@ concern; no singleton absorbs another.
    registered component survived the same window.
 2. **One supervisor — the prana host** (`prana.host`, the `Narada_Host`
    scheduled task). Deliberately dumb: spawn, probe, restart, page.
-   It is the ONLY scheduler-level autostart entry; everything else runs
-   as its supervised child. It never thinks; the brain never supervises.
+   Everything else runs as its supervised child. It never thinks; the
+   brain never supervises. **The supervisor itself is watched from
+   outside** (round-1 finding 1): the host writes a heartbeat file
+   every probe loop, and a **deadman check** — a trivial OS-level
+   scheduled task, plain PowerShell, depending on nothing in the stack
+   (not host, not Hermes, not brain, not Python-env health) — verifies
+   heartbeat freshness, restarts the host task when stale, and pages on
+   restart-exhaustion. Two permitted OS-level entries, both dumb:
+   the bootstrap (`Narada_Host`) and the deadman that watches it.
 3. **One brain — the warm brain server** (`prana.brain`, 8811). All
    surfaces' cognition converges here: the chat bridge is already
    brain-first; the akhada typed-chat brain (`akhada-brain`, a parallel
@@ -421,6 +428,14 @@ concern; no singleton absorbs another.
    thought calls the brain like any other client. Absorbs the orphaned
    Windows tasks (`smriti-morning`, `smriti-nightly`) and any cron
    entries, so time-based triggering has one home and one log.
+   **Scheduling must be observable as progress, not liveness** (round-1
+   finding 2): each job firing writes a durable run record (job id,
+   scheduled time, outcome); missed-run and overlap policy are explicit
+   per job; overdue-job detection is checked OUTSIDE Hermes (the
+   deadman check reads the run records — a scheduler that is alive but
+   not firing is exactly the zombie-heartbeat shape); and
+   `agent-gateway` gains a health probe in the registry (it has none
+   today — the host currently sees its exit but never a hang).
 5. **One memory — smriti.** The daemon (and `smriti-logd`) become
    supervised components in the registry with honest health probes —
    the September outage becomes structurally impossible to miss.
@@ -434,7 +449,23 @@ concern; no singleton absorbs another.
   warm." Warmth is not a reason; the brain is the *most* likely process
   to be killed, redeployed, or wedged mid-experiment.
 - Direct Windows Scheduler / Startup-folder entries for anything except
-  the supervisor itself (the one bootstrap exception).
+  the two permitted dumb ones: the supervisor's bootstrap
+  (`Narada_Host`) and the deadman check that watches it.
+
+### Boundary clarifications (round-1 next-steps, accepted)
+
+- **The brain's session reaping and idle TTLs are not "supervision."**
+  They are internal lifecycle duties of the brain's own resources,
+  frozen in §1a (Sessions) — the brain managing its own sessions no
+  more violates "the brain never supervises" than a process freeing
+  its own memory. Supervision means keeping *other processes* alive;
+  that stays with the host alone.
+- **Event-triggered (not time-triggered) work has an explicit owner:**
+  cognitive triggers (Telegram inbound, wake word, phone turns) funnel
+  into the brain per the unified-mind convergence — they are clients,
+  not scheduler jobs. Non-cognitive event-driven services (watchers,
+  bridges) are registry components under the supervisor. Hermes owns
+  only *time*.
 
 ### Migration (small steps, each independently shippable)
 
@@ -443,16 +474,59 @@ concern; no singleton absorbs another.
    diff against the registry. Current known deltas: `smriti-logd`,
    `smriti-morning`, `smriti-nightly` tasks; the smriti MCP/index
    daemon.
-2. **Registry entries** — add smriti daemon + logd as supervised
-   components with health probes (extend smriti with a health surface
-   if none exists; A2's "probes must tell the truth" applies).
-3. **Scheduler absorption** — move `smriti-morning`/`smriti-nightly`
-   into Hermes jobs; delete the Windows tasks only after one verified
-   Hermes-fired run of each.
-4. **Cognition convergence** (existing trajectory, restated): typed-chat
+2. **Deadman first** — install the external heartbeat + deadman check
+   (singleton 2) and verify it against the two failure modes it exists
+   for: a deliberately hung host (SIGSTOP-equivalent / suspended
+   process) and restart-exhaustion. Nothing consolidates under the
+   supervisor until the supervisor is itself observed. (Round-1
+   finding 1.)
+3. **Registry entries with explicit handoff** — add the smriti daemon
+   and logd as supervised components with health probes (extend smriti
+   with a health surface if none exists; A2's "probes must tell the
+   truth" applies). For logd, a single-owner handoff sequence, in
+   order: preflight the registry entry (config parses, command runs),
+   **disable** the `smriti-logd` task, stop its process and verify
+   exit, enable the supervised component, verify health AND ingestion
+   progress. Rollback is the reverse — never two launch owners at
+   once. (Round-1 finding 3.)
+4. **Scheduler absorption with failure-path gates** — move
+   `smriti-morning`/`smriti-nightly` into Hermes jobs carrying durable
+   run records + missed-run policy; wire the deadman's overdue-job
+   check; add the `agent-gateway` health probe. Cutover gate is the
+   FAILURE path, not one happy run: verify a job fires after a Hermes
+   restart spanning its due time, and verify a stalled scheduler is
+   detected as overdue from outside. Windows tasks are **disabled, not
+   deleted** — definitions kept for rollback. (Round-1 finding 2.)
+5. **Cognition convergence** (existing trajectory, restated): typed-chat
    akhada-brain and voice cognition migrate onto the brain server;
    tracked in their own plans, not this addendum.
 
-**Status:** counsel recorded; NOT yet cross-reviewed. This addendum
-reopens plan debate for its own scope only (§1a and the closed rounds
-above are untouched). Cross-review before migration step 2 lands.
+### Addendum cross-review round 1 (Codex gpt-6-astra, 2026-09-06)
+
+Verdict: **needs-attention** — three high findings, all **accepted**
+and folded in above:
+
+1. **Supervisor failure unobserved** — ACCEPT. `Narada_Host` recovers
+   from crashes (3 failure restarts) but a hung host never fails, and
+   probes/paging run inside it; consolidating beneath it without an
+   external observer violates "never silent." Fixed: heartbeat file +
+   OS-level deadman check (singleton 2), migration step 2 gates all
+   consolidation on hung-host and restart-exhaustion tests.
+2. **One-run scheduler cutover gate insufficient** — ACCEPT. Hermes
+   alive ≠ jobs firing (zombie-heartbeat shape). Fixed: durable run
+   records, missed-run policy, overdue detection outside Hermes via
+   the deadman, agent-gateway health probe, failure-path cutover gate,
+   tasks disabled-not-deleted (singleton 4, migration step 4).
+3. **logd double launch ownership** — ACCEPT. Adding supervised logd
+   while the `smriti-logd` task lives leaves two owners indefinitely.
+   Fixed: single-owner handoff sequence with verified exit before
+   enable, reverse-order rollback (migration step 3).
+
+Next-steps notes both accepted as §Boundary clarifications (brain TTLs
+are internal lifecycle, not supervision; event-triggered work owned by
+brain-as-client or registry component; Hermes owns only time).
+
+**Status:** round 1 complete, all findings accepted and folded in;
+round-2 confirmation check pending. This addendum reopens plan debate
+for its own scope only (§1a and the closed rounds above are
+untouched). Migration step 3 (registry entries) gates on round 2.
