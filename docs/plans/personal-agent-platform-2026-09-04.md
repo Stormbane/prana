@@ -526,7 +526,15 @@ Next-steps notes both accepted as §Boundary clarifications (brain TTLs
 are internal lifecycle, not supervision; event-triggered work owned by
 brain-as-client or registry component; Hermes owns only time).
 
-**Status:** round 1 complete, all findings accepted and folded in;
-round-2 confirmation check pending. This addendum reopens plan debate
-for its own scope only (§1a and the closed rounds above are
-untouched). Migration step 3 (registry entries) gates on round 2.
+### Addendum cross-review round 2 (Codex gpt-6-astra, 2026-09-06)
+
+Verdict: **approve** — all three round-1 findings confirmed resolved
+(deadman + failure tests; durable run records + external overdue
+detection + failure-path cutover; single-owner logd handoff). Both
+boundary clarifications confirmed consistent. No material new
+contradictions.
+
+**Status:** CROSS-REVIEWED — addendum rounds 1+2 complete
+(2026-09-06). Plan debate closed per protocol; **migration moves**,
+in the addendum's step order (deadman first). Final arbiter: tests +
+Suti.
