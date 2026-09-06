@@ -385,22 +385,43 @@ async def entrypoint(ctx: JobContext) -> None:
                 # a modestly raised bar plus no barge-in is the trade.
                 logger.info("TV mode ON: interrupt_response off, "
                             "threshold 0.75")
+            # Turn detection. server_vad with the field-tuned numbers
+            # is the DEFAULT — that tuning is hard-won (see the echo
+            # comment below) and semantic_vad has no threshold knob to
+            # re-tune with. semantic_vad instead waits through
+            # mid-thought pauses rather than replying at every 700ms
+            # gap — worth trialing for long-form talks. Opt in with
+            # NARADA_TURN_DETECTION=semantic_vad (+NARADA_VAD_EAGERNESS,
+            # default "low"); if the echo barge-in returns, unset and
+            # the tuned default is back with no code change.
+            td_kind = os.environ.get(
+                "NARADA_TURN_DETECTION", "server_vad").strip().lower()
+            if td_kind == "semantic_vad":
+                eagerness = os.environ.get("NARADA_VAD_EAGERNESS", "low")
+                logger.info("turn detection: semantic_vad (eagerness=%s)",
+                            eagerness)
+                turn_detection = _rt_mod.TurnDetection(
+                    type="semantic_vad",
+                    eagerness=eagerness,
+                    interrupt_response=not tv)
+            else:
+                # Echo-loop defense (field 2026-09-02: the box's
+                # AEC leaks speaker audio; the default VAD heard
+                # Narada's own greeting as user speech, barged in
+                # on him, and he answered his echo three times).
+                # 0.8 proved DEAF to Suti at room distance (field
+                # same evening, session 10:10) — 0.65 is the
+                # compromise: above echo residue, below his voice.
+                turn_detection = _rt_mod.TurnDetection(
+                    type="server_vad",
+                    threshold=0.75 if tv else 0.65,
+                    prefix_padding_ms=300,
+                    silence_duration_ms=700,
+                    interrupt_response=not tv)
             session = AgentSession(
                 llm=lk_openai.realtime.RealtimeModel(
                     model=REALTIME_MODEL, voice=REALTIME_VOICE,
-                    # Echo-loop defense (field 2026-09-02: the box's
-                    # AEC leaks speaker audio; the default VAD heard
-                    # Narada's own greeting as user speech, barged in
-                    # on him, and he answered his echo three times).
-                    # 0.8 proved DEAF to Suti at room distance (field
-                    # same evening, session 10:10) — 0.65 is the
-                    # compromise: above echo residue, below his voice.
-                    turn_detection=_rt_mod.TurnDetection(
-                        type="server_vad",
-                        threshold=0.75 if tv else 0.65,
-                        prefix_padding_ms=300,
-                        silence_duration_ms=700,
-                        interrupt_response=not tv),
+                    turn_detection=turn_detection,
                     # Streaming input transcription: interim deltas so
                     # Suti's words land in his bubble AS he says them
                     # (round 8) — whisper-1 is final-only.
@@ -734,6 +755,17 @@ async def entrypoint(ctx: JobContext) -> None:
             user_ever_spoke = {"v": False}
             user_speaking_now = {"v": False}
 
+            # Listening acks ("mm-hm" mid-monologue — Suti 2026-09-06,
+            # the ChatGPT-app feel). Clips + gate live in backchannel.py;
+            # loaded per session so new clips land without a restart.
+            from prana.voice.backchannel import (
+                BackchannelGate, clip_frames, load_clips)
+            ack_gate = BackchannelGate()
+            ack_clips = load_clips()
+            if ack_clips:
+                logger.info("backchannel: %d ack clips loaded",
+                            len(ack_clips))
+
             @session.on("user_state_changed")
             def _on_user_state(ev) -> None:
                 ust = str(getattr(ev, "new_state", ""))
@@ -741,6 +773,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 # placeholder never shows before his pause — this line
                 # proves whether the VAD start event fires at all.
                 logger.info("user VAD state: %s", ust)
+                if ust in ("speaking", "listening"):
+                    ack_gate.on_user_state(ust == "speaking",
+                                           time.monotonic())
                 if ust == "speaking":
                     last_state_change["t"] = time.monotonic()
                     user_speaking_now["v"] = True
@@ -786,12 +821,52 @@ async def entrypoint(ctx: JobContext) -> None:
             async def _silence_watch() -> None:
                 while True:
                     await asyncio.sleep(5.0)
+                    if user_speaking_now["v"]:
+                        # Field 2026-09-06: an UNBROKEN monologue makes
+                        # no events at all — VAD fired once at its
+                        # start, and transcription only arrives when a
+                        # segment ends — so >75s of continuous speech
+                        # read as 75s of silence and got hung up on
+                        # mid-sentence. The round-9 fix covered
+                        # recitation WITH pauses; this covers without.
+                        last_state_change["t"] = time.monotonic()
+                        continue
                     idle_for = time.monotonic() - last_state_change["t"]
                     if (last_state_change["state"] in ("listening", "idle", "")
                             and idle_for >= SILENCE_END_S):
                         logger.info("no conversation for %.0fs — ending "
                                     "session", idle_for)
                         return
+
+            async def _backchannel_loop() -> None:
+                # Hum along while he speaks at length. say() plays the
+                # clip on the session's OWN output track (single-track
+                # invariant holds; the AEC cancels it from the mic) and
+                # its text rides the caption sink — the karaoke shows
+                # "mm-hm" as it plays. add_to_chat_ctx=False: the model
+                # neither hears nor remembers the hum.
+                if not ack_clips:
+                    await asyncio.Event().wait()  # feature off: stand down
+                while True:
+                    await asyncio.sleep(1.0)
+                    now = time.monotonic()
+                    if not ack_gate.should_ack(now):
+                        continue
+                    if (not user_speaking_now["v"]
+                            or last_state_change["state"]
+                            not in ("listening", "")):
+                        continue  # model took the turn — don't hum over it
+                    clip = ack_gate.pick(ack_clips)
+                    ack_gate.mark_acked(now)
+                    try:
+                        await session.say(clip.text,
+                                          audio=clip_frames(clip),
+                                          allow_interruptions=False,
+                                          add_to_chat_ctx=False)
+                    except Exception as exc:
+                        logger.warning("backchannel say failed: %s", exc)
+
+            bc_task = asyncio.ensure_future(_backchannel_loop())
 
             # Session errors must be LOUD — the round-5 "deafness" was
             # actually reply-silence with no diagnostic anywhere.
@@ -909,6 +984,10 @@ async def entrypoint(ctx: JobContext) -> None:
             state["in_session"] = False
             try:
                 hb_task.cancel()
+            except Exception:
+                pass
+            try:
+                bc_task.cancel()
             except Exception:
                 pass
             if transcript is not None:
