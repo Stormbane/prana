@@ -153,3 +153,115 @@ def test_recovery_clears_ledger(tmp_path):
         state={"restarts": [now - 300], "paged_exhausted": True})
     assert "clearing restart ledger" in out
     assert "would-page" in out  # recovery notice
+
+
+# --- mutating paths through the mock harness (diff-review next-step) --
+
+HARNESS_PS1 = Path(__file__).resolve().parent / "deadman_mock_harness.ps1"
+
+
+def _run_mocked(tmp_path: Path, *, state: dict | None = None,
+                beat_age_s: float | None = None, page_fail: bool = False,
+                state_path: Path | None = None) -> tuple[str, Path]:
+    """Run deadman.ps1 for real (no dry-run) with cmdlets mocked."""
+    beat = tmp_path / "host.heartbeat"
+    state_file = state_path if state_path is not None else tmp_path / "deadman-state.json"
+    env = tmp_path / "mock.env"
+    env.write_text("NARADA_TELEGRAM_BOT_TOKEN=mock-token\n"
+                   "TELEGRAM_ALLOWED_USERS=12345,67890\n", encoding="utf-8")
+    if beat_age_s is not None:
+        beat.write_text(json.dumps({"ts": time.time() - beat_age_s, "pid": 1234}),
+                        encoding="utf-8")
+    if state is not None:
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+    args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+            "Bypass", "-File", str(HARNESS_PS1),
+            "-ScriptPath", str(DEADMAN_PS1),
+            "-HeartbeatPath", str(beat), "-StatePath", str(state_file),
+            "-LogPath", str(tmp_path / "deadman.log"), "-EnvPath", str(env)]
+    if page_fail:
+        args.append("-PageFail")
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout, state_file
+
+
+def _read_state(state_file: Path) -> dict:
+    # utf-8-sig: PowerShell 5.1's -Encoding utf8 writes a BOM.
+    return json.loads(state_file.read_text(encoding="utf-8-sig"))
+
+
+def test_mocked_restart_persists_ledger_before_acting(tmp_path):
+    out, state_file = _run_mocked(tmp_path, beat_age_s=600)
+    assert "MOCK-STOP MockHost" in out    # Running task: stop-first
+    assert "MOCK-START MockHost" in out
+    assert "MOCK-PAGE" in out             # action pages
+    saved = _read_state(state_file)
+    assert len(saved["restarts"]) == 1
+    assert saved["paged_exhausted"] is False
+
+
+def test_mocked_unwritable_ledger_refuses_restart(tmp_path):
+    # A state path whose parent is a FILE cannot be created — the save
+    # fails, so the deadman must refuse the restart entirely.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    out, _ = _run_mocked(tmp_path, beat_age_s=600,
+                         state_path=blocker / "deadman-state.json")
+    assert "REFUSING restart" in out
+    assert "MOCK-STOP" not in out
+    assert "MOCK-START" not in out
+
+
+def test_mocked_corrupt_ledger_refuses_restart(tmp_path):
+    state_file = tmp_path / "deadman-state.json"
+    state_file.write_text("{ not json !!", encoding="utf-8")
+    out, _ = _run_mocked(tmp_path, beat_age_s=600, state_path=state_file)
+    assert "REFUSING restart" in out
+    assert "MOCK-START" not in out
+    # Corrupt ledger must not be silently repaired while unhealthy.
+    assert state_file.read_text(encoding="utf-8") == "{ not json !!"
+
+
+def test_mocked_exhaustion_latch_survives_window_ageout(tmp_path):
+    now = time.time()
+    out, state_file = _run_mocked(
+        tmp_path, beat_age_s=600,
+        state={"restarts": [now - 7200, now - 6000, now - 5000],
+               "paged_exhausted": True})
+    assert "exhaustion latched" in out
+    assert "MOCK-START" not in out        # latch holds despite aged-out window
+    assert _read_state(state_file)["paged_exhausted"] is True
+
+
+def test_mocked_exhaustion_page_success_latches(tmp_path):
+    now = time.time()
+    out, state_file = _run_mocked(
+        tmp_path, beat_age_s=600,
+        state={"restarts": [now - 300, now - 200, now - 100],
+               "paged_exhausted": False})
+    assert "EXHAUSTED" in out
+    assert "MOCK-PAGE" in out
+    assert "MOCK-START" not in out
+    assert _read_state(state_file)["paged_exhausted"] is True
+
+
+def test_mocked_exhaustion_page_failure_does_not_latch(tmp_path):
+    now = time.time()
+    out, state_file = _run_mocked(
+        tmp_path, beat_age_s=600, page_fail=True,
+        state={"restarts": [now - 300, now - 200, now - 100],
+               "paged_exhausted": False})
+    assert "EXHAUSTED" in out
+    assert "page FAILED" in out
+    # Undelivered page must NOT latch — next run retries the notification.
+    assert _read_state(state_file)["paged_exhausted"] is False
+
+
+def test_mocked_healthy_repairs_corrupt_state(tmp_path):
+    state_file = tmp_path / "deadman-state.json"
+    state_file.write_text("{ not json !!", encoding="utf-8")
+    out, _ = _run_mocked(tmp_path, beat_age_s=10, state_path=state_file)
+    assert "clearing restart ledger" in out
+    saved = _read_state(state_file)
+    assert saved["restarts"] == [] and saved["paged_exhausted"] is False
