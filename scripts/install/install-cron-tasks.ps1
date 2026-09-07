@@ -78,6 +78,10 @@ foreach ($j in $jobs) {
         -ExecutionTimeLimit ([System.Xml.XmlConvert]::ToTimeSpan($j.Limit)) `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     $settings.StartWhenAvailable = [bool]$j.StartWhenAvailable
+    # Born disabled unless -Enable, ATOMICALLY (Codex review): registering
+    # enabled-then-Disable leaves a window where a trigger could fire
+    # pre-cutover, and an interrupted disable leaves it permanently on.
+    $settings.Enabled = [bool]$Enable
     # No RestartOnFailure by design (see header).
 
     $existing = Get-ScheduledTask -TaskName $j.Name -ErrorAction SilentlyContinue
@@ -93,15 +97,15 @@ foreach ($j in $jobs) {
     }
 
     if ($existing) { Unregister-ScheduledTask -TaskName $j.Name -Confirm:$false }
+    # $settings.Enabled already encodes disabled-vs-armed — the task is
+    # born in the right state, no post-register enable/disable window.
     Register-ScheduledTask -TaskName $j.Name `
         -Description "Narada cron ($($j.Times -join ',')) - was Hermes $($j.Name)" `
         -Action $action -Trigger $triggers -Settings $settings | Out-Null
 
     if ($Enable) {
-        Enable-ScheduledTask -TaskName $j.Name | Out-Null
         Write-Host "registered + ARMED $($j.Name) ($($j.Times -join ','))"
     } else {
-        Disable-ScheduledTask -TaskName $j.Name | Out-Null
         Write-Host "registered DISABLED $($j.Name) ($($j.Times -join ',')) - arm at cutover"
     }
 }

@@ -167,15 +167,33 @@ foreach ($job in $config.jobs) {
     $check = if ($job.check) { [string]$job.check } else { "result+overdue" }
     $watchResult = ($check -ne "overdue-only")
 
-    # A DISABLED task is intentionally off (e.g. a cron task registered
-    # but not yet cut over) — not a failure. Skip it and clear any latch,
-    # so the config can list tasks before they are armed without
-    # false-paging them as overdue.
+    # Disabled handling: scheduler state establishes disablement, not
+    # operator INTENT (Codex review). A task may be disabled on purpose
+    # (a cron task staged but not yet cut over: config "disabled_ok":true)
+    # or by accident (someone disabled smriti-logd) — the latter silently
+    # stops real work and MUST page. So skip only tasks marked
+    # disabled_ok; an unexpectedly-disabled task is a problem.
+    $disabledOk = [bool]$job.disabled_ok
     $task = $null
     try { $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop } catch {}
     if ($null -ne $task -and $task.State -eq 'Disabled') {
-        Write-JobLog "$name disabled - skipping"
-        continue  # not carried into $newState = latch cleared
+        if ($disabledOk) {
+            Write-JobLog "$name disabled (expected) - skipping"
+            continue  # not carried into $newState = latch cleared
+        }
+        # Unexpected disable: page once (latched), like any problem.
+        $problem = "task '$name' is DISABLED but expected to run"
+        $signature = "disabled"
+        $prev = $state[$name]
+        if ($prev -eq $signature) {
+            Write-JobLog "$problem (already paged, standing down)"
+            $newState[$name] = $signature
+        } else {
+            Write-JobLog $problem
+            $delivered = Send-Page "Narada job-watch: $problem"
+            $newState[$name] = if ($delivered) { $signature } else { "" }
+        }
+        continue
     }
 
     # Query the Windows scheduled task. Absence is itself a finding: a

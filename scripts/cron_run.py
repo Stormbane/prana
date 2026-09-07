@@ -37,18 +37,43 @@ def main() -> int:
         pass  # logging must never block the job
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Open the log destination BEFORE running the child, so the run
+    # decision is made once. A log that cannot be opened degrades to no
+    # capture (stdout inherited) — the job still runs, never twice.
+    log_f = None
     try:
-        with open(log_path, "a", encoding="utf-8", errors="replace") as f:
-            f.write(f"\n=== {stamp} run: {' '.join(sys.argv[2:])} ===\n")
-            f.flush()
-            rc = subprocess.run(child_cmd, stdout=f,
-                                stderr=subprocess.STDOUT).returncode
-            f.write(f"=== {stamp} exit rc={rc} ===\n")
-        return rc
+        log_f = open(log_path, "a", encoding="utf-8", errors="replace")
+        log_f.write(f"\n=== {stamp} run: {' '.join(sys.argv[2:])} ===\n")
+        log_f.flush()
     except OSError:
-        # Log unwritable — still run the job so the work is not skipped;
-        # its exit code remains the source of truth.
-        return subprocess.run(child_cmd).returncode
+        if log_f is not None:
+            try:
+                log_f.close()
+            except OSError:
+                pass
+        log_f = None
+
+    # The child runs EXACTLY ONCE here. Nothing after this may re-invoke
+    # it — a footer/close failure must never cause a second delivery
+    # (Codex review): daily-debrief delivers a message on each run.
+    try:
+        rc = subprocess.run(
+            child_cmd,
+            stdout=log_f if log_f is not None else None,
+            stderr=subprocess.STDOUT if log_f is not None else None,
+        ).returncode
+    finally:
+        if log_f is not None:
+            try:
+                log_f.write(f"=== {stamp} exit rc={rc} ===\n")
+            except (OSError, NameError):
+                pass  # rc may be unset only if run() raised — re-raised below
+            try:
+                log_f.close()
+            except OSError:
+                pass
+    return rc
 
 
 if __name__ == "__main__":

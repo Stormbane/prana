@@ -236,28 +236,42 @@ def test_recovery_page_failure_retries(tmp_path):
     assert saved.get("smriti-nightly") == "result=1@123"  # retained
 
 
-def test_disabled_task_is_skipped(tmp_path):
-    # A cron task registered but not yet cut over is Disabled — that is
-    # intentional, not a failure. It must not page even though its last
-    # run is ancient / it has never run.
+def test_expected_disabled_task_is_skipped(tmp_path):
+    # A staged cron task (disabled_ok) not yet cut over is Disabled on
+    # purpose — must not page even though it has never run.
     out, saved = _run(tmp_path,
                       tasks={"Narada_Figures": {"LastTaskResult": 0,
                                                 "LastRunIso": _ago(500),
                                                 "State": "Disabled"}},
-                      config=[{"task": "Narada_Figures", "max_age_hours": 15}])
-    assert "disabled - skipping" in out
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15,
+                               "disabled_ok": True}])
+    assert "disabled (expected) - skipping" in out
     assert "MOCK-PAGE" not in out
     assert saved == {}
 
 
-def test_disabled_task_clears_prior_latch(tmp_path):
+def test_unexpected_disabled_task_pages(tmp_path):
+    # A task NOT marked disabled_ok (e.g. smriti-logd) being disabled is
+    # an accidental outage — job-watch must page (Codex review).
+    out, saved = _run(tmp_path,
+                      tasks={"smriti-logd": {"LastTaskResult": 0,
+                                             "LastRunIso": _ago(1),
+                                             "State": "Disabled"}},
+                      config=[{"task": "smriti-logd", "max_age_hours": 0.5}])
+    assert "DISABLED but expected to run" in out
+    assert "MOCK-PAGE" in out
+    assert saved.get("smriti-logd") == "disabled"
+
+
+def test_expected_disabled_task_clears_prior_latch(tmp_path):
     out, saved = _run(tmp_path,
                       tasks={"Narada_Figures": {"LastTaskResult": 1,
                                                 "LastRunIso": _ago(2),
                                                 "State": "Disabled"}},
-                      config=[{"task": "Narada_Figures", "max_age_hours": 15}],
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15,
+                               "disabled_ok": True}],
                       state={"Narada_Figures": "result=1@123"})
-    assert "disabled - skipping" in out
+    assert "disabled (expected) - skipping" in out
     assert "Narada_Figures" not in saved  # latch cleared
 
 
