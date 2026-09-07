@@ -142,13 +142,61 @@ def _kill_pid(pid: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
+def _write_lock_atomic(p: Path) -> bool:
+    """Atomically create the lockfile with our identity. Returns True only
+    if THIS call created it (O_CREAT|O_EXCL — exactly one racer wins).
+
+    Check-then-write is not enough: the dual-bootstrap (scheduled task +
+    Startup-folder shortcut) can launch two hosts near-simultaneously,
+    and both could observe an absent lock and both "acquire" (Codex
+    review). The exclusive create makes the winner unambiguous.
+    """
+    payload = {
+        "pid": os.getpid(),
+        "kind": "prana.host",
+        "argv": list(sys.argv),
+        "start_time": datetime.now(timezone.utc).isoformat(),
+    }
+    data = json.dumps(payload, indent=2)
+    try:
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+    except OSError:
+        return False
+    return True
+
+
 def acquire(replace: bool = False) -> bool:
     """Take the lock. Returns True on success, False if held by a live pid.
 
-    With replace=True, kills the holder and takes the lock.
+    Atomic: the lockfile is created with O_CREAT|O_EXCL so exactly one of
+    two racing launchers wins. A stale lock (dead holder, or a recycled
+    pid whose start_time no longer matches) is reclaimed and retried;
+    with replace=True a LIVE holder is killed and its lock reclaimed.
     """
-    existing = read_lock()
-    if existing:
+    p = lockfile_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    # Bounded retries: each loss to a racer or each stale-reclaim gets one
+    # more attempt; a live holder (or a racer that beat us to a fresh
+    # lock) terminates the loop.
+    for _ in range(6):
+        if _write_lock_atomic(p):
+            logger.info("host lock acquired: %s (pid=%d)", p, os.getpid())
+            return True
+
+        # Someone holds (or just created) the lock. Inspect it.
+        existing = read_lock()
+        if existing is None:
+            # Unreadable/torn or vanished between EXCL-fail and read —
+            # try to reclaim and retry.
+            _reclaim(p)
+            continue
+
         pid = int(existing.get("pid", 0))
         if _lock_holder_alive(existing):
             if not replace:
@@ -161,27 +209,33 @@ def acquire(replace: bool = False) -> bool:
             if not _kill_pid(pid):
                 logger.error("failed to kill existing orchestrator pid=%d", pid)
                 return False
+            _reclaim(p)
+            continue
         elif _pid_alive(pid):
-            # PID is alive but doesn't match the recorded start_time —
-            # a different process inherited this pid. Original is gone.
             logger.info(
-                "stale lockfile (pid=%d alive but start_time mismatch — pid reused) — replacing",
-                pid,
-            )
+                "stale lockfile (pid=%d alive but start_time mismatch — "
+                "pid reused) — reclaiming", pid)
+            _reclaim(p)
+            continue
         else:
-            logger.info("stale lockfile (pid=%d not alive) — replacing", pid)
+            logger.info("stale lockfile (pid=%d not alive) — reclaiming", pid)
+            _reclaim(p)
+            continue
 
-    p = lockfile_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "pid": os.getpid(),
-        "kind": "prana.host",
-        "argv": list(sys.argv),
-        "start_time": datetime.now(timezone.utc).isoformat(),
-    }
-    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    logger.info("host lock acquired: %s (pid=%d)", p, os.getpid())
-    return True
+    logger.error("could not acquire host lock after retries (contended)")
+    return False
+
+
+def _reclaim(p: Path) -> None:
+    """Best-effort removal of a stale/replaced lockfile so the next
+    atomic create can win. Tolerant: a racer may have already removed or
+    replaced it."""
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("could not remove stale lockfile %s: %s", p, exc)
 
 
 def release() -> None:

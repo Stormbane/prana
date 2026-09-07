@@ -496,7 +496,12 @@ class Supervisor:
         """
         age = None
         try:
-            payload = json.loads(deadman_progress_file().read_text(encoding="utf-8"))
+            # utf-8-sig: the deadman writes the beacon via PowerShell 5.1
+            # Set-Content -Encoding utf8, which prepends a BOM. Reading it
+            # as plain utf-8 leaves the BOM and json.loads rejects EVERY
+            # healthy beacon (Codex review) — utf-8-sig strips it.
+            payload = json.loads(
+                deadman_progress_file().read_text(encoding="utf-8-sig"))
             age = now - float(payload["ts"])
         except (FileNotFoundError, ValueError, KeyError, OSError):
             age = None  # missing/unreadable = treat as never-seen

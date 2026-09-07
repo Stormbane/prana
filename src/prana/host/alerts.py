@@ -79,7 +79,11 @@ CREATE TABLE IF NOT EXISTS host_alert_status (
     episode_opened_at REAL,
     episode_alerted_at REAL,
     last_event_at   REAL,
-    last_diag       TEXT NOT NULL DEFAULT ''
+    last_diag       TEXT NOT NULL DEFAULT '',
+    -- external checks (observe_transition) share this table but are
+    -- edge-triggered pagers with no deadline; the deadline-driven sweep()
+    -- must skip them or it double-pages (Codex review).
+    external        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS host_alert_events (
@@ -161,6 +165,13 @@ class AlertManager:
         self._send = send  # tests inject; None = real Telegram, lazy config
         self._conn = get_db(db_path) if db_path else get_db()
         self._conn.executescript(SCHEMA_SQL)
+        # Migrate pre-existing DBs that predate the `external` column.
+        cols = {r["name"] for r in self._conn.execute(
+            "PRAGMA table_info(host_alert_status)").fetchall()}
+        if "external" not in cols:
+            self._conn.execute(
+                "ALTER TABLE host_alert_status "
+                "ADD COLUMN external INTEGER NOT NULL DEFAULT 0")
         self._config_warned = False
         # Last stderr line per component, in memory: stderr is chatty
         # (the bridge logs every poll), so it is persisted into
@@ -264,6 +275,10 @@ class AlertManager:
         component names, e.g. "scheduler-deadman").
         """
         self._status_row(key)
+        # Mark this row external so the deadline-driven sweep() ignores it.
+        self._conn.execute(
+            "UPDATE host_alert_status SET external = 1 WHERE component = ?",
+            (key,))
         row = self._conn.execute(
             "SELECT episode_open FROM host_alert_status WHERE component = ?",
             (key,)).fetchone()
@@ -289,7 +304,8 @@ class AlertManager:
         """Evaluate every open episode against durable timestamps."""
         now = self._now()
         rows = self._conn.execute(
-            "SELECT * FROM host_alert_status WHERE episode_open = 1").fetchall()
+            "SELECT * FROM host_alert_status "
+            "WHERE episode_open = 1 AND external = 0").fetchall()
         for row in rows:
             name = row["component"]
             healthy_since = row["healthy_since"]

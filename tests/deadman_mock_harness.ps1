@@ -30,6 +30,20 @@ function global:Invoke-RestMethod {
     if ($global:mockPageFail) { throw 'mock: network down' }
     Write-Host "MOCK-PAGE $Body"
 }
+function global:Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    # Mock the host process lookup: the beacon pid is a real prana.host.
+    if ($Filter -match 'ProcessId=(\d+)') {
+        return [pscustomobject]@{
+            ProcessId = [int]$Matches[1]
+            CommandLine = 'pythonw.exe -m prana.host run'
+        }
+    }
+    return $null
+}
+function global:taskkill {
+    Write-Host "MOCK-KILL $args"
+}
 
 # Progress beacon into the same tmp dir as the state file, so tests never
 # touch the real %LOCALAPPDATA%\narada\deadman.progress.

@@ -123,3 +123,36 @@ def test_corrupt_beacon_is_unhealthy_after_grace(tmp_path, monkeypatch):
     sup = _sup()
     healthy, _ = sup._evaluate_scheduler_health(now, now - (DEADMAN_PROGRESS_GRACE_S + 60))
     assert healthy is False
+
+
+def test_bom_beacon_is_read_healthy(tmp_path, monkeypatch):
+    # The deadman writes the beacon via PowerShell 5.1 Set-Content -Encoding
+    # utf8, which prepends a BOM. The host MUST read it (utf-8-sig), or
+    # every healthy beacon is rejected and a live scheduler reads as dead.
+    p = tmp_path / "deadman.progress"
+    monkeypatch.setattr(sup_mod, "deadman_progress_file", lambda: p)
+    now = 1_000_000.0
+    body = json.dumps({"ts": now - 60, "pid": 5}).encode("utf-8")
+    p.write_bytes(b"\xef\xbb\xbf" + body)  # UTF-8 BOM + payload
+    sup = _sup()
+    healthy, _ = sup._evaluate_scheduler_health(now, now - 10_000)
+    assert healthy is True
+
+
+def test_external_check_not_double_paged_by_sweep(tmp_path):
+    # observe_transition marks the row external so the deadline-driven
+    # sweep() skips it — otherwise sweep re-pages "sick" after 30 min
+    # on top of the edge page (Codex review).
+    clock = {"t": 1_000_000.0}
+    mgr = AlertManager(db_path=tmp_path / "a.db",
+                       send=lambda t: (True, None, ""),
+                       now=lambda: clock["t"])
+    mgr.observe_transition("scheduler-deadman", False, "not firing", "ok")
+    before = len(mgr._conn.execute(
+        "SELECT id FROM host_alert_outbox").fetchall())
+    assert before == 1
+    clock["t"] += 1801  # > EPISODE_ALERT_DEADLINE_S
+    mgr.sweep()
+    after = len(mgr._conn.execute(
+        "SELECT id FROM host_alert_outbox").fetchall())
+    assert after == 1  # sweep did NOT add a second page

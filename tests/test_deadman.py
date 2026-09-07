@@ -205,6 +205,11 @@ def test_mocked_restart_persists_ledger_before_acting(tmp_path):
     assert progress.exists()
     beat = json.loads(progress.read_text(encoding="utf-8-sig"))
     assert abs(beat["ts"] - time.time()) < 120
+    # Recovery kills the host by its validated beacon pid (1234) BEFORE
+    # touching the task — recovers a dual-bootstrap host outside the task
+    # tree (Codex review).
+    assert "MOCK-KILL" in out
+    assert "1234" in out
 
 
 def test_mocked_unwritable_ledger_refuses_restart(tmp_path):

@@ -140,3 +140,14 @@ def test_acquire_succeeds_when_pid_dead(tmp_lockfile):
     _write_lock(tmp_lockfile, pid=99999, start_time="2026-05-16T12:41:56+00:00")
     with patch.object(lf, "_pid_alive", return_value=False):
         assert lf.acquire() is True
+
+
+def test_write_lock_atomic_is_exclusive(tmp_lockfile):
+    """The dual-bootstrap race fix: O_CREAT|O_EXCL means exactly one racer
+    creates the lock. The second call to _write_lock_atomic must fail even
+    with no prior inspection — this is what prevents two hosts both
+    'acquiring' an absent lock (Codex review)."""
+    assert lf._write_lock_atomic(tmp_lockfile) is True
+    assert tmp_lockfile.exists()
+    # A second racer, file now present: exclusive create fails.
+    assert lf._write_lock_atomic(tmp_lockfile) is False

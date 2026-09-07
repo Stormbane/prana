@@ -128,11 +128,13 @@ function Save-DeadmanState($State) {
 
 # --- 1. Heartbeat age -------------------------------------------------
 $nowEpoch = [double][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
-$age = $null   # $null = beacon missing/unreadable
+$age = $null    # $null = beacon missing/unreadable
+$beatPid = $null  # the host's own pid, recorded in the beacon
 try {
     if (Test-Path $HeartbeatPath) {
         $beat = Get-Content $HeartbeatPath -Raw -ErrorAction Stop | ConvertFrom-Json
         if ($null -ne $beat.ts) { $age = $nowEpoch - [double]$beat.ts }
+        if ($null -ne $beat.pid) { $beatPid = [int]$beat.pid }
     }
 } catch {
     Write-DeadmanLog "heartbeat unreadable: $($_.Exception.Message)"
@@ -214,12 +216,28 @@ if (-not $saved) {
 
 Write-DeadmanLog "RESTART: '$TaskName' (task state: $($task.State); $ageText; $($recent.Count + 1)/$MaxRestarts in window)"
 try {
-    if ($task.State -eq 'Running') {
-        # Hung, not dead: stop first. The host holds a kill-on-close job
-        # object, so stopping the task takes the component tree with it -
-        # no orphans for the fresh host to collide with.
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Start-Sleep -Seconds 5
+    # Kill the host by its OWN pid (from the heartbeat beacon), validated,
+    # BEFORE touching the task. The host is dual-bootstrapped (scheduled
+    # task + Startup-folder shortcut), so a hung host may be running
+    # OUTSIDE Narada_Host's task tree — Stop-ScheduledTask alone would
+    # leave it alive, holding the lock, and Start would then no-op
+    # (Codex review). Killing the validated pid tree recovers it whatever
+    # launched it; the lock is then stale and the fresh host reclaims it.
+    if ($null -ne $beatPid -and $beatPid -gt 0) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$beatPid" -ErrorAction SilentlyContinue
+        if ($null -ne $proc -and $proc.CommandLine -match 'prana\.host') {
+            Write-DeadmanLog "killing host pid $beatPid (validated: prana.host) and its tree"
+            & taskkill /PID $beatPid /T /F 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
+        } elseif ($null -ne $proc) {
+            Write-DeadmanLog "beacon pid $beatPid is not a prana.host process (pid reused) - not killing by pid"
+        }
+    }
+    # Belt-and-suspenders for the task-launched case: stop the task too
+    # (its job object takes any remaining component tree with it).
+    if ((Get-ScheduledTask -TaskName $TaskName).State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
     }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     Send-Page "Narada deadman: restarted $TaskName ($ageText; restart $($recent.Count + 1)/$MaxRestarts this hour)." | Out-Null
