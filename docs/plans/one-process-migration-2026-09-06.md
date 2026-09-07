@@ -176,4 +176,45 @@ now watched from outside by step 4a"? The watcher delivers step 4's
 safety value without taking the cutover risk. Recommend NOT cutting
 over unless there is a concrete reason to consolidate the scheduler.
 
-## Step 5 — cognition convergence: tracked in its own plans
+## Retire Hermes (retire-hermes-2026-09-07 plan) — execution status
+
+**Plan cross-reviewed** (2 rounds, all accepted). **All code written,
+committed, and diff-reviewed** (observer: 4+2+1 findings across 3
+rechecks → approve; steps 2-4: 3 findings → approve). Commits from
+`f63a547` through `58f7f21`.
+
+**Done and live (safe, reversible, nothing cut over):**
+- Rollback snapshot: `docs/archive/hermes-2026-09-07/`.
+- Scheduler observer CODE committed: deadman writes `deadman.progress`;
+  host reads it + pages via the alert outbox; dual-bootstrap
+  (Startup-folder shortcut) installed. **NOT yet live** — see below.
+- Figures tick moved into `scripts/populate_figures_tick.py`, OUT_DIR →
+  `~/.narada/figures/`.
+- Three Windows tasks registered **DISABLED** (born disabled, atomic):
+  `Narada_Figures` (6 triggers), `Narada_Akhada_Checkin` (3),
+  `Narada_Daily_Debrief` (1). Inert — they do not fire.
+- Live `job-watch.json` updated to watch all six; the three cron tasks
+  carry `disabled_ok:true` and are correctly skipped (verified live, no
+  false pages).
+
+**REMAINING — all disruptive to the live box; paused for Suti's timing
+(2026-09-07: box in active use, live voice on narada-body observed):**
+1. **Bounce Narada_Host onto the observer build.** The running host
+   (pid 15288, started 2026-09-06 23:24) predates the observer code; a
+   Stop/Start could not replace it cleanly and a hard kill would
+   interrupt live voice. Needs a quiet moment.
+2. **Per-job cutover** (pause-first): for each job, pause the Hermes
+   twin + drain, run the acceptance gate on the Windows task, enable it,
+   drop its `disabled_ok`. Low-disruption but should follow (1).
+3. **Two blocking observer drills:** (a) stop the Task Scheduler service
+   with the host up → host pages deadman-staleness (system-wide, ~min);
+   (b) Scheduler-dead-at-boot → Startup shortcut brings the host up and
+   it pages (needs a reboot/logoff — disruptive).
+4. **Retire Hermes** (step 6): `agent-gateway` enabled=false, stop the
+   gateway, verified rollback dry-run, remove autostart.
+
+The intermediate state is clean: Hermes still runs all three jobs; the
+Windows tasks are inert; the observer is coded but dormant. Fully
+reversible by unregistering the three disabled tasks.
+
+## Step 5 (one-process) — cognition convergence: tracked in its own plans
