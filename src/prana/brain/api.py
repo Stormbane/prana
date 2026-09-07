@@ -586,6 +586,13 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             raise HTTPException(404, "no such note")
         return {"deleted": True}
 
+    # ── Projects overview (the Data tab's Projects card) ─────────────
+    @app.get("/api/projects")
+    async def projects(tier: str = Depends(require_tier)) -> list:
+        from prana.brain import projects as _projects
+
+        return await asyncio.to_thread(_projects.list_projects)
+
     # ── Notification feed (the pinned Notifications chat) ────────────
     @app.get("/api/notifications")
     async def notifications(tier: str = Depends(require_tier)) -> list:
