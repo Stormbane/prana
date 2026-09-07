@@ -332,6 +332,41 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                       "created": 0, "owned_by": "narada"}],
         }
 
+    # ── Phone-app voice (spec: the one prana-side proxy) ─────────────
+    # GET session → {room, token, identity, url, agent}; the app joins,
+    # THEN POSTs dispatch {room}. Join-before-dispatch is the client's
+    # contract (exactly once per room — dispatch has no idempotency).
+    @app.get("/api/voice/session")
+    async def voice_session(tier: str = Depends(require_tier)) -> dict:
+        from prana.brain import voice
+
+        try:
+            return voice.phone_session()
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+
+    @app.post("/api/voice/dispatch")
+    async def voice_dispatch(request: Request,
+                             tier: str = Depends(require_tier)) -> dict:
+        from prana.brain import voice
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        room = body.get("room", "") if isinstance(body, dict) else ""
+        if not isinstance(room, str) or not room:
+            raise HTTPException(400, "missing room")
+        try:
+            return await asyncio.to_thread(voice.dispatch_agent, room)
+        except ValueError as exc:
+            raise HTTPException(403, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        except Exception as exc:
+            logger.warning("voice dispatch failed for %s: %s", room, exc)
+            raise HTTPException(502, f"dispatch failed: {exc}")
+
     @app.post("/v1/narada/sessions/{session_id}/cancel")
     async def cancel(session_id: str, tier: str = Depends(require_tier)) -> dict:
         session = pool.peek(session_id, tier)
