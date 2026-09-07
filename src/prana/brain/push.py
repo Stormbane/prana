@@ -145,7 +145,7 @@ def read_notifications(limit: int = 50) -> list[dict]:
     return out
 
 
-def send(title: str, body: str, *, url: str = "./",
+def send(title: str, body: str, *, url: str = "./#/?notifications=1",
          webpush_fn=None) -> dict:
     """Push {title, body, url} to every subscription. Best-effort per
     device; expired ones are pruned. Returns {sent, failed, dropped}."""
