@@ -14,9 +14,17 @@ def _mcp_servers() -> dict:
 
     from prana.sessions.tokens import load_or_create_tokens
 
+    # sys.executable, never bare "python": the brain runs under the
+    # supervisor, whose PATH leads with the hermes venv — bare "python"
+    # resolved there for every brain session's MCP spawn, and that venv
+    # has neither smriti nor akhada (ModuleNotFoundError → "Connection
+    # closed" on every phone-session tool, 2026-09-07). narada-sessions
+    # below already knew this lesson; these two lines hadn't learned it.
     servers: dict = {
-        "smriti": {"command": "python", "args": ["-m", "smriti.mcp_server"]},
-        "akhada": {"command": "python", "args": ["-m", "akhada.adapters.mcp_server"]},
+        "smriti": {"command": sys.executable,
+                   "args": ["-m", "smriti.mcp_server"]},
+        "akhada": {"command": sys.executable,
+                   "args": ["-m", "akhada.adapters.mcp_server"]},
     }
     try:
         token = load_or_create_tokens()["prana"]
