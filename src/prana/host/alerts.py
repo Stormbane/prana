@@ -252,6 +252,37 @@ class AlertManager:
         if line:
             self._last_diag[component] = line
 
+    def observe_transition(self, key: str, healthy: bool,
+                           problem: str, recovery: str) -> None:
+        """Edge-triggered pager for a non-component external check — e.g.
+        the deadman's own scheduling (retire-hermes plan, §Scheduler
+        observer). Unlike the episode machine, there is NO time deadline:
+        the caller decides healthy vs not, and this pages ONCE on the
+        unhealthy edge and once on recovery, via the durable outbox
+        (inheriting its retry + redaction). Latch is the `episode_open`
+        flag on a status row keyed by `key` (kept distinct from real
+        component names, e.g. "scheduler-deadman").
+        """
+        self._status_row(key)
+        row = self._conn.execute(
+            "SELECT episode_open FROM host_alert_status WHERE component = ?",
+            (key,)).fetchone()
+        latched = bool(row["episode_open"]) if row else False
+        if not healthy and not latched:
+            self._event(key, "external-fail", problem)
+            self._conn.execute(
+                "UPDATE host_alert_status SET episode_open = 1, "
+                "episode_opened_at = ? WHERE component = ?",
+                (self._now(), key))
+            self._enqueue(f"🔴 {problem}")
+        elif healthy and latched:
+            self._event(key, "external-recovered", recovery)
+            self._conn.execute(
+                "UPDATE host_alert_status SET episode_open = 0, "
+                "episode_opened_at = NULL, episode_alerted_at = NULL "
+                "WHERE component = ?", (key,))
+            self._enqueue(f"✅ {recovery}")
+
     # ── the sweep (startup + every 60 s) ──
 
     def sweep(self) -> None:

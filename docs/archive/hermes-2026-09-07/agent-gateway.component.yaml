@@ -1,0 +1,28 @@
+  - name: agent-gateway
+    description: "Hermes — cron scheduler. Fires heartbeat-tick every 30 min."
+    enabled: true  # Stage 5 migration: now supervised by prana host (2026-05-16)
+    command:
+      - python
+      - -m
+      - hermes_cli.main
+      - gateway
+      - run
+      - --replace
+    cwd: C:\Projects\hermes-spike\hermes-agent
+    env:
+      HERMES_HOME: ${HOME}\.hermes
+      PYTHONIOENCODING: utf-8
+    restart_grace_s: 5.0
+    # wait_for_url: http://127.0.0.1:11434/api/tags    # Phase 3: wait for ollama
+
+  # ─────────────────────────────────────────────────────────────────
+  # chat-bridge — Telegram-to-claude direct bridge. One process per
+  # message: spawns `claude -p` with wake-context.md as voice. Per-chat
+  # session continuity via --continue + marker file. Bypasses Hermes's
+  # orchestrator entirely (qwen3:8b unreliable for tool routing).
+  #
+  # Future (unified-mind phase 1D): this will split into a sense
+  # publisher (publishes sense:telegram_inbound events) plus a
+  # cognition trigger that subscribes and fires the singular cognition
+  # pipeline. For now it's one process doing both.
+  # ─────────────────────────────────────────────────────────────────

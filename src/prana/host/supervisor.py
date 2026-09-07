@@ -30,12 +30,21 @@ from typing import Optional
 
 from prana.host.component import Component
 from prana.host.log import component_logger
-from prana.host.paths import heartbeat_file
+from prana.host.paths import deadman_progress_file, heartbeat_file
 from prana.sessions.jobobject import JobObject
 
 
 SHUTDOWN_GRACE_S = 5.0
 HEARTBEAT_INTERVAL_S = 30.0
+
+# Scheduler observer: the host watches that the deadman (a scheduled
+# task) is still being fired by Task Scheduler. If the progress beacon is
+# older than this, the scheduler has stopped firing the deadman and the
+# host pages — the observer of the observer (retire-hermes plan).
+SCHEDULER_OBSERVER_INTERVAL_S = 300.0
+DEADMAN_PROGRESS_STALE_S = 900.0  # 3 missed 5-min ticks = dead
+DEADMAN_PROGRESS_GRACE_S = 1200.0  # startup grace: don't page before the
+#                                    deadman has had a chance to run once
 RATE_LIMIT_WINDOW_S = 60.0
 RATE_LIMIT_MAX_EXITS = 3
 RATE_LIMIT_COOLDOWN_S = 300.0  # 5 min
@@ -400,6 +409,10 @@ class Supervisor:
         self._tasks["__heartbeat__"] = asyncio.create_task(
             self._heartbeat_loop(), name="host-heartbeat")
 
+        if self.alerts is not None:
+            self._tasks["__scheduler_observer__"] = asyncio.create_task(
+                self._scheduler_observer_loop(), name="scheduler-observer")
+
         self._logger.info("supervisor up — %d component(s)", len(self.runners))
 
         await self._shutdown_event.wait()
@@ -440,6 +453,65 @@ class Supervisor:
                     self._shutdown_event.wait(), timeout=HEARTBEAT_INTERVAL_S)
             except asyncio.TimeoutError:
                 pass
+
+    async def _scheduler_observer_loop(self) -> None:
+        """Watch that the deadman (a scheduled task) is still firing.
+
+        The host is a long-running process whose liveness does not depend
+        on the Task Scheduler service once started, so it can observe a
+        Scheduler failure that would silence the deadman AND its
+        job-watch together. Reads the deadman's progress beacon (NOT Task
+        Scheduler APIs, which may be the thing that's down) and pages via
+        the durable alert outbox on the stale edge, recovery on the fresh
+        edge. A startup grace period avoids paging before the deadman has
+        had a chance to run once (e.g. right after a host bounce).
+        """
+        started = time.time()
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=SCHEDULER_OBSERVER_INTERVAL_S)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                verdict = self._evaluate_scheduler_health(time.time(), started)
+                if verdict is not None:  # None = startup grace, don't page yet
+                    healthy, problem = verdict
+                    await asyncio.to_thread(
+                        self.alerts.observe_transition,
+                        "scheduler-deadman", healthy, problem,
+                        "Task Scheduler / deadman firing again.")
+            except Exception:
+                self._logger.exception("scheduler-observer pass failed")
+
+    def _evaluate_scheduler_health(self, now: float, started: float):
+        """Pure decision for the scheduler observer (unit-testable).
+
+        Returns None during startup grace when the beacon is absent (the
+        deadman has not had a chance to fire yet); otherwise
+        (healthy: bool, problem: str). Reads the deadman progress beacon;
+        a missing/unreadable/stale beacon is unhealthy.
+        """
+        age = None
+        try:
+            payload = json.loads(deadman_progress_file().read_text(encoding="utf-8"))
+            age = now - float(payload["ts"])
+        except (FileNotFoundError, ValueError, KeyError, OSError):
+            age = None  # missing/unreadable = treat as never-seen
+
+        if age is None and (now - started) < DEADMAN_PROGRESS_GRACE_S:
+            return None  # startup grace
+
+        stale = age is None or age > DEADMAN_PROGRESS_STALE_S
+        if age is None:
+            problem = ("Task Scheduler / deadman not firing — no deadman "
+                       "progress beacon seen")
+        else:
+            problem = (f"Task Scheduler / deadman not firing — deadman last "
+                       f"ran {int(age / 60)} min ago")
+        return (not stale, problem)
 
     def install_signal_handlers(self) -> None:
         """Trap Ctrl-C / SIGTERM and trigger graceful shutdown."""

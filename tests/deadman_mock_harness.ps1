@@ -31,6 +31,9 @@ function global:Invoke-RestMethod {
     Write-Host "MOCK-PAGE $Body"
 }
 
+# Progress beacon into the same tmp dir as the state file, so tests never
+# touch the real %LOCALAPPDATA%\narada\deadman.progress.
+$progressPath = Join-Path (Split-Path -Parent $StatePath) 'deadman.progress'
 & $ScriptPath -HeartbeatPath $HeartbeatPath -StatePath $StatePath `
-    -LogPath $LogPath -EnvPath $EnvPath -TaskName 'MockHost'
+    -ProgressPath $progressPath -LogPath $LogPath -EnvPath $EnvPath -TaskName 'MockHost'
 exit $LASTEXITCODE

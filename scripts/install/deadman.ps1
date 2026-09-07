@@ -19,6 +19,7 @@
 param(
     [string]$HeartbeatPath = "$env:LOCALAPPDATA\narada\host.heartbeat",
     [string]$StatePath = "$env:LOCALAPPDATA\narada\deadman-state.json",
+    [string]$ProgressPath = "$env:LOCALAPPDATA\narada\deadman.progress",
     [string]$LogPath = "$env:LOCALAPPDATA\narada\logs\deadman.log",
     [string]$TaskName = "Narada_Host",
     [string]$EnvPath = "$HOME\.hermes\.env",
@@ -38,6 +39,24 @@ function Write-DeadmanLog([string]$Message) {
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
         Add-Content -Path $LogPath -Value $line -Encoding utf8
     } catch {}
+}
+
+# Progress beacon: the deadman fired (Task Scheduler is alive and
+# triggering it). Written at the START of every tick — the scheduler
+# having launched this script is exactly the fact the host observer
+# watches for. A dry run does not count as a real scheduled firing, so
+# it is skipped there. Never throws.
+if (-not $DryRun) {
+    try {
+        $pdir = Split-Path -Parent $ProgressPath
+        if (-not (Test-Path $pdir)) { New-Item -ItemType Directory -Force $pdir | Out-Null }
+        $ptmp = "$ProgressPath.tmp"
+        (@{ ts = [double][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0; pid = $PID } |
+            ConvertTo-Json -Compress) | Set-Content -Path $ptmp -Encoding utf8
+        Move-Item -Path $ptmp -Destination $ProgressPath -Force
+    } catch {
+        Write-DeadmanLog "progress-beacon write failed: $($_.Exception.Message)"
+    }
 }
 
 function Send-Page([string]$Text) {

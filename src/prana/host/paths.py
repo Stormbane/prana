@@ -40,6 +40,19 @@ def heartbeat_file() -> Path:
     return state_dir() / "host.heartbeat"
 
 
+def deadman_progress_file() -> Path:
+    """Beacon the DEADMAN writes each tick, so the host can watch that
+    the deadman (and therefore Task Scheduler) is still firing.
+
+    The reverse of the heartbeat: the deadman is a scheduled task, the
+    host is a long-running process. Each watches the other from a
+    different failure domain (retire-hermes plan, §Scheduler observer).
+    The host reads this file's age; if stale, Task Scheduler has stopped
+    firing the deadman and the host pages — the observer of the observer.
+    """
+    return state_dir() / "deadman.progress"
+
+
 def lockfile_path() -> Path:
     """Single-instance lockfile so we don't double-launch."""
     return state_dir() / "host.lock"

@@ -199,6 +199,12 @@ def test_mocked_restart_persists_ledger_before_acting(tmp_path):
     saved = _read_state(state_file)
     assert len(saved["restarts"]) == 1
     assert saved["paged_exhausted"] is False
+    # A real (non-dry-run) tick writes the progress beacon the host
+    # scheduler-observer watches.
+    progress = tmp_path / "deadman.progress"
+    assert progress.exists()
+    beat = json.loads(progress.read_text(encoding="utf-8-sig"))
+    assert abs(beat["ts"] - time.time()) < 120
 
 
 def test_mocked_unwritable_ledger_refuses_restart(tmp_path):

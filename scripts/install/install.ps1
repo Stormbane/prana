@@ -144,6 +144,33 @@ Write-Host ""
 Write-Host "[OK] Installed scheduled task '$TaskName'"
 Write-Host "  Triggers at user logon for $user"
 Write-Host "  Runs: $pythonw $pranaArgs"
+
+# ── Dual-bootstrap (retire-hermes plan, §Scheduler observer) ──────────
+# The host is also the observer that watches the deadman/Task Scheduler.
+# If Task Scheduler fails to START after a reboot, its logon task never
+# fires and no observer exists. So ALSO launch the host from the Startup
+# folder (processed by Explorer at logon, independent of the Task
+# Scheduler service). The host lockfile makes the second launch a clean
+# no-op (run-without---replace exits 3 when the lock is held), so
+# whichever bootstrap wins the race brings the host up exactly once.
+try {
+    $startupDir = [Environment]::GetFolderPath('Startup')
+    $lnkPath = Join-Path $startupDir 'Narada_Host.lnk'
+    $wsh = New-Object -ComObject WScript.Shell
+    $sc = $wsh.CreateShortcut($lnkPath)
+    $sc.TargetPath = $pythonw
+    $sc.Arguments = $pranaArgs
+    $sc.WorkingDirectory = $env:USERPROFILE
+    $sc.WindowStyle = 7  # minimized (pythonw is windowless regardless)
+    $sc.Description = 'Narada host - Startup-folder bootstrap (dual with Narada_Host task)'
+    $sc.Save()
+    Write-Host "[OK] Dual-bootstrap Startup shortcut: $lnkPath"
+} catch {
+    Write-Warning "could not create Startup-folder shortcut: $($_.Exception.Message)"
+    Write-Warning "the host still autostarts via the scheduled task, but the"
+    Write-Warning "Scheduler-dead-at-boot fallback (retire-hermes plan) is not in place."
+}
+
 Write-Host ""
 Write-Host "To start now without waiting for next logon:"
 Write-Host "  schtasks /Run /TN $TaskName"

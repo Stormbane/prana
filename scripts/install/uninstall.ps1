@@ -24,6 +24,13 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# Remove the dual-bootstrap Startup shortcut (retire-hermes plan).
+$lnkPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Narada_Host.lnk'
+if (Test-Path $lnkPath) {
+    Remove-Item $lnkPath -Force -ErrorAction SilentlyContinue
+    Write-Host "[OK] Removed Startup-folder shortcut"
+}
+
 Write-Host "[OK] Removed scheduled task '$TaskName'"
 Write-Host ""
 Write-Host "The orchestrator process (if running) was not affected."
