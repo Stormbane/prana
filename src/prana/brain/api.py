@@ -367,6 +367,56 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             logger.warning("voice dispatch failed for %s: %s", room, exc)
             raise HTTPException(502, f"dispatch failed: {exc}")
 
+    # ── Web Push (the app leg of notify-suti fan-out) ────────────────
+    @app.get("/api/push/vapid-key")
+    async def push_vapid_key(tier: str = Depends(require_tier)) -> dict:
+        from prana.brain import push
+
+        return {"key": push.ensure_vapid()["public_key"]}
+
+    @app.post("/api/push/subscribe")
+    async def push_subscribe(request: Request,
+                             tier: str = Depends(require_tier)) -> dict:
+        from prana.brain import push
+
+        try:
+            sub = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        try:
+            count = push.subscribe(sub if isinstance(sub, dict) else {})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"subscriptions": count}
+
+    @app.post("/api/push/unsubscribe")
+    async def push_unsubscribe(request: Request,
+                               tier: str = Depends(require_tier)) -> dict:
+        from prana.brain import push
+
+        body = await request.json()
+        endpoint = body.get("endpoint", "") if isinstance(body, dict) else ""
+        return {"subscriptions": push.unsubscribe(endpoint)}
+
+    @app.post("/api/push/send")
+    async def push_send(request: Request,
+                        tier: str = Depends(require_tier)) -> dict:
+        # Only the prana tier may broadcast — the app tier subscribes
+        # and receives; it must not be able to page every device.
+        if tier != "prana":
+            raise HTTPException(403, "push send is prana-tier only")
+        from prana.brain import push
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        text = body.get("body", "") if isinstance(body, dict) else ""
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(400, "missing body")
+        title = body.get("title") or "Narada"
+        return await asyncio.to_thread(push.send, str(title), text)
+
     @app.post("/v1/narada/sessions/{session_id}/cancel")
     async def cancel(session_id: str, tier: str = Depends(require_tier)) -> dict:
         session = pool.peek(session_id, tier)
