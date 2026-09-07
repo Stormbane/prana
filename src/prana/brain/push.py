@@ -61,6 +61,20 @@ def ensure_vapid() -> dict:
         return data
 
 
+def _vapid_pem_path() -> Path:
+    """pywebpush wants a PATH (or raw base64), never PEM content — a
+    PEM string is misread as base64 DER ("header too long", found live
+    2026-09-07). Materialize the key to a file and hand paths around."""
+    pem = _root() / "vapid-private.pem"
+    data = ensure_vapid()
+    try:
+        if not pem.exists() or pem.read_text(encoding="utf-8") != data["private_pem"]:
+            pem.write_text(data["private_pem"], encoding="utf-8")
+    except OSError:
+        logger.warning("could not materialize vapid pem", exc_info=True)
+    return pem
+
+
 def _load_subs() -> dict[str, dict]:
     try:
         return json.loads(_subs_path().read_text(encoding="utf-8"))
@@ -96,15 +110,51 @@ def unsubscribe(endpoint: str) -> int:
         return len(subs)
 
 
+def _log_notification(title: str, body: str) -> None:
+    """Append to the notification feed the app's pinned Notifications
+    chat reads — every notify-suti message lands here even when no
+    device is push-subscribed yet."""
+    import time
+
+    path = _root() / "notifications.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                "title": title, "body": body}) + "\n")
+        # Cap the feed: rewrite when it grows past ~400 entries.
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > 400:
+            path.write_text("\n".join(lines[-200:]) + "\n", encoding="utf-8")
+    except OSError:
+        logger.warning("could not log notification", exc_info=True)
+
+
+def read_notifications(limit: int = 50) -> list[dict]:
+    path = _root() / "notifications.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
 def send(title: str, body: str, *, url: str = "./",
          webpush_fn=None) -> dict:
     """Push {title, body, url} to every subscription. Best-effort per
     device; expired ones are pruned. Returns {sent, failed, dropped}."""
+    _log_notification(title, body)
     if webpush_fn is None:
         from pywebpush import webpush as webpush_fn  # type: ignore[no-redef]
     from pywebpush import WebPushException
 
-    vapid = ensure_vapid()
+    vapid_key_path = str(_vapid_pem_path())
     payload = json.dumps({"title": title, "body": body, "url": url})
     with _LOCK:
         subs = _load_subs()
@@ -114,7 +164,7 @@ def send(title: str, body: str, *, url: str = "./",
             webpush_fn(
                 subscription_info=sub,
                 data=payload,
-                vapid_private_key=vapid["private_pem"],
+                vapid_private_key=vapid_key_path,
                 vapid_claims={"sub": "mailto:7186653+Stormbane@users.noreply.github.com"},
             )
             sent += 1

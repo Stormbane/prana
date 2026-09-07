@@ -25,6 +25,8 @@ def _mcp_servers() -> dict:
                    "args": ["-m", "smriti.mcp_server"]},
         "akhada": {"command": sys.executable,
                    "args": ["-m", "akhada.adapters.mcp_server"]},
+        "narada-notes": {"command": sys.executable,
+                         "args": ["-m", "prana.notes.mcp"]},
     }
     try:
         token = load_or_create_tokens()["prana"]
@@ -42,9 +44,9 @@ def _mcp_servers() -> dict:
 # Which MCP servers each caller tier gets wired with (spec §1a auth:
 # "the tier decides which MCP tools the session's agent is wired with").
 TIER_SERVERS: dict[str, tuple[str, ...]] = {
-    "prana": ("smriti", "akhada", "narada-sessions"),
-    "app": ("smriti", "akhada"),
-    "voice": ("smriti", "akhada"),
+    "prana": ("smriti", "akhada", "narada-notes", "narada-sessions"),
+    "app": ("smriti", "akhada", "narada-notes"),
+    "voice": ("smriti", "akhada", "narada-notes"),
 }
 
 

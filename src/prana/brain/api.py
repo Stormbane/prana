@@ -502,6 +502,79 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             logger.warning("fitness action %s failed: %s", tool, exc)
             raise HTTPException(502, f"{tool} failed: {exc}")
 
+    # ── Notes (Keep-style; same store Narada's MCP tools edit) ───────
+    @app.get("/api/notes")
+    async def notes_list(tier: str = Depends(require_tier)) -> list:
+        from prana.notes import store as notes_store
+
+        return notes_store.list_notes()
+
+    @app.post("/api/notes")
+    async def notes_create(request: Request,
+                           tier: str = Depends(require_tier)) -> dict:
+        from prana.notes import store as notes_store
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+        try:
+            return notes_store.create_note(
+                str(body.get("title", "")),
+                kind=str(body.get("kind", "text")),
+                text=str(body.get("text", "")),
+                items=[str(t) for t in body.get("items", [])
+                       if isinstance(t, str)],
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.patch("/api/notes/{note_id}")
+    async def notes_update(note_id: str, request: Request,
+                           tier: str = Depends(require_tier)) -> dict:
+        from prana.notes import store as notes_store
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+        kwargs: dict = {}
+        if "title" in body:
+            kwargs["title"] = str(body["title"])
+        if "text" in body:
+            kwargs["text"] = str(body["text"])
+        if isinstance(body.get("add_items"), list):
+            kwargs["add_items"] = [str(t) for t in body["add_items"]]
+        if isinstance(body.get("remove_item_ids"), list):
+            kwargs["remove_item_ids"] = [str(t) for t in body["remove_item_ids"]]
+        if isinstance(body.get("check"), dict):
+            kwargs["check"] = {str(k): bool(v)
+                               for k, v in body["check"].items()}
+        try:
+            return notes_store.update_note(note_id, **kwargs)
+        except KeyError:
+            raise HTTPException(404, "no such note")
+
+    @app.delete("/api/notes/{note_id}")
+    async def notes_delete(note_id: str,
+                           tier: str = Depends(require_tier)) -> dict:
+        from prana.notes import store as notes_store
+
+        if not notes_store.delete_note(note_id):
+            raise HTTPException(404, "no such note")
+        return {"deleted": True}
+
+    # ── Notification feed (the pinned Notifications chat) ────────────
+    @app.get("/api/notifications")
+    async def notifications(tier: str = Depends(require_tier)) -> list:
+        from prana.brain import push
+
+        return push.read_notifications()
+
     # ── Web Push (the app leg of notify-suti fan-out) ────────────────
     @app.get("/api/push/vapid-key")
     async def push_vapid_key(tier: str = Depends(require_tier)) -> dict:
