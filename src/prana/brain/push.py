@@ -187,6 +187,10 @@ def _load_feed() -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict) and isinstance(data.get("rows"), list):
             data.setdefault("event_ids", [])
+            # event → row map (recheck 1); older files carried only a list.
+            events = data.get("events")
+            if not isinstance(events, dict):
+                data["events"] = {e: None for e in data["event_ids"]}
             return data
     except (OSError, ValueError):
         pass
@@ -207,7 +211,7 @@ def _load_feed() -> dict:
             })
     except OSError:
         pass
-    return {"rows": rows, "event_ids": []}
+    return {"rows": rows, "event_ids": [], "events": {}}
 
 
 def _save_feed(data: dict) -> None:
@@ -215,6 +219,8 @@ def _save_feed(data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data["rows"] = data["rows"][-MAX_ROWS:]
     data["event_ids"] = data["event_ids"][-MAX_EVENT_IDS:]
+    keep = set(data["event_ids"])
+    data["events"] = {e: r for e, r in data.get("events", {}).items() if e in keep}
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
     tmp.replace(path)
@@ -236,7 +242,7 @@ def _parse_ts(iso: str) -> float:
         return 0.0
 
 
-def _mark_delivered(row_id: str, outcomes: dict[str, bool]) -> None:
+def _mark_delivered(row_id: str, outcomes: dict[str, object]) -> None:
     """Persist per-channel delivery outcomes on a row, so a later retry
     of the same event attempts only what failed (review P2)."""
     with _LOCK:
@@ -262,8 +268,11 @@ def record(*, level: str, source: str, title: str, body: str,
     with _LOCK:
         data = _load_feed()
         if event_id and event_id in data["event_ids"]:
+            row_id = data.get("events", {}).get(event_id)
             existing = next((r for r in reversed(data["rows"])
-                             if r.get("event_id") == event_id), None)
+                             if r.get("id") == row_id
+                             or (row_id is None and r.get("event_id") == event_id)),
+                            None)
             return (existing or {}), False, False
         rows = data["rows"]
         now_iso, now_ts = _now_iso(), _now_ts()
@@ -307,6 +316,7 @@ def record(*, level: str, source: str, title: str, body: str,
             rows.append(row)
         if event_id:
             data["event_ids"].append(event_id)
+            data.setdefault("events", {})[event_id] = row["id"]
         _save_feed(data)
         return dict(row), True, escalated
 
@@ -385,21 +395,33 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
     already = dict(row.get("delivered", {}))
     if not is_new:
         # A known event: no new row, no count bump — but any channel
-        # that FAILED last time is retried (review P2). Fully delivered
-        # events are a no-op.
+        # that FAILED (False) or was left PENDING (None: the brain
+        # stopped mid-delivery) is retried. Fully delivered or
+        # deliberately skipped channels are no-ops.
         channels = [c for c in route(row.get("level", level))
-                    if c in ("push", "telegram") and already.get(c) is False
+                    if c in ("push", "telegram")
+                    and already.get(c, "absent") in (False, None)
                     and c not in set(delivered_channels)]
     else:
         channels = [c for c in route(row.get("level", level))
                     if c not in set(delivered_channels)]
-        if replay:
-            channels = [c for c in channels if c == "badge"]
         # A repeat inside an open episode only pages again if it escalated.
         if int(row.get("count", 1)) > 1 and not escalated:
             channels = [c for c in channels if c == "badge"]
+    if replay:
+        # Bulk reconciliation is feed-only whichever branch we came by.
+        channels = [c for c in channels if c == "badge"]
     result["channels"] = channels
-    outcomes: dict[str, bool] = {}
+    # Persist PENDING before touching any sink (recheck 3): an interrupted
+    # attempt must look retryable, never delivered. Channels the producer
+    # delivered, or replay suppressed, are recorded as skipped.
+    pending: dict[str, object] = {c: None for c in channels if c in ("push", "telegram")}
+    for c in ("push", "telegram"):
+        if c in route(row.get("level", level)) and c not in channels and c not in already:
+            pending[c] = "skipped"
+    if pending and row.get("id"):
+        _mark_delivered(row["id"], pending)
+    outcomes: dict[str, object] = {}
     # Each channel fails ALONE (review P1): a push subsystem that cannot
     # even initialise must never take Telegram down with it.
     if "push" in channels:

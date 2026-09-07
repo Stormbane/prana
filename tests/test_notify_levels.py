@@ -174,3 +174,50 @@ def test_folded_episode_moves_to_the_end():
     rows = push.read_notifications()
     assert [r["category"] for r in rows] == ["ep/b", "ep/a"]
     assert rows[-1]["count"] == 2
+
+
+# ── recheck fixes ───────────────────────────────────────────────────────
+
+
+def test_earlier_event_stays_retryable_after_folding():
+    calls = {"n": 0}
+
+    def flaky(_t):
+        calls["n"] += 1
+        return calls["n"] != 1  # only the very first attempt fails
+
+    push.notify(body="e1", level="error", source="host", category="c/x",
+                event_id="e1", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    push.notify(body="e2", level="error", source="host", category="c/x",
+                event_id="e2", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    r = push.notify(body="e1", level="error", source="host", category="c/x",
+                    event_id="e1", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    assert r["new"] is False and r["channels"] == ["telegram"] and r["telegram"] is True
+    assert push.read_notifications()[-1]["count"] == 2  # no recount
+
+
+def test_replay_never_pages_even_for_a_previously_failed_event():
+    push.notify(body="old", level="emergency", source="deadman", event_id="d1",
+                webpush_fn=lambda **_: None, telegram_fn=lambda _t: False)
+    r = push.notify(body="old", level="emergency", source="deadman", event_id="d1",
+                    replay=True, webpush_fn=lambda **_: None, telegram_fn=lambda _t: True)
+    assert r["channels"] == [] and r["telegram"] is None
+
+
+def test_interrupted_delivery_is_retryable(monkeypatch):
+    # Simulate a crash after record() but before the sinks ran: the row
+    # carries PENDING (None) outcomes, not "delivered".
+    def crash(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(push, "_push_all", crash)
+    with pytest.raises(KeyboardInterrupt):
+        push.notify(body="x", level="error", source="host", event_id="i1",
+                    telegram_fn=lambda _t: True)
+    row = push.read_notifications()[-1]
+    assert row["delivered"]["push"] is None and row["delivered"]["telegram"] is None
+    monkeypatch.setattr(push, "_push_all", lambda *a, **k: {"sent": 1, "failed": 0, "dropped": 0})
+    r = push.notify(body="x", level="error", source="host", event_id="i1",
+                    telegram_fn=lambda _t: True)
+    assert r["new"] is False and sorted(r["channels"]) == ["push", "telegram"]
+    assert push.read_notifications()[-1]["delivered"] == {"push": True, "telegram": True}
