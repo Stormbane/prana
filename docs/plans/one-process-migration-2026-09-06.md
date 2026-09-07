@@ -197,24 +197,38 @@ rechecks → approve; steps 2-4: 3 findings → approve). Commits from
   carry `disabled_ok:true` and are correctly skipped (verified live, no
   false pages).
 
-**REMAINING — all disruptive to the live box; paused for Suti's timing
-(2026-09-07: box in active use, live voice on narada-body observed):**
-1. **Bounce Narada_Host onto the observer build.** The running host
-   (pid 15288, started 2026-09-06 23:24) predates the observer code; a
-   Stop/Start could not replace it cleanly and a hard kill would
-   interrupt live voice. Needs a quiet moment.
-2. **Per-job cutover** (pause-first): for each job, pause the Hermes
-   twin + drain, run the acceptance gate on the Windows task, enable it,
-   drop its `disabled_ok`. Low-disruption but should follow (1).
-3. **Two blocking observer drills:** (a) stop the Task Scheduler service
-   with the host up → host pages deadman-staleness (system-wide, ~min);
-   (b) Scheduler-dead-at-boot → Startup shortcut brings the host up and
-   it pages (needs a reboot/logoff — disruptive).
-4. **Retire Hermes** (step 6): `agent-gateway` enabled=false, stop the
-   gateway, verified rollback dry-run, remove autostart.
+**EXECUTED 2026-09-07 (Suti: "bounce and recreate and retire Hermes"):**
+1. ✅ **Host bounced onto the observer build.** Old host (pid 15288)
+   hard-killed (it held the lock outside the task tree); fresh host on
+   the observer build; both beacons verified fresh (host.heartbeat +
+   deadman.progress), observer loop live.
+2. ✅ **Cutover.** `agent-gateway` set `enabled=false` in
+   `components.yaml`; the three Windows tasks armed (Ready); live
+   `job-watch.json` updated to watch all six (disabled_ok dropped).
+   Acceptance: `Narada_Figures` triggered end-to-end — run-hidden.vbs →
+   cron_run.py (per-job log written) → tick launched the detached gen,
+   exit 0. check-in/debrief share the identical mechanism and fire
+   naturally at 18:00/18:30, backstopped by job-watch.
+3. ✅ **Live-cutover finding fixed:** freshly-armed tasks report
+   LastTaskResult 267011 (SCHED_S_TASK_HAS_NOT_RUN); job-watch now
+   treats never-run-with-a-future-NextRunTime as ok (was false-paging).
+4. ✅ **Hermes retired.** Second bounce applied the components.yaml
+   disable — the gateway process is GONE and not respawned; all five
+   probed components healthy (200); cron tasks survived. `hermes-spike`
+   stays on disk; the rollback snapshot is in `docs/archive/`.
 
-The intermediate state is clean: Hermes still runs all three jobs; the
-Windows tasks are inert; the observer is coded but dormant. Fully
-reversible by unregistering the three disabled tasks.
+**Remaining drills (confirmation, non-blocking now that Hermes is
+retired per Suti's direction):**
+- Observer stale-drill (a): deadman disabled + beacon staled → confirm
+  the host pages deadman-staleness (in progress at write time).
+- Boot-drill (b): a reboot with Task Scheduler unavailable → the
+  Startup-folder shortcut brings the host up and it pages. Needs a
+  reboot; Suti to trigger at leisure — the dual-bootstrap shortcut is
+  installed and its command verified.
+
+**Rollback if ever needed:** re-enable `agent-gateway` in
+`components.yaml` + bounce (restores Hermes from its live store, which
+still holds the job definitions), and disable the three Windows tasks.
+Full definitions also archived in `docs/archive/hermes-2026-09-07/`.
 
 ## Step 5 (one-process) — cognition convergence: tracked in its own plans
