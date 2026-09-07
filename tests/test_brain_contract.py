@@ -25,6 +25,7 @@ class FakeBackend:
                  max_tool_iterations, cwd, resume=None,
                  chunks=("Hello ", "from Narada"), delay=0.0):
         self.mcp_servers = mcp_servers
+        self.model = model
         self.resume = resume
         self.chunks = list(chunks)
         self.delay = delay
@@ -465,3 +466,58 @@ def test_cancel_idle_session_false(brain):
     resp = client.post("/v1/narada/sessions/s5/cancel",
                        headers={"Authorization": "Bearer tok-prana"})
     assert resp.json() == {"cancelled": False}
+
+
+# ── model pinning (plan §T2) ────────────────────────────────────────────
+
+
+def test_model_pins_on_first_turn_and_persists(brain):
+    client, config = brain
+    r = _post(client, model="opus", narada={"session_id": "s-pin"})
+    assert r.status_code == 200
+    assert FakeBackend.instances[-1].model == "opus"
+    assert r.json()["model"] == "opus"
+    assert (config.sessions_root / "prana" / "s-pin" / "model").read_text() == "opus"
+    # Omitting the model on a later turn resolves to the pin (the
+    # helper's default body names sonnet, so drop it explicitly).
+    r2 = _post(client, model=None, narada={"session_id": "s-pin"})
+    assert r2.status_code == 200
+    assert r2.json()["model"] == "opus"
+
+
+def test_conflicting_model_is_refused_before_any_turn(brain):
+    client, _ = brain
+    _post(client, model="sonnet", narada={"session_id": "s-conf"})
+    r = _post(client, model="haiku", narada={"session_id": "s-conf"})
+    assert r.status_code == 400
+    assert "pinned to sonnet" in r.json()["error"]["message"]
+    assert "new chat" in r.json()["error"]["message"]
+
+
+def test_unknown_model_is_400(brain):
+    client, _ = brain
+    r = _post(client, model="gpt-9", narada={"session_id": "s-bad"})
+    assert r.status_code == 400
+
+
+def test_pin_survives_restart(brain):
+    client, config = brain
+    _post(client, model="haiku", narada={"session_id": "s-again"})
+    # A brand-new server over the same sessions_root — the restart case
+    # (and the post-reap recreation case: no warm session, only files).
+    fresh = create_app(config, FakeBackend)
+    with TestClient(fresh) as client2:
+        r = _post(client2, model=None, narada={"session_id": "s-again"})
+        assert r.status_code == 200
+        assert r.json()["model"] == "haiku"
+        assert FakeBackend.instances[-1].model == "haiku"
+        # And a conflicting request against the recreated session still refuses.
+        r = _post(client2, model="opus", narada={"session_id": "s-again"})
+        assert r.status_code == 400
+
+
+def test_models_endpoint_lists_the_allowlist(brain):
+    client, _ = brain
+    r = client.get("/v1/models", headers={"Authorization": "Bearer tok-prana"})
+    ids = [m["id"] for m in r.json()["data"]]
+    assert ids == ["sonnet", "opus", "haiku"]

@@ -50,6 +50,13 @@ TIER_SERVERS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Models a client may pin a session to (plan §T2). Short names the
+# claude-agent-sdk resolves; the picker shows exactly these.
+MODELS: tuple[str, ...] = ("sonnet", "opus", "haiku")
+# Wall-clock turn bound per model — opus thinks longer.
+MODEL_DEADLINES_S: dict[str, float] = {"opus": 480.0}
+
+
 @dataclass
 class BrainConfig:
     host: str = os.environ.get("NARADA_BRAIN_HOST", "127.0.0.1")
@@ -112,3 +119,6 @@ class BrainConfig:
 
     def system_append(self) -> str:
         return self.wake_context.read_text(encoding="utf-8", errors="replace")
+
+    def deadline_for(self, model: str) -> float:
+        return MODEL_DEADLINES_S.get(model, self.turn_deadline_s)

@@ -25,8 +25,9 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from prana.brain.config import BrainConfig
+from prana.brain.config import MODELS, BrainConfig
 from prana.brain.session import (
+    ModelConflict,
     BrainSession,
     SessionBusy,
     SessionPool,
@@ -329,8 +330,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
     async def models(tier: str = Depends(require_tier)) -> dict:
         return {
             "object": "list",
-            "data": [{"id": config.model, "object": "model",
-                      "created": 0, "owned_by": "narada"}],
+            "data": [{"id": m, "object": "model", "created": 0,
+                      "owned_by": "narada",
+                      "default": m == config.model} for m in MODELS],
         }
 
     # ── Phone-app voice (spec: the one prana-side proxy) ─────────────
@@ -670,9 +672,21 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
 
         if not valid_session_id(str(session_id)):
             return _openai_error(400, "invalid narada.session_id")
+        requested_model = body.get("model")
+        if requested_model is not None and requested_model not in MODELS:
+            return _openai_error(
+                400, f"model must be one of {', '.join(MODELS)}")
         # The pool namespaces by the authenticated tier: one credential
-        # can never open another credential's session (spec §1a).
-        session = await pool.get_or_create(str(session_id), tier)
+        # can never open another credential's session (spec §1a). The
+        # model pins on first creation; a conflicting request is
+        # refused before any turn is accepted (plan §T2). 400, not 409:
+        # the client treats 409 as "busy, retry", and this is not that.
+        try:
+            session = await pool.get_or_create(
+                str(session_id), tier, requested_model)
+        except ModelConflict as exc:
+            return _openai_error(
+                400, f"{exc} — start a new chat to use {exc.requested}")
 
         # Fingerprint binds the images too — same id + different image
         # must 422 like different text (spec §1a state machine).
@@ -683,7 +697,7 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             fp_payload += "|" + "|".join(
                 _hashlib.sha256(i["data"].encode("utf-8")).hexdigest()
                 for i in images)
-        fp = fingerprint(session.session_id, config.model, fp_payload)
+        fp = fingerprint(session.session_id, session.model, fp_payload)
         if request_id is not None:
             request_id = str(request_id)
             record = session.turns.get(request_id)
@@ -695,7 +709,7 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                     return _openai_error(
                         409, "turn with this request_id is in flight",
                         "server_error", headers={"Retry-After": "5"})
-                return _replay(record, completion_id, stream)
+                return _replay(record, completion_id, stream, session.model)
 
         # Reserve + accept in one event-loop tick (no await between the
         # record check above and here) — atomic w.r.t. every other
@@ -714,7 +728,8 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             run = TurnRun()
             run.task = asyncio.create_task(_execute_turn(
                 run, session, pool, _content_blocks(prompt, images),
-                transcript_text, request_id, config.turn_deadline_s))
+                transcript_text, request_id,
+                config.deadline_for(session.model)))
         except BaseException:
             # If durable acceptance (or task creation) fails, the
             # reservation must not outlive it — a leaked reservation
@@ -724,52 +739,48 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
 
         if stream:
             return StreamingResponse(
-                _tap_stream(run, completion_id),
+                _tap_stream(run, completion_id, session.model),
                 media_type="text/event-stream")
         await run.task
         if run.state == "completed":
             return JSONResponse(
-                _completion_body(config.model, run.text, completion_id))
+                _completion_body(session.model, run.text, completion_id))
         return _openai_error(
             500, f"turn {run.state}: {run.error or ''}".strip(),
             "server_error")
 
-    async def _tap_stream(run: TurnRun, completion_id: str):
+    async def _tap_stream(run: TurnRun, completion_id: str, model: str):
         """Stream the turn's events. If the reader disconnects, this
         generator dies but the turn task keeps running to a terminal,
         persisted state — disconnect ≠ cancel."""
-        yield _chunk(config.model, completion_id, {"role": "assistant"})
+        yield _chunk(model, completion_id, {"role": "assistant"})
         while True:
             event = await run.queue.get()
             if event[0] == "delta":
-                yield _chunk(config.model, completion_id,
-                             {"content": event[1]})
+                yield _chunk(model, completion_id, {"content": event[1]})
                 continue
             _, state, detail = event
             if state == "completed":
-                yield _chunk(config.model, completion_id, {}, finish="stop")
+                yield _chunk(model, completion_id, {}, finish="stop")
             else:
                 yield _stream_error(f"turn {state}: {detail}")
             yield "data: [DONE]\n\n"
             return
 
-    def _replay(record, completion_id: str, stream: bool):
+    def _replay(record, completion_id: str, stream: bool, model: str):
         """Return a recorded terminal outcome verbatim (spec §1a)."""
         if record.state == "completed":
             if stream:
                 async def _replay_stream():
-                    yield _chunk(config.model, completion_id,
-                                 {"role": "assistant"})
-                    yield _chunk(config.model, completion_id,
+                    yield _chunk(model, completion_id, {"role": "assistant"})
+                    yield _chunk(model, completion_id,
                                  {"content": record.result or ""})
-                    yield _chunk(config.model, completion_id, {},
-                                 finish="stop")
+                    yield _chunk(model, completion_id, {}, finish="stop")
                     yield "data: [DONE]\n\n"
                 return StreamingResponse(_replay_stream(),
                                          media_type="text/event-stream")
             return JSONResponse(
-                _completion_body(config.model, record.result or "",
-                                 completion_id))
+                _completion_body(model, record.result or "", completion_id))
         # failed / cancelled / interrupted: report the recorded state
         # explicitly; the client must send a NEW request_id to rerun.
         return _openai_error(

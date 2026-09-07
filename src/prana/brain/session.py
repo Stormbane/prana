@@ -34,6 +34,17 @@ class SessionBusy(Exception):
     """A second turn arrived while one is active (contract: 409)."""
 
 
+class ModelConflict(Exception):
+    """A request named a model other than the one this session is
+    pinned to (plan §T2): a session's model never flips mid-life — the
+    client starts a new chat for a new model, exactly like ChatGPT."""
+
+    def __init__(self, pinned: str, requested: str):
+        super().__init__(f"session is pinned to {pinned}, not {requested}")
+        self.pinned = pinned
+        self.requested = requested
+
+
 def valid_session_id(session_id: str) -> bool:
     return bool(_SESSION_ID_RE.match(session_id))
 
@@ -46,9 +57,10 @@ class TurnOutcome:
 
 class BrainSession:
     def __init__(self, session_id: str, tier: str, backend, store: TurnStore,
-                 session_dir: Path):
+                 session_dir: Path, model: str = ""):
         self.session_id = session_id
         self.tier = tier
+        self.model = model
         self.backend = backend
         self.turns = store
         self.session_dir = session_dir
@@ -166,15 +178,25 @@ class SessionPool:
         allowed = TIER_SERVERS.get(tier, ())
         return {k: v for k, v in self._mcp_servers.items() if k in allowed}
 
-    async def get_or_create(self, session_id: str, tier: str) -> BrainSession:
+    async def get_or_create(self, session_id: str, tier: str,
+                            model: str | None = None) -> BrainSession:
         """`session_id` is the client-chosen name; the pool key and the
         on-disk location are both namespaced by the authenticated tier
         (subdirectory, not `tier:` prefix — `:` is invalid in Windows
-        dirnames), so one credential can never open another's session."""
+        dirnames), so one credential can never open another's session.
+
+        `model` (plan §T2, durable pin): honoured on the session's FIRST
+        creation and persisted beside native-session-id; every later
+        creation — warm reuse, post-reap recreation, restart — reads the
+        pin. A request naming a different model raises ModelConflict
+        before any turn is accepted. Sessions from before pinning adopt
+        the configured default on first touch."""
         key = f"{tier}:{session_id}"
         async with self._create_lock:
             existing = self._sessions.get(key)
             if existing is not None:
+                if model is not None and model != existing.model:
+                    raise ModelConflict(existing.model, model)
                 return existing
 
             session_dir = self._config.sessions_root / tier / session_id
@@ -184,8 +206,17 @@ class SessionPool:
             if native_file.exists():
                 resume = native_file.read_text(encoding="utf-8").strip() or None
 
+            model_file = session_dir / "model"
+            pinned = (model_file.read_text(encoding="utf-8").strip() or None
+                      if model_file.exists() else None)
+            if pinned is not None and model is not None and model != pinned:
+                raise ModelConflict(pinned, model)
+            resolved = pinned or model or self._config.model
+            if pinned is None:
+                model_file.write_text(resolved, encoding="utf-8")
+
             backend = self._factory(
-                model=self._config.model,
+                model=resolved,
                 system_append=self._config.system_append(),
                 mcp_servers=self._tier_mcp(tier),
                 max_tool_iterations=self._config.max_tool_iterations,
@@ -196,11 +227,12 @@ class SessionPool:
             store = TurnStore(
                 session_dir / "turns.json", window=self._config.idempotency_window
             )
-            session = BrainSession(key, tier, backend, store, session_dir)
+            session = BrainSession(key, tier, backend, store, session_dir,
+                                   model=resolved)
             self._sessions[key] = session
             logger.info(
-                "session %s created (tier=%s, resume=%s)",
-                key, tier, bool(resume),
+                "session %s created (tier=%s, model=%s, resume=%s)",
+                key, tier, resolved, bool(resume),
             )
             return session
 
