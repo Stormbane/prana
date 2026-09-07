@@ -36,6 +36,9 @@ class TurnRecord:
     state: str = "accepted"  # accepted -> running -> terminal
     result: str | None = None  # final text (completed) or error detail
     created: float = field(default_factory=time.time)
+    # Auto-cards minted during the turn — replayed with the result so a
+    # disconnect-and-retry never loses them (cards review P2).
+    cards: list = field(default_factory=list)
 
 
 class TurnStore:
@@ -96,11 +99,14 @@ class TurnStore:
         self._flush()
         return rec
 
-    def transition(self, request_id: str, state: str, result: str | None = None) -> None:
+    def transition(self, request_id: str, state: str, result: str | None = None,
+                   cards: list | None = None) -> None:
         rec = self._records.get(request_id)
         if rec is None:
             return
         rec.state = state
         if result is not None:
             rec.result = result
+        if cards is not None:
+            rec.cards = list(cards)
         self._flush()

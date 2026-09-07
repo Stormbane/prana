@@ -91,7 +91,8 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
                 if isinstance(it, dict) and it.get("name"):
                     data[str(it["name"])] = _rng(it.get("calories_low"), it.get("calories_high"),
                                                  it.get("calories"), " kcal")
-            data.update({f"meal {k}": v for k, v in _totals_kv(res.get("totals")).items()})
+            data.update({f"meal {k}": v for k, v in
+                         _totals_kv(res.get("meal_totals") or res.get("totals")).items()})
             data.update({f"day {k}": v for k, v in _totals_kv(res.get("day_totals")).items()})
             label = res.get("label") or tool_input.get("label") or "meal"
             return {**base, "caption": f"Logged {label}", "data": data}
@@ -104,10 +105,14 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
                 data["protein to go"] = _rng(None, None, rem.get("protein_g"), " g")
             return {**base, "caption": f"{res.get('day', 'Today')} so far", "data": data}
         if name == "get_recent":
+            # akhada nests averages: {all_days, logged_days_only}. The
+            # logged-days figure is the honest one on a fast/refeed
+            # rhythm (an unlogged day is not a zero-calorie day).
             av = res.get("averages") or {}
+            grp = av.get("logged_days_only") or av.get("all_days") or av
             data = {
-                "avg calories": _rng(None, None, av.get("calories"), " kcal"),
-                "avg protein": _rng(None, None, av.get("protein_g"), " g"),
+                "avg calories (logged days)": _rng(None, None, grp.get("calories"), " kcal"),
+                "avg protein (logged days)": _rng(None, None, grp.get("protein_g"), " g"),
                 "days logged": str(sum(1 for d in (res.get("days") or []) if d.get("logged"))),
             }
             return {**base, "caption": f"{res.get('start', '')} → {res.get('end', '')}".strip(" →"),

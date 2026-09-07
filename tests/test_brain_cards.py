@@ -19,13 +19,18 @@ def test_interesting_matches_bare_and_prefixed_names():
 
 
 def test_meal_card_from_log_meal_result():
-    res = {"ok": True, "label": "lunch",
-           "items": [{"name": "chicken", "calories": 300, "calories_low": 250, "calories_high": 350}],
-           "totals": {"calories": 300, "protein_g": 40},
+    # akhada's REAL write result: item_ids + meal_totals/day_totals; the
+    # items and label live in the tool INPUT.
+    res = {"ok": True, "meal_id": 7, "item_ids": [1], "day": "2026-09-08",
+           "meal_totals": {"calories": 300, "protein_g": 40},
            "day_totals": {"calories": 1200, "protein_g": 90}}
-    spec = card_for("mcp__akhada__log_meal", {"label": "lunch"}, json.dumps(res))
+    tool_input = {"label": "lunch",
+                  "items": [{"name": "chicken", "calories": 300,
+                             "calories_low": 250, "calories_high": 350}]}
+    spec = card_for("mcp__akhada__log_meal", tool_input, json.dumps(res))
     assert spec["kind"] == "kv" and spec["caption"] == "Logged lunch"
     assert spec["data"]["chicken"] == "250–350 kcal"
+    assert spec["data"]["meal calories"] == "300 kcal"
     assert spec["data"]["day calories"] == "1200 kcal"
     assert spec["v"] == 1 and spec["card_id"].startswith("auto-")
 
@@ -38,8 +43,11 @@ def test_summary_and_recent_cards():
     assert day["data"]["protein to go"] == "140 g"
     week = card_for("get_recent", {"days": 7}, json.dumps({
         "ok": True, "start": "2026-09-01", "end": "2026-09-07",
-        "averages": {"calories": 1800.4, "protein_g": 120}, "days": [{"logged": True}, {"logged": False}]}))
-    assert week["data"]["days logged"] == "1" and week["data"]["avg calories"] == "1800 kcal"
+        "averages": {"all_days": {"calories": 900, "protein_g": 60},
+                     "logged_days_only": {"calories": 1800.4, "protein_g": 120}},
+        "days": [{"logged": True}, {"logged": False}]}))
+    assert week["data"]["days logged"] == "1"
+    assert week["data"]["avg calories (logged days)"] == "1800 kcal"
 
 
 def test_uninteresting_or_failed_results_mint_nothing():
@@ -111,3 +119,17 @@ def test_non_stream_body_lists_cards(client):
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "Logging done."
     assert r.json()["narada_cards"][0]["caption"] == "Logged lunch"
+
+
+def test_replay_of_the_same_request_id_carries_the_cards(client):
+    h = {"Authorization": "Bearer tok-app"}
+    first = client.post("/v1/chat/completions", json=_body(stream=False), headers=h)
+    assert first.json()["narada_cards"][0]["card_id"] == "auto-1"
+    # Same request_id again: replay-not-rerun, cards included, ids preserved.
+    again = client.post("/v1/chat/completions", json=_body(stream=False), headers=h)
+    assert again.status_code == 200
+    assert again.json()["narada_cards"] == first.json()["narada_cards"]
+    with client.stream("POST", "/v1/chat/completions", json=_body(stream=True), headers=h) as r:
+        events = [json.loads(line[6:]) for line in r.iter_lines()
+                  if line.startswith("data: ") and line != "data: [DONE]"]
+    assert [e["narada_card"]["card_id"] for e in events if "narada_card" in e] == ["auto-1"]

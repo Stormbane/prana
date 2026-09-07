@@ -210,7 +210,7 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
         if state != "completed":
             run.error = result
         if request_id is not None:
-            session.turns.transition(request_id, state, result)
+            session.turns.transition(request_id, state, result, cards=run.cards)
         if state == "completed":
             session.append_transcript("assistant", result)
         else:
@@ -826,17 +826,22 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
     def _replay(record, completion_id: str, stream: bool, model: str):
         """Return a recorded terminal outcome verbatim (spec §1a)."""
         if record.state == "completed":
+            cards = list(getattr(record, "cards", []) or [])
             if stream:
                 async def _replay_stream():
                     yield _chunk(model, completion_id, {"role": "assistant"})
+                    for spec in cards:
+                        yield _chunk(model, completion_id, {}, card=spec)
                     yield _chunk(model, completion_id,
                                  {"content": record.result or ""})
                     yield _chunk(model, completion_id, {}, finish="stop")
                     yield "data: [DONE]\n\n"
                 return StreamingResponse(_replay_stream(),
                                          media_type="text/event-stream")
-            return JSONResponse(
-                _completion_body(model, record.result or "", completion_id))
+            body_out = _completion_body(model, record.result or "", completion_id)
+            if cards:
+                body_out["narada_cards"] = cards
+            return JSONResponse(body_out)
         # failed / cancelled / interrupted: report the recorded state
         # explicitly; the client must send a NEW request_id to rerun.
         return _openai_error(
