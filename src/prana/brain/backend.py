@@ -81,11 +81,37 @@ class SdkBackend:
                     "session_id": "default",
                 }
             await self._client.query(_one_message())
+        from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage
+
+        from prana.brain.cards import CardEvent, card_for, interesting
+
+        # Auto-cards (plan §T4): the SDK streams every tool use and its
+        # result; an interesting akhada call becomes a card yielded in
+        # place, between the text it accompanies.
+        pending_tools: dict[str, tuple[str, dict]] = {}
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         yield block.text
+                    elif isinstance(block, ToolUseBlock) and interesting(block.name):
+                        pending_tools[block.id] = (block.name, dict(block.input or {}))
+            elif isinstance(msg, UserMessage):
+                content = msg.content if isinstance(msg.content, list) else []
+                for block in content:
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+                    use = pending_tools.pop(block.tool_use_id, None)
+                    if use is None:
+                        continue
+                    raw = block.content
+                    if isinstance(raw, list):
+                        raw = "".join(
+                            p.get("text", "") for p in raw
+                            if isinstance(p, dict) and p.get("type") == "text")
+                    spec = card_for(use[0], use[1], raw if isinstance(raw, str) else "")
+                    if spec is not None:
+                        yield CardEvent(spec)
             elif isinstance(msg, ResultMessage):
                 sid = getattr(msg, "session_id", None)
                 if sid:

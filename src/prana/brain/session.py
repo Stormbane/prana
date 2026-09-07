@@ -88,8 +88,8 @@ class BrainSession:
     async def run_turn(
         self, prompt, *, deadline_s: float,  # str | list[content-block]
         on_start: Callable[[], Awaitable[None]] | None = None,
-    ) -> AsyncIterator[str]:
-        """Yield assistant text. Caller must hold the reservation
+    ) -> AsyncIterator[object]:
+        """Yield assistant text chunks (str) and CardEvents. Caller must hold the reservation
         (``reserve()``); the lock is the in-flight backstop.
 
         The wall-clock bound ends the turn with an EXPLICIT error (the

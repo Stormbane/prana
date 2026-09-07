@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from prana.brain.cards import CardEvent
 from prana.brain.config import MODELS, BrainConfig
 from prana.brain.session import (
     ModelConflict,
@@ -68,14 +69,16 @@ def _completion_body(model: str, text: str, completion_id: str) -> dict:
 
 
 def _chunk(model: str, completion_id: str, delta: dict,
-           finish: str | None = None) -> str:
-    payload = {
+           finish: str | None = None, card: dict | None = None) -> str:
+    payload: dict = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
     }
+    if card is not None:
+        payload["narada_card"] = card
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -181,6 +184,7 @@ class TurnRun:
         self.text: str = ""
         self.error: str | None = None
         self.task: asyncio.Task | None = None
+        self.cards: list[dict] = []
 
     def _emit(self, event: tuple) -> None:
         self.queue.put_nowait(event)
@@ -227,6 +231,10 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
             gen = session.run_turn(content, deadline_s=deadline_s,
                                    on_start=on_start)
             async for chunk in gen:
+                if isinstance(chunk, CardEvent):
+                    run.cards.append(chunk.spec)
+                    run._emit(("card", chunk.spec))
+                    continue
                 parts.append(chunk)
                 run._emit(("delta", chunk))
         finally:
@@ -784,8 +792,10 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 media_type="text/event-stream")
         await run.task
         if run.state == "completed":
-            return JSONResponse(
-                _completion_body(session.model, run.text, completion_id))
+            body_out = _completion_body(session.model, run.text, completion_id)
+            if run.cards:
+                body_out["narada_cards"] = run.cards
+            return JSONResponse(body_out)
         return _openai_error(
             500, f"turn {run.state}: {run.error or ''}".strip(),
             "server_error")
@@ -799,6 +809,11 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             event = await run.queue.get()
             if event[0] == "delta":
                 yield _chunk(model, completion_id, {"content": event[1]})
+                continue
+            if event[0] == "card":
+                # An extension field on an otherwise-empty delta chunk:
+                # baseline OpenAI clients ignore it, ours renders it.
+                yield _chunk(model, completion_id, {}, card=event[1])
                 continue
             _, state, detail = event
             if state == "completed":
