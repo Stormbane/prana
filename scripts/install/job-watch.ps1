@@ -167,6 +167,17 @@ foreach ($job in $config.jobs) {
     $check = if ($job.check) { [string]$job.check } else { "result+overdue" }
     $watchResult = ($check -ne "overdue-only")
 
+    # A DISABLED task is intentionally off (e.g. a cron task registered
+    # but not yet cut over) — not a failure. Skip it and clear any latch,
+    # so the config can list tasks before they are armed without
+    # false-paging them as overdue.
+    $task = $null
+    try { $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop } catch {}
+    if ($null -ne $task -and $task.State -eq 'Disabled') {
+        Write-JobLog "$name disabled - skipping"
+        continue  # not carried into $newState = latch cleared
+    }
+
     # Query the Windows scheduled task. Absence is itself a finding: a
     # watched job that has vanished from the scheduler is not "healthy."
     $info = $null

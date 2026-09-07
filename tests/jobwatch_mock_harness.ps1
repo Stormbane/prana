@@ -20,6 +20,14 @@ param(
 $global:mockPageFail = [bool]$PageFail
 $global:mockTasks = $TasksJson | ConvertFrom-Json
 
+function global:Get-ScheduledTask {
+    param([string]$TaskName, $ErrorAction)
+    $t = $global:mockTasks.$TaskName
+    if ($null -eq $t -or $t -eq 'MISSING') { throw "mock: no task $TaskName" }
+    # A task entry may declare a State (e.g. 'Disabled'); default 'Ready'.
+    $st = if ($null -ne $t.State) { [string]$t.State } else { 'Ready' }
+    [pscustomobject]@{ TaskName = $TaskName; State = $st }
+}
 function global:Get-ScheduledTaskInfo {
     param([string]$TaskName, $ErrorAction)
     $t = $global:mockTasks.$TaskName

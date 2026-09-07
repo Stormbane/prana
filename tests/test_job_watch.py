@@ -236,6 +236,31 @@ def test_recovery_page_failure_retries(tmp_path):
     assert saved.get("smriti-nightly") == "result=1@123"  # retained
 
 
+def test_disabled_task_is_skipped(tmp_path):
+    # A cron task registered but not yet cut over is Disabled — that is
+    # intentional, not a failure. It must not page even though its last
+    # run is ancient / it has never run.
+    out, saved = _run(tmp_path,
+                      tasks={"Narada_Figures": {"LastTaskResult": 0,
+                                                "LastRunIso": _ago(500),
+                                                "State": "Disabled"}},
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15}])
+    assert "disabled - skipping" in out
+    assert "MOCK-PAGE" not in out
+    assert saved == {}
+
+
+def test_disabled_task_clears_prior_latch(tmp_path):
+    out, saved = _run(tmp_path,
+                      tasks={"Narada_Figures": {"LastTaskResult": 1,
+                                                "LastRunIso": _ago(2),
+                                                "State": "Disabled"}},
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15}],
+                      state={"Narada_Figures": "result=1@123"})
+    assert "disabled - skipping" in out
+    assert "Narada_Figures" not in saved  # latch cleared
+
+
 def test_multiple_jobs_independent(tmp_path):
     out, saved = _run(
         tmp_path,

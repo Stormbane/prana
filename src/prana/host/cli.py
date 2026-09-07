@@ -139,6 +139,24 @@ def _cmd_install_deadman(args: argparse.Namespace) -> int:
     return _run_powershell(script, *ps_args)
 
 
+def _cmd_install_cron(args: argparse.Namespace) -> int:
+    """Register the three Narada cron jobs as Windows tasks (disabled)."""
+    if sys.platform != "win32":
+        sys.stderr.write("FATAL: install-cron is currently Windows-only.\n")
+        return 5
+    script = _resolve_install_script("install-cron-tasks.ps1")
+    ps_args: list[str] = []
+    if args.force:
+        ps_args.append("-Force")
+    if args.enable:
+        ps_args.append("-Enable")
+    if args.uninstall:
+        ps_args.append("-Uninstall")
+    if args.dry_run:
+        ps_args.append("-DryRun")
+    return _run_powershell(script, *ps_args)
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     """Report state of the running orchestrator + its components."""
     setup_logging(verbose=False)
@@ -201,6 +219,16 @@ def main() -> int:
     deadman.add_argument("--uninstall", action="store_true", help="Remove the deadman task.")
     deadman.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything.")
     deadman.set_defaults(func=_cmd_install_deadman)
+
+    cron = sub.add_parser(
+        "install-cron",
+        help="Register the Narada cron jobs (figures/check-in/debrief) as Windows tasks, disabled until cutover.")
+    cron.add_argument("--force", action="store_true", help="Re-register even if tasks exist.")
+    cron.add_argument("--enable", action="store_true",
+                      help="Arm the tasks (only after the per-job pause-first cutover).")
+    cron.add_argument("--uninstall", action="store_true", help="Remove all three cron tasks.")
+    cron.add_argument("--dry-run", action="store_true", help="Show what would happen without changing anything.")
+    cron.set_defaults(func=_cmd_install_cron)
 
     args = parser.parse_args()
     return args.func(args)
