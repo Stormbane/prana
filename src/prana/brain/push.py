@@ -236,6 +236,20 @@ def _parse_ts(iso: str) -> float:
         return 0.0
 
 
+def _mark_delivered(row_id: str, outcomes: dict[str, bool]) -> None:
+    """Persist per-channel delivery outcomes on a row, so a later retry
+    of the same event attempts only what failed (review P2)."""
+    with _LOCK:
+        data = _load_feed()
+        for r in data["rows"]:
+            if r.get("id") == row_id:
+                delivered = dict(r.get("delivered", {}))
+                delivered.update(outcomes)
+                r["delivered"] = delivered
+                break
+        _save_feed(data)
+
+
 def record(*, level: str, source: str, title: str, body: str,
            category: str | None = None, url: str = DEFAULT_URL,
            event_id: str | None = None) -> tuple[dict, bool, bool]:
@@ -276,6 +290,10 @@ def record(*, level: str, source: str, title: str, body: str,
                         escalated = True
                     if event_id:
                         open_row["event_id"] = event_id
+                    # Latest activity last: the feed and the retention
+                    # cap both read insertion order (review P2).
+                    rows.remove(open_row)
+                    rows.append(open_row)
                     row = open_row
         if row is None:
             row = {
@@ -364,21 +382,45 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
         category=category, url=url, event_id=event_id)
     result: dict = {"row": row, "new": is_new, "escalated": escalated,
                     "channels": [], "push": None, "telegram": None}
+    already = dict(row.get("delivered", {}))
     if not is_new:
-        return result  # idempotent replay of a known event
-    channels = [c for c in route(row.get("level", level))
-                if c not in set(delivered_channels)]
-    if replay:
-        channels = [c for c in channels if c == "badge"]
-    # A repeat inside an open episode only pages again if it escalated.
-    if int(row.get("count", 1)) > 1 and not escalated:
-        channels = [c for c in channels if c == "badge"]
+        # A known event: no new row, no count bump — but any channel
+        # that FAILED last time is retried (review P2). Fully delivered
+        # events are a no-op.
+        channels = [c for c in route(row.get("level", level))
+                    if c in ("push", "telegram") and already.get(c) is False
+                    and c not in set(delivered_channels)]
+    else:
+        channels = [c for c in route(row.get("level", level))
+                    if c not in set(delivered_channels)]
+        if replay:
+            channels = [c for c in channels if c == "badge"]
+        # A repeat inside an open episode only pages again if it escalated.
+        if int(row.get("count", 1)) > 1 and not escalated:
+            channels = [c for c in channels if c == "badge"]
     result["channels"] = channels
+    outcomes: dict[str, bool] = {}
+    # Each channel fails ALONE (review P1): a push subsystem that cannot
+    # even initialise must never take Telegram down with it.
     if "push" in channels:
-        result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn)
+        try:
+            result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn)
+            outcomes["push"] = int(result["push"].get("failed", 0)) == 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("push subsystem failed: %s", exc)
+            result["push"] = {"sent": 0, "failed": 1, "dropped": 0, "error": str(exc)[:200]}
+            outcomes["push"] = False
     if "telegram" in channels:
-        result["telegram"] = _telegram(f"{title}: {body}" if title != "Narada" else body,
-                                       telegram_fn)
+        try:
+            result["telegram"] = _telegram(
+                f"{title}: {body}" if title != "Narada" else body, telegram_fn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram sink failed: %s", exc)
+            result["telegram"] = False
+        outcomes["telegram"] = bool(result["telegram"])
+    if outcomes and row.get("id"):
+        _mark_delivered(row["id"], outcomes)
+        row["delivered"] = {**already, **outcomes}
     return result
 
 

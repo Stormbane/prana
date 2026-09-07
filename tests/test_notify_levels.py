@@ -131,3 +131,46 @@ def test_notify_door_is_prana_tier_and_validates(client):
     assert "push" in r.json()["channels"]
     feed = client.get("/api/notifications", headers={"Authorization": "Bearer tok-app"}).json()
     assert feed[-1]["level"] == "error" and feed[-1]["source"] == "job-watch/smriti-nightly"
+
+
+# ── review fixes ────────────────────────────────────────────────────────
+
+
+def test_push_subsystem_failure_does_not_block_telegram():
+    def boom(**_):
+        raise RuntimeError("no pywebpush here")
+    r = push.notify(body="down", level="error", source="host",
+                    webpush_fn=boom, telegram_fn=lambda _t: True)
+    # webpush_fn is called per subscription; with none, force the init path:
+    r = push.notify(body="down again", level="error", source="host", event_id="e-x",
+                    webpush_fn=boom, telegram_fn=lambda _t: True)
+    assert r["telegram"] is True
+
+
+def test_failed_channel_is_retried_without_recount(monkeypatch):
+    calls = {"tg": 0}
+
+    def flaky(_t):
+        calls["tg"] += 1
+        return calls["tg"] > 1  # first attempt fails
+
+    r1 = push.notify(body="pager", level="error", source="host", category="x/y",
+                     event_id="e-retry", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    assert r1["telegram"] is False and r1["row"]["delivered"]["telegram"] is False
+    r2 = push.notify(body="pager", level="error", source="host", category="x/y",
+                     event_id="e-retry", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    assert r2["new"] is False and r2["channels"] == ["telegram"] and r2["telegram"] is True
+    rows = push.read_notifications()
+    assert len(rows) == 1 and rows[0]["count"] == 1
+    r3 = push.notify(body="pager", level="error", source="host", category="x/y",
+                     event_id="e-retry", webpush_fn=lambda **_: None, telegram_fn=flaky)
+    assert r3["channels"] == []  # fully delivered: true no-op
+
+
+def test_folded_episode_moves_to_the_end():
+    _notify(body="a", level="warn", source="host", category="ep/a")
+    _notify(body="b", level="warn", source="host", category="ep/b")
+    _notify(body="a again", level="warn", source="host", category="ep/a")
+    rows = push.read_notifications()
+    assert [r["category"] for r in rows] == ["ep/b", "ep/a"]
+    assert rows[-1]["count"] == 2

@@ -43,6 +43,7 @@ dependencies = [
     # Brain server (default-enabled host component — base deps, same
     # rationale as psutil above)
     "fastapi>=0.115",
+    "pywebpush>=2.0",  # brain Web Push (notification levels, plan T7)
     "uvicorn>=0.34",
     "claude-agent-sdk>=0.2",
     # <2: torch/scipy in this env are compiled against numpy 1.x; numpy 2
