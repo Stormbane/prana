@@ -199,3 +199,32 @@ def test_prefs_validation(prefs_client):
     assert client.post("/api/voice/prefs", headers=headers,
                        json={"language": "english"}).status_code == 400
     assert client.post("/api/voice/prefs", json={}).status_code == 401
+
+
+# ── fitness endpoints (Data tab) ────────────────────────────────────────
+
+
+def test_fitness_action_allowlist(prefs_client):
+    client, _ = prefs_client
+    headers = {"Authorization": "Bearer tok-app"}
+    # Only correction verbs pass the gate; logging rides the chat agent.
+    res = client.post("/api/fitness/action", headers=headers,
+                      json={"tool": "log_meal", "args": {}})
+    assert res.status_code == 403
+    res = client.post("/api/fitness/action", headers=headers,
+                      json={"tool": "void_entry"})
+    assert res.status_code == 400  # missing args
+    assert client.post("/api/fitness/action",
+                       json={"tool": "void_entry", "args": {}}
+                       ).status_code == 401
+
+
+def test_fitness_recent_validates_days(prefs_client):
+    client, _ = prefs_client
+    headers = {"Authorization": "Bearer tok-app"}
+    assert client.get("/api/fitness/recent?days=0",
+                      headers=headers).status_code == 400
+    assert client.get("/api/fitness/recent?days=90",
+                      headers=headers).status_code == 400
+    assert client.get("/api/fitness/summary?day=someday",
+                      headers=headers).status_code == 400

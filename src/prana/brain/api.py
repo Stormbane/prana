@@ -451,6 +451,57 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             logger.warning("fitness summary failed: %s", exc)
             raise HTTPException(502, f"summary failed: {exc}")
 
+    @app.get("/api/fitness/recent")
+    async def fitness_recent(days: int = 14,
+                             tier: str = Depends(require_tier)) -> dict:
+        """Per-day totals over the last N days — the Data tab's chart."""
+        if not 1 <= days <= 60:
+            raise HTTPException(400, "days must be 1–60")
+        try:
+            from akhada.store.db import Store
+            from akhada.tools.catalog import dispatch
+        except ImportError:
+            raise HTTPException(503, "akhada not installed on this host")
+        try:
+            return await asyncio.to_thread(
+                dispatch, "get_recent", {"days": days},
+                store=Store(), session_id="brain-data-tab", source="app")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fitness recent failed: %s", exc)
+            raise HTTPException(502, f"recent failed: {exc}")
+
+    # Mutations the Data tab may perform directly. A deliberate,
+    # narrow allowlist: corrections to what exists (amend, void,
+    # add-to-meal). Free-text logging goes through the chat agent —
+    # parsing food is cognition, not a REST call.
+    _FITNESS_ACTIONS = ("void_entry", "amend_entry", "add_meal_items")
+
+    @app.post("/api/fitness/action")
+    async def fitness_action(request: Request,
+                             tier: str = Depends(require_tier)) -> dict:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        tool = body.get("tool") if isinstance(body, dict) else None
+        args = body.get("args") if isinstance(body, dict) else None
+        if tool not in _FITNESS_ACTIONS:
+            raise HTTPException(403, f"tool must be one of {_FITNESS_ACTIONS}")
+        if not isinstance(args, dict):
+            raise HTTPException(400, "missing args")
+        try:
+            from akhada.store.db import Store
+            from akhada.tools.catalog import dispatch
+        except ImportError:
+            raise HTTPException(503, "akhada not installed on this host")
+        try:
+            return await asyncio.to_thread(
+                dispatch, tool, args,
+                store=Store(), session_id="app-data-tab", source="app")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fitness action %s failed: %s", tool, exc)
+            raise HTTPException(502, f"{tool} failed: {exc}")
+
     # ── Web Push (the app leg of notify-suti fan-out) ────────────────
     @app.get("/api/push/vapid-key")
     async def push_vapid_key(tier: str = Depends(require_tier)) -> dict:
