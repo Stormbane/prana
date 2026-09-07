@@ -40,3 +40,16 @@ def test_lists_projects_from_both_sources(tmp_path):
 
 def test_empty_home_is_empty_list():
     assert projects.list_projects() == []
+
+
+def test_current_milestone_prefers_active_then_open_work():
+    from prana.brain.projects import current_milestone
+
+    tagged = "## Milestone 0 [DONE]\n- [x] a\n## Milestone 3.5 [IN PROGRESS]\n- [ ] b\n## Later\n- [ ] c\n"
+    assert current_milestone(tagged) == "Milestone 3.5 [IN PROGRESS]"
+    untagged = "## Done things\n- [x] a\n- [x] b\n## Next up\n- [ ] c\n"
+    assert current_milestone(untagged) == "Next up"
+    stack = "## Nightly cycle — top of stack\n- [x] a\n## Other\n- [ ] z\n"
+    assert current_milestone(stack) == "Nightly cycle — top of stack"
+    assert current_milestone("## Only\n- [x] a\n") == "Only"
+    assert current_milestone("no headings") is None

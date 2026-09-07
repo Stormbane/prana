@@ -15,9 +15,29 @@ from pathlib import Path
 
 _OPEN = re.compile(r"^\s*- \[ \]", re.M)
 _DONE = re.compile(r"^\s*- \[x\]", re.M | re.I)
-_MILESTONE = re.compile(r"^## (.+)$", re.M)
 _TITLE = re.compile(r"^# (.+)$", re.M)
 _NOTE = re.compile(r"^(\d{2})-(\d{2})\.md$")
+_ACTIVE_TAG = re.compile(r"\[(in progress|active|current|now)\]|top of stack", re.I)
+
+
+def current_milestone(text: str) -> str | None:
+    """The ACTIVE section, not the first one (review P2: roadmaps keep
+    their finished milestones). Preference: a heading tagged
+    [IN PROGRESS]/[ACTIVE]/[CURRENT]/"top of stack"; else the first
+    section that still holds an open checkbox; else the first heading."""
+    parts = re.split(r"^(## .+)$", text, flags=re.M)
+    sections: list[tuple[str, str]] = []
+    for i in range(1, len(parts), 2):
+        sections.append((parts[i][3:].strip(), parts[i + 1] if i + 1 < len(parts) else ""))
+    if not sections:
+        return None
+    for heading, _body in sections:
+        if _ACTIVE_TAG.search(heading):
+            return heading
+    for heading, body in sections:
+        if _OPEN.search(body):
+            return heading
+    return sections[0][0]
 
 
 def _root() -> Path:
@@ -30,11 +50,10 @@ def _todo(name: str) -> dict:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {"todo_open": None, "todo_done": None, "milestone": None}
-    milestones = _MILESTONE.findall(text)
     return {
         "todo_open": len(_OPEN.findall(text)),
         "todo_done": len(_DONE.findall(text)),
-        "milestone": milestones[0].strip() if milestones else None,
+        "milestone": current_milestone(text),
     }
 
 
