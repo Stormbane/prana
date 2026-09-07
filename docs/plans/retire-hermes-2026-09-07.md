@@ -1,9 +1,10 @@
 # Retire Hermes — Windows Scheduler becomes the scheduler singleton
 
 **Date:** 2026-09-07 (revised after cross-review round 1)
-**Status:** PROPOSED — round 1 complete (needs-attention, 5 high + 1
-medium, ALL ACCEPTED and folded in below). Round-2 confirmation
-requested before execution.
+**Status:** CROSS-REVIEWED — rounds 1 (5 high + 1 medium) and 2 (3
+high) both needs-attention, ALL findings accepted and folded in; plan
+debate closed per protocol. Awaiting Suti's go/no-go before execution.
+Implementation, if approved, gets a diff review per protocol step 6.
 **Supersedes:** the one-process addendum's ruling that *Hermes* is the
 scheduler singleton (personal-agent-platform-2026-09-04.md, Addendum
 §"five small singletons", item 4). This plan makes **Windows Task
@@ -58,9 +59,10 @@ this is unsafe; the design below is the corrected one.
 
 ## Scheduler observer (round-1 finding 2 — prerequisite)
 
-The prana **host** is a long-running process: Task Scheduler launches it
-at logon, but once running its liveness does NOT depend on the Scheduler
-service. So the host is the natural scheduler-independent observer.
+The prana **host** is a long-running process: once running, its liveness
+does NOT depend on the Scheduler service. So a running host is the
+natural scheduler-independent observer — but *getting it running* must
+also not depend solely on Task Scheduler (round-2 finding 2).
 
 - The host gains a periodic check (in its existing event loop, alongside
   the heartbeat write) that **`Narada_Deadman` has run within the last
@@ -71,16 +73,34 @@ service. So the host is the natural scheduler-independent observer.
   is not firing."
 - This closes the loop into **mutual, cross-domain watching**: the
   deadman (a scheduled task) watches the host *process*; the host
-  *process* watches the deadman's *scheduling*. A single failure on
-  either side is now visible from the other. Both would have to fail
-  simultaneously to go silent.
-- **Pre-retirement drill (blocking):** stop the Task Scheduler service,
-  confirm the host detects deadman-staleness and pages, restart the
-  service. Hermes is not retired until this passes.
+  *process* watches the deadman's *scheduling*.
+- **Bootstrap independence (round-2 finding 2).** If Task Scheduler
+  fails to start after a reboot, it launches neither `Narada_Host` nor
+  `Narada_Deadman` — no on-box observer would exist. So the host is
+  **dual-bootstrapped**: the `Narada_Host` scheduled task AND a
+  Startup-folder shortcut (processed by Explorer at logon, a bootstrap
+  path independent of the Task Scheduler service). The host's existing
+  lockfile makes a double-launch idempotent (second instance exits). A
+  Scheduler-dead-at-boot therefore still brings the host up via the
+  Startup folder, and the running host then observes that the deadman /
+  Scheduler is not firing and pages.
+- **Blocking drills (both, before retiring Hermes):**
+  (a) *Scheduler-down while running* — stop the Task Scheduler service
+  with the host already up; confirm the host detects deadman-staleness
+  and pages.
+  (b) *Scheduler-dead at boot* — disable/break Task Scheduler autostart,
+  reboot (or log off/on), confirm the Startup-folder path brings the
+  host up and it pages that the scheduler is not firing.
+- **Out of scope (named):** if the whole box is off or wedged before
+  logon, nothing on-box can page. A truly external dead-man's-switch
+  (the box pings an off-box service every N min; that service pages on
+  silence) is the only cover for box-fully-down and is **deferred** —
+  it is independent of the Hermes question and belongs to its own plan.
 
-(The deadman writing `deadman.progress` and the host reading it is a
-small addition to already-live code; it is a prerequisite of this plan
-and lands + is diff-reviewed before any job is cut over.)
+(The deadman writing `deadman.progress`, the host reading it, and the
+Startup-folder dual-bootstrap are small additions to already-live code;
+they are a prerequisite of this plan and land + are diff-reviewed before
+any job is cut over.)
 
 ## Target design
 
@@ -95,7 +115,7 @@ task — round-1 next-step) rather than a cron expression:
 | `Narada_Akhada_Checkin` | 3 daily: 11:00, 18:00, 22:00 | `python prana/scripts/akhada_checkin_tick.py` | result+overdue | none |
 | `Narada_Daily_Debrief` | 1 daily: 18:30 | `python prana/scripts/daily_debrief.py` | result+overdue | none |
 
-\* moved into the prana repo first (see step 1); currently only in
+\* moved into the prana repo first (see step 2); currently only in
 `~/.hermes/scripts` + an AppData copy.
 
 **Timezone/DST (round-1 next-step):** the live Hermes cron runs in
@@ -173,33 +193,56 @@ that:
    redirect, and settings above.
 4. **Add the three tasks to job-watch** (template + live config), all
    result+overdue.
-5. **Per-task acceptance gate (blocking — round-1 finding 5).** For each
-   task, before its Hermes twin is paused, verify on the real task:
-   (a) a nonzero launcher exit propagates to `LastTaskResult` through the
-   vbs shim (deliberately break the script once); (b) job-watch pages on
-   that failure and on a simulated overdue; (c) a failed page retries;
-   (d) the `ExecutionTimeLimit` terminates a hung run; (e) a
-   missed-while-off run replays or skips per policy; (f) a normal run
-   produces the expected side effect exactly once.
-6. **Cutover per job, pause-first (round-1 finding 1):** pause the Hermes
-   job, drain any in-flight run, THEN enable the Windows task. Never both
-   active for the same occurrence. Watch one full day of real triggers.
-7. **Retire Hermes** only after all three are stable for a full cycle
-   AND the scheduler-observer drill (step 1) passed: set `agent-gateway`
+5. **Per-job cutover — pause-first, THEN accept, THEN enable (round-1
+   finding 1 + round-2 finding 1).** The single-owner rule applies to
+   the acceptance phase too: a production-side-effect test on the Windows
+   task while Hermes is still active would double-fire (daily-debrief
+   delivers on every invocation, no occurrence dedup). So per job, in
+   order:
+   (i) **pause the Hermes twin and drain** any in-flight run — the day's
+       production occurrence is now owned by exactly one scheduler;
+   (ii) **acceptance gate (blocking):** on the real Windows task —
+       (a) a nonzero launcher exit propagates to `LastTaskResult`
+       through the vbs shim (deliberately break the script once, writing
+       to an **isolated** output, not the production target);
+       (b) job-watch pages on that failure and on a simulated overdue;
+       (c) a failed page retries; (d) `ExecutionTimeLimit` terminates a
+       hung run; (e) a missed-while-off run replays or skips per policy;
+       (f) one **normal** run produces the expected side effect exactly
+       once (safe now — Hermes is paused, so this is the sole owner);
+   (iii) leave the Windows task enabled; watch one full day of real
+       triggers.
+   Injected-failure tests use isolated outputs; the one real production
+   occurrence is always assigned to a single scheduler.
+6. **Retire Hermes** only after all three are stable for a full cycle,
+   BOTH scheduler-observer drills (step 1) passed, AND a full
+   gateway-consumer inventory (not just the cron audit — enumerate any
+   other consumers, integrations, and autostart paths of the Hermes
+   gateway) confirms nothing else depends on it: set `agent-gateway`
    `enabled=false`, stop the gateway, and (after Suti's ok) remove the
    Hermes autostart. Verify the rollback restore from the step-0
    snapshot in a dry run BEFORE deleting the live Hermes store.
-8. **Heartbeat:** the paused `narada-heartbeat` definition is already in
+7. **Heartbeat:** the paused `narada-heartbeat` definition is already in
    the step-0 snapshot; that is its archive. Let the live store go with
    the rest.
 
-## Rollback
+## Rollback (single-owner in both branches — round-2 finding 3)
 
-Before step 7: pause the Windows task, re-enable the Hermes job
-(pause-first, reversed). After step 7: restore from the step-0 snapshot
-(`jobs.json` + scripts + `agent-gateway` block + autostart) — which is
-why cleanup is gated on a verified restore test, not merely on
-"hermes-spike stays on disk" (round-1 finding 4).
+Every rollback path must leave exactly one scheduler owning each
+occurrence — the same discipline as cutover.
+
+Before retirement (step 6): for the affected job(s), **disable the
+Windows trigger, drain any in-flight run, THEN re-enable the Hermes job**
+(pause-first, reversed). Never re-enable Hermes while the Windows task
+can still fire the same occurrence.
+
+After retirement: **first disable/unregister the three Windows tasks and
+drain in-flight work, THEN restore the step-0 snapshot with the Hermes
+jobs re-created INITIALLY PAUSED**, and resume only occurrences not
+already served that day (avoid a same-day double debrief/check-in).
+Snapshot availability alone is not sufficient — this ordered sequence
+is itself part of the restore acceptance test (step 0's snapshot is
+validated by dry-running exactly this restore before any cleanup).
 
 ## Deferred (named, out of scope for this cutover)
 
@@ -209,20 +252,24 @@ why cleanup is gated on a verified restore test, not merely on
   completion record; a watcher pages on a missing/failed completion.
 - **Automatic crash-retry for delivery jobs** — requires durable
   per-occurrence dedup (atomic cross-process claim) before it is safe.
+- **External dead-man's-switch** — the only cover for box-fully-down /
+  wedged-before-logon (the box pings an off-box service every N min;
+  that service pages on silence). Independent of the Hermes question;
+  its own plan.
 
 ## Round-1 cross-review (Codex gpt-6-astra, 2026-09-07)
 
 Verdict needs-attention; 5 high + 1 medium; ALL ACCEPTED:
 1. Enable-first double-fire on delivery jobs → **pause-first + drain**,
    no auto-retry for delivery jobs, dedup deferred. (§constraints,
-   §target, step 6)
+   §target, step 5)
 2. Observer shares the scheduler's failure domain → **host-side
    scheduler observer** reading a deadman progress file, + a
    Scheduler-stopped drill. (§Scheduler observer, step 1)
 3. Overdue-only hides figures launch failures → **result+overdue for
    all three**; detached-completion kept separate. (§target, §Deferred)
 4. Cleanup removes rollback artifacts → **step-0 full snapshot** +
-   verified restore test gating cleanup. (step 0, step 7, §Rollback)
+   verified restore test gating cleanup. (step 0, step 6, §Rollback)
 5. Dropped the addendum's failure-path gates → **blocking per-task
    acceptance** (nonzero propagation, timeout, missed-run, overdue
    detection, failed-page retry) before retiring Hermes. (step 5)
@@ -231,5 +278,35 @@ Verdict needs-attention; 5 high + 1 medium; ALL ACCEPTED:
 
 Next-steps also folded in: explicit multiple triggers (6/3/1);
 timezone/DST recorded (host TZ has no DST); gateway-consumer inventory
-before shutdown (step 7 / the audit is cron-only — a full consumer
-inventory is added to step 7's precondition).
+before shutdown (step 6 precondition — the audit is cron-only).
+
+## Round-2 cross-review (Codex gpt-6-astra, 2026-09-07)
+
+Verdict needs-attention; 3 high (all deeper applications of round-1's
+single-owner rule); ALL ACCEPTED. Round 1's logging, archive gates,
+retry removal, and figures result+overdue were confirmed adequate.
+1. Acceptance testing reintroduced the double-fire window (a
+   production-side-effect test ran before Hermes was paused) →
+   **pause-first now applies to the acceptance phase**: per job, pause +
+   drain the Hermes twin BEFORE any acceptance test; injected-failure
+   tests use isolated outputs; the one production occurrence is owned by
+   a single scheduler. (step 5, rewritten)
+2. Observer shared a **bootstrap** failure domain (Scheduler dead at
+   boot launches neither host nor deadman) → **dual-bootstrap the host**
+   (Task Scheduler + Startup-folder shortcut, idempotent via the host
+   lockfile) so a Scheduler-dead-at-boot still starts the observer; add
+   a second drill (Scheduler unavailable *before* host startup); the
+   box-fully-down case is named and deferred to an external
+   dead-man's-switch. (§Scheduler observer, §Deferred)
+3. Rollback didn't preserve single-owner (could restore two active
+   schedulers) → **both rollback branches disable Windows triggers +
+   drain first, restore Hermes INITIALLY PAUSED, resume only unserved
+   occurrences**, and this sequence is itself the restore acceptance
+   test. (§Rollback)
+
+**Plan debate closed here per the cross-review protocol** (round 1 +
+one further check). All findings across both rounds were accepted and
+folded in; none rejected. The plan ends at needs-attention with every
+finding addressed in the spec — the addressed items become the
+acceptance criteria verified at implementation-diff-review time. Ready
+for Suti's go / no-go on execution.
