@@ -151,3 +151,27 @@ def test_write_lock_atomic_is_exclusive(tmp_lockfile):
     assert tmp_lockfile.exists()
     # A second racer, file now present: exclusive create fails.
     assert lf._write_lock_atomic(tmp_lockfile) is False
+
+
+def test_two_racers_on_stale_lock_only_one_wins(tmp_lockfile):
+    """The reclaim race (Codex review): both racers see the SAME stale
+    lock. The critical-section mutex must serialize them so exactly one
+    acquires and the other sees the winner's fresh live lock and refuses.
+    Serialized here (single process, sequential) — the mutex guarantees
+    this same serialization across processes."""
+    # A pre-existing stale lock (dead pid).
+    _write_lock(tmp_lockfile, pid=99999, start_time="2026-05-16T12:41:56+00:00")
+
+    with patch.object(lf, "_pid_alive", side_effect=lambda pid: pid == os.getpid()):
+        # Racer A reclaims the stale lock and wins.
+        assert lf.acquire() is True
+        holder = json.loads(tmp_lockfile.read_text(encoding="utf-8"))
+        assert holder["pid"] == os.getpid()
+
+        # Racer B now runs the SAME acquire against A's FRESH live lock.
+        # It must NOT reclaim it — B is not the holder, and the holder
+        # (our pid) is alive with a matching start_time.
+        with patch.object(lf, "_lock_holder_alive", return_value=True):
+            assert lf.acquire() is False
+    # A's lock survived — not clobbered by B.
+    assert json.loads(tmp_lockfile.read_text(encoding="utf-8"))["pid"] == os.getpid()

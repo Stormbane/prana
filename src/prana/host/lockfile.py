@@ -34,9 +34,57 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
+try:
+    import win32event  # type: ignore
+    import winerror  # type: ignore
+    HAS_WIN32 = True
+except ImportError:
+    HAS_WIN32 = False
+
 from prana.host.paths import lockfile_path
 
 logger = logging.getLogger(__name__)
+
+# Named mutex serializing the whole inspect-reclaim-acquire section, so
+# two racing launchers (the dual-bootstrap: scheduled task + Startup
+# shortcut) cannot both reclaim the same stale lock and both win (Codex
+# review). Session-local name — both bootstraps run in the same user
+# session. Windows abandons the mutex if its holder dies, so a crash mid
+# critical-section cannot deadlock the next launcher.
+_MUTEX_NAME = "Narada_Host_AcquireLock"
+_MUTEX_WAIT_MS = 10000
+
+
+class _CriticalSection:
+    """Interprocess mutex around lock acquisition. No-op (best-effort,
+    O_EXCL still guards the common fresh-lock race) where pywin32 is
+    absent — which is non-Windows, where the Startup-folder bootstrap
+    that creates the race does not exist."""
+
+    def __enter__(self):
+        self._handle = None
+        if not HAS_WIN32:
+            return self
+        try:
+            self._handle = win32event.CreateMutex(None, False, _MUTEX_NAME)
+            win32event.WaitForSingleObject(self._handle, _MUTEX_WAIT_MS)
+        except Exception as exc:  # never let mutex trouble block startup
+            logger.warning("acquire mutex unavailable (%s) — O_EXCL only", exc)
+            self._handle = None
+        return self
+
+    def __exit__(self, *exc):
+        if self._handle is not None:
+            try:
+                win32event.ReleaseMutex(self._handle)
+            except Exception:
+                pass
+            try:
+                import win32api  # type: ignore
+                win32api.CloseHandle(self._handle)
+            except Exception:
+                pass
+        return False
 
 
 def read_lock() -> dict | None:
@@ -181,6 +229,14 @@ def acquire(replace: bool = False) -> bool:
     p = lockfile_path()
     p.parent.mkdir(parents=True, exist_ok=True)
 
+    # Serialize the entire inspect-reclaim-acquire section so two racers
+    # cannot both reclaim the same stale lock (Codex review). O_EXCL alone
+    # fixes the no-lock race; the mutex fixes the stale-reclaim race.
+    with _CriticalSection():
+        return _acquire_locked(p, replace)
+
+
+def _acquire_locked(p: Path, replace: bool) -> bool:
     # Bounded retries: each loss to a racer or each stale-reclaim gets one
     # more attempt; a live holder (or a racer that beat us to a fresh
     # lock) terminates the loop.

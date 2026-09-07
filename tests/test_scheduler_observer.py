@@ -156,3 +156,43 @@ def test_external_check_not_double_paged_by_sweep(tmp_path):
     after = len(mgr._conn.execute(
         "SELECT id FROM host_alert_outbox").fetchall())
     assert after == 1  # sweep did NOT add a second page
+
+
+def test_migration_backfills_external_before_sweep(tmp_path):
+    """Upgrade case (Codex review): an existing, already-paged
+    scheduler-deadman episode predates the `external` column. The ALTER
+    defaults it to external=0; the startup sweep would double-page it.
+    A fresh AlertManager must backfill external=1 in __init__ so the
+    first sweep skips it."""
+    import sqlite3
+    db = tmp_path / "old.db"
+    # Simulate a pre-`external` DB with an overdue, already-alerted
+    # scheduler episode (no `external` column at all).
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE host_alert_status (
+            component TEXT PRIMARY KEY, healthy_since REAL,
+            episode_open INTEGER NOT NULL DEFAULT 0, episode_opened_at REAL,
+            episode_alerted_at REAL, last_event_at REAL,
+            last_diag TEXT NOT NULL DEFAULT '');
+        CREATE TABLE host_alert_events (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            component TEXT, kind TEXT, detail TEXT, at REAL);
+        CREATE TABLE host_alert_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL, text TEXT, delivered_at REAL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0, last_error TEXT);
+    """)
+    old = 1_000_000.0
+    conn.execute(
+        "INSERT INTO host_alert_status (component, healthy_since, episode_open, "
+        "episode_opened_at, episode_alerted_at) VALUES "
+        "('scheduler-deadman', NULL, 1, ?, ?)", (old, old))
+    conn.commit()
+    conn.close()
+
+    clock = {"t": old + 100000}  # long past any deadline
+    mgr = AlertManager(db_path=db, send=lambda t: (True, None, ""),
+                       now=lambda: clock["t"])
+    mgr.sweep()
+    n = len(mgr._conn.execute("SELECT id FROM host_alert_outbox").fetchall())
+    assert n == 0  # backfilled external=1 -> sweep skipped it

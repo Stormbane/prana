@@ -71,6 +71,12 @@ def _redact(text: str) -> str:
     return _TG_TOKEN.sub("[REDACTED]", _voice_redact(text))
 
 
+# External-check status keys (observe_transition) — edge-triggered
+# pagers with no deadline; sweep() must skip them and the migration must
+# backfill them before the first sweep (Codex review).
+EXTERNAL_KEYS = ("scheduler-deadman",)
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS host_alert_status (
     component       TEXT PRIMARY KEY,
@@ -172,6 +178,15 @@ class AlertManager:
             self._conn.execute(
                 "ALTER TABLE host_alert_status "
                 "ADD COLUMN external INTEGER NOT NULL DEFAULT 0")
+        # Backfill known external-check rows BEFORE any sweep can run: on
+        # upgrade, an existing scheduler-deadman episode gets external=0
+        # from the ALTER, and the startup sweep would double-page an
+        # already-alerted episode before the observer re-marks it (Codex
+        # review). This runs in __init__, ahead of the first sweep().
+        self._conn.execute(
+            "UPDATE host_alert_status SET external = 1 "
+            "WHERE component IN (%s)" % ",".join("?" * len(EXTERNAL_KEYS)),
+            EXTERNAL_KEYS)
         self._config_warned = False
         # Last stderr line per component, in memory: stderr is chatty
         # (the bridge logs every poll), so it is persisted into
