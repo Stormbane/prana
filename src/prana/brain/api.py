@@ -577,6 +577,47 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
 
         return push.read_notifications()
 
+    # The producer door (plan §T7): the host, the watchdog's
+    # reconciliation, notify-suti — anything holding a prana-tier
+    # token — emits a level-tagged notification; routing is decided
+    # HERE, never by the producer.
+    @app.post("/v1/narada/notify")
+    async def narada_notify(request: Request,
+                            tier: str = Depends(require_tier)) -> dict:
+        if tier != "prana":
+            raise HTTPException(403, "notify is prana-tier only")
+        from prana.brain import push
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+        text = body.get("body")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(400, "missing body")
+        level = body.get("level", push.DEFAULT_LEVEL)
+        if level not in push.LEVELS:
+            raise HTTPException(400, f"level must be one of {push.LEVELS}")
+        delivered = body.get("delivered_channels") or []
+        if not isinstance(delivered, list):
+            raise HTTPException(400, "delivered_channels must be a list")
+        category = body.get("category")
+        event_id = body.get("event_id")
+        return await asyncio.to_thread(
+            push.notify,
+            body=text.strip(),
+            title=str(body.get("title") or "Narada"),
+            level=level,
+            source=str(body.get("source") or "unknown"),
+            category=str(category) if category else None,
+            url=str(body.get("url") or push.DEFAULT_URL),
+            event_id=str(event_id) if event_id else None,
+            delivered_channels=[str(c) for c in delivered],
+            replay=bool(body.get("replay", False)),
+        )
+
     # ── Web Push (the app leg of notify-suti fan-out) ────────────────
     @app.get("/api/push/vapid-key")
     async def push_vapid_key(tier: str = Depends(require_tier)) -> dict:

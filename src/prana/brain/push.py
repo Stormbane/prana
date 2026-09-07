@@ -1,25 +1,70 @@
-"""Web Push for the phone app — the app leg of notify-suti fan-out.
+"""Notifications — the feed, the routing table, and Web Push.
 
-The brain owns the push machinery because it is same-origin with the
-installed PWA: the app subscribes through its bearer-authed API, the
-VAPID keypair and subscription list live under ``~/.narada/brain/``,
-and the notify-suti dispatcher (or anything holding a prana-tier
-token) POSTs one message that fans out to every subscribed device.
+The brain owns notifications because it is same-origin with the
+installed PWA. Every notification carries a LEVEL set by its producer
+(plan §T7; the host/watchdog handoff of 2026-09-07):
 
-Expired subscriptions (404/410 from the push service) are dropped on
-send — a phone that uninstalled the PWA silently stops counting.
+    log        happened, no action            → feed only
+    warn       degraded, self-healing          → feed + in-app badge
+    error      wrong, needs attention          → feed + push + telegram
+    emergency  can't self-recover / net is down → feed + push + telegram, louder
+
+A ROUTING table maps level → channels; producers never choose
+channels. The feed records EVERY level.
+
+Episodes (review round 3): rows group by (source, category). A repeat
+inside an open episode bumps the count and takes the newest body; a
+HIGHER level arriving inside an episode upgrades the row, re-runs
+routing at the new level and resets its seen-state; a `log` for the
+group closes the episode (recovery) and lands as its own row; a quiet
+window (6h) also closes it. Uncategorized entries never group.
+
+Producer identity: every notification may carry an `event_id`;
+ingestion is idempotent on it, so transport retries never re-page or
+inflate counts. `delivered_channels` says which channels the producer
+already used (the deadman Telegrams its own emergencies) and are
+skipped here; `replay=True` marks bulk reconciliation as feed-only.
+
+Expired push subscriptions (404/410) are dropped on send.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger("brain.push")
 
 _LOCK = threading.Lock()
+
+LEVELS: tuple[str, ...] = ("log", "warn", "error", "emergency")
+DEFAULT_LEVEL = "error"  # migration-safe: unlabelled callers keep paging
+
+ROUTING: dict[str, tuple[str, ...]] = {
+    "log": (),
+    "warn": ("badge",),
+    "error": ("badge", "push", "telegram"),
+    "emergency": ("badge", "push", "telegram", "escalate"),
+}
+
+EPISODE_QUIET_S = 6 * 3600
+MAX_ROWS = 400
+MAX_EVENT_IDS = 1000
+DEFAULT_URL = "./#/?notifications=1"
+
+
+def level_rank(level: str) -> int:
+    return LEVELS.index(level) if level in LEVELS else LEVELS.index(DEFAULT_LEVEL)
+
+
+def route(level: str) -> tuple[str, ...]:
+    return ROUTING.get(level, ROUTING[DEFAULT_LEVEL])
 
 
 def _root() -> Path:
@@ -32,6 +77,25 @@ def _vapid_path() -> Path:
 
 def _subs_path() -> Path:
     return _root() / "push-subs.json"
+
+
+def _feed_path() -> Path:
+    return _root() / "notifications.json"
+
+
+def _legacy_feed_path() -> Path:
+    return _root() / "notifications.jsonl"
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _now_ts() -> float:
+    return time.time()
+
+
+# ── VAPID ─────────────────────────────────────────────────────────────
 
 
 def ensure_vapid() -> dict:
@@ -75,6 +139,9 @@ def _vapid_pem_path() -> Path:
     return pem
 
 
+# ── subscriptions ─────────────────────────────────────────────────────
+
+
 def _load_subs() -> dict[str, dict]:
     try:
         return json.loads(_subs_path().read_text(encoding="utf-8"))
@@ -110,60 +177,139 @@ def unsubscribe(endpoint: str) -> int:
         return len(subs)
 
 
-def _log_notification(title: str, body: str) -> None:
-    """Append to the notification feed the app's pinned Notifications
-    chat reads — every notify-suti message lands here even when no
-    device is push-subscribed yet."""
-    import time
+# ── the feed (episodes) ───────────────────────────────────────────────
 
-    path = _root() / "notifications.jsonl"
+
+def _load_feed() -> dict:
+    """{rows: [...], event_ids: [...]} — migrating the old jsonl once."""
+    path = _feed_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                                "title": title, "body": body}) + "\n")
-        # Cap the feed: rewrite when it grows past ~400 entries.
-        lines = path.read_text(encoding="utf-8").splitlines()
-        if len(lines) > 400:
-            path.write_text("\n".join(lines[-200:]) + "\n", encoding="utf-8")
-    except OSError:
-        logger.warning("could not log notification", exc_info=True)
-
-
-def read_notifications(limit: int = 50) -> list[dict]:
-    path = _root() / "notifications.jsonl"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("rows"), list):
+            data.setdefault("event_ids", [])
+            return data
+    except (OSError, ValueError):
+        pass
+    rows: list[dict] = []
+    legacy = _legacy_feed_path()
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        for line in legacy.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            rows.append({
+                "id": f"legacy-{len(rows)}",
+                "at": e.get("at", ""), "first_at": e.get("at", ""),
+                "level": DEFAULT_LEVEL, "source": "legacy", "category": None,
+                "title": e.get("title", "Narada"), "body": e.get("body", ""),
+                "url": DEFAULT_URL, "count": 1, "open": False,
+            })
     except OSError:
-        return []
-    out = []
-    for line in lines[-limit:]:
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
+        pass
+    return {"rows": rows, "event_ids": []}
 
 
-def send(title: str, body: str, *, url: str = "./#/?notifications=1",
-         webpush_fn=None) -> dict:
-    """Push {title, body, url} to every subscription. Best-effort per
-    device; expired ones are pruned. Returns {sent, failed, dropped}."""
-    _log_notification(title, body)
+def _save_feed(data: dict) -> None:
+    path = _feed_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data["rows"] = data["rows"][-MAX_ROWS:]
+    data["event_ids"] = data["event_ids"][-MAX_EVENT_IDS:]
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    tmp.replace(path)
+    try:
+        _legacy_feed_path().unlink()
+    except OSError:
+        pass
+
+
+def read_notifications(limit: int = 100) -> list[dict]:
+    with _LOCK:
+        return _load_feed()["rows"][-limit:]
+
+
+def _parse_ts(iso: str) -> float:
+    try:
+        return time.mktime(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def record(*, level: str, source: str, title: str, body: str,
+           category: str | None = None, url: str = DEFAULT_URL,
+           event_id: str | None = None) -> tuple[dict, bool, bool]:
+    """Fold one notification into the feed.
+
+    Returns (row, is_new_event, escalated): is_new_event False means
+    the event_id was seen before (idempotent no-op); escalated True
+    means an open episode's level went UP (routing must re-run)."""
+    level = level if level in LEVELS else DEFAULT_LEVEL
+    with _LOCK:
+        data = _load_feed()
+        if event_id and event_id in data["event_ids"]:
+            existing = next((r for r in reversed(data["rows"])
+                             if r.get("event_id") == event_id), None)
+            return (existing or {}), False, False
+        rows = data["rows"]
+        now_iso, now_ts = _now_iso(), _now_ts()
+        row: dict | None = None
+        escalated = False
+        if category:
+            open_row = next(
+                (r for r in reversed(rows)
+                 if r.get("open") and r.get("source") == source
+                 and r.get("category") == category), None)
+            if open_row is not None and now_ts - _parse_ts(open_row["at"]) > EPISODE_QUIET_S:
+                open_row["open"] = False  # quiet window closed it
+                open_row = None
+            if open_row is not None:
+                if level == "log":
+                    open_row["open"] = False  # recovery closes the episode
+                else:
+                    open_row["count"] = int(open_row.get("count", 1)) + 1
+                    open_row["at"] = now_iso
+                    open_row["title"], open_row["body"] = title, body
+                    if level_rank(level) > level_rank(open_row["level"]):
+                        open_row["level"] = level
+                        open_row["escalated_at"] = now_iso
+                        escalated = True
+                    if event_id:
+                        open_row["event_id"] = event_id
+                    row = open_row
+        if row is None:
+            row = {
+                "id": f"n-{int(now_ts * 1000)}-{len(rows)}",
+                "at": now_iso, "first_at": now_iso,
+                "level": level, "source": source, "category": category,
+                "title": title, "body": body, "url": url,
+                "count": 1, "open": bool(category) and level != "log",
+                **({"event_id": event_id} if event_id else {}),
+            }
+            rows.append(row)
+        if event_id:
+            data["event_ids"].append(event_id)
+        _save_feed(data)
+        return dict(row), True, escalated
+
+
+# ── delivery ──────────────────────────────────────────────────────────
+
+
+def _push_all(title: str, body: str, url: str, level: str, webpush_fn=None) -> dict:
     if webpush_fn is None:
         from pywebpush import webpush as webpush_fn  # type: ignore[no-redef]
     from pywebpush import WebPushException
 
     vapid_key_path = str(_vapid_pem_path())
-    payload = json.dumps({"title": title, "body": body, "url": url})
+    payload = json.dumps({"title": title, "body": body, "url": url, "level": level})
     with _LOCK:
         subs = _load_subs()
     sent, failed, dropped = 0, 0, []
     for endpoint, sub in list(subs.items()):
         try:
             webpush_fn(
-                subscription_info=sub,
-                data=payload,
+                subscription_info=sub, data=payload,
                 vapid_private_key=vapid_key_path,
                 vapid_claims={"sub": "mailto:7186653+Stormbane@users.noreply.github.com"},
             )
@@ -185,3 +331,67 @@ def send(title: str, body: str, *, url: str = "./#/?notifications=1",
                 subs.pop(endpoint, None)
             _save_subs(subs)
     return {"sent": sent, "failed": failed, "dropped": len(dropped)}
+
+
+def _telegram(text: str, telegram_fn=None) -> bool:
+    """Secondary sink for error+ — the proven notify_telegram.py hook,
+    run out of process so a Telegram wobble never touches the brain."""
+    if telegram_fn is not None:
+        return bool(telegram_fn(text))
+    hook = Path.home() / ".narada" / ".smriti" / "hooks" / "notify_telegram.py"
+    if not hook.exists():
+        return False
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(hook)], input=text.encode("utf-8"),
+            capture_output=True, timeout=60,
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
+           source: str = "brain", category: str | None = None,
+           url: str = DEFAULT_URL, event_id: str | None = None,
+           delivered_channels: tuple[str, ...] | list[str] = (),
+           replay: bool = False, webpush_fn=None, telegram_fn=None) -> dict:
+    """Record, then deliver per the routing table. The single door."""
+    level = level if level in LEVELS else DEFAULT_LEVEL
+    row, is_new, escalated = record(
+        level=level, source=source, title=title, body=body,
+        category=category, url=url, event_id=event_id)
+    result: dict = {"row": row, "new": is_new, "escalated": escalated,
+                    "channels": [], "push": None, "telegram": None}
+    if not is_new:
+        return result  # idempotent replay of a known event
+    channels = [c for c in route(row.get("level", level))
+                if c not in set(delivered_channels)]
+    if replay:
+        channels = [c for c in channels if c == "badge"]
+    # A repeat inside an open episode only pages again if it escalated.
+    if int(row.get("count", 1)) > 1 and not escalated:
+        channels = [c for c in channels if c == "badge"]
+    result["channels"] = channels
+    if "push" in channels:
+        result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn)
+    if "telegram" in channels:
+        result["telegram"] = _telegram(f"{title}: {body}" if title != "Narada" else body,
+                                       telegram_fn)
+    return result
+
+
+def send(title: str, body: str, *, url: str = DEFAULT_URL,
+         webpush_fn=None) -> dict:
+    """Back-compat door for /api/push/send: an unlabelled notification
+    is an `error` (the migration default) from source "push-send";
+    Telegram is left to the caller, which historically sent it."""
+    r = notify(body=body, title=title, level=DEFAULT_LEVEL, source="push-send",
+               url=url, delivered_channels=("telegram",), webpush_fn=webpush_fn)
+    return r["push"] or {"sent": 0, "failed": 0, "dropped": 0}
+
+
+def _log_notification(title: str, body: str) -> None:
+    """Kept for callers/tests that only want the feed side."""
+    record(level=DEFAULT_LEVEL, source="push-send", title=title, body=body)
