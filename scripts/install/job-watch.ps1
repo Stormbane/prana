@@ -208,6 +208,19 @@ foreach ($job in $config.jobs) {
     if ($null -eq $info) {
         $problem = "task '$name' not found in the scheduler"
         $signature = "missing"
+    } elseif ($info.LastTaskResult -eq 267011) {
+        # 267011 = 0x4131B SCHED_S_TASK_HAS_NOT_RUN: enabled but never
+        # fired yet (e.g. just armed at cutover). NOT a failure and NOT
+        # overdue — it is waiting for its first trigger. It IS a problem
+        # only if nothing is coming (a misconfigured/never-firing task):
+        # then LastRunTime never gets a baseline and normal overdue
+        # detection could never engage.
+        $next = $info.NextRunTime
+        if ($null -eq $next -or $next -le (Get-Date)) {
+            $problem = "task '$name' is enabled but has never run and has no upcoming run"
+            $signature = "neverrun-nonext"
+        }
+        # else: waiting for first run -> healthy (falls through to ok)
     } else {
         $lastRun = $info.LastRunTime
         $result = $info.LastTaskResult

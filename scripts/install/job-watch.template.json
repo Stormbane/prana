@@ -4,8 +4,8 @@
     { "task": "smriti-nightly", "max_age_hours": 26, "check": "result+overdue" },
     { "task": "smriti-morning", "max_age_hours": 26, "check": "overdue-only" },
     { "task": "smriti-logd",    "max_age_hours": 0.5, "check": "overdue-only" },
-    { "task": "Narada_Figures",        "max_age_hours": 15, "check": "result+overdue", "disabled_ok": true },
-    { "task": "Narada_Akhada_Checkin", "max_age_hours": 14, "check": "result+overdue", "disabled_ok": true },
-    { "task": "Narada_Daily_Debrief",  "max_age_hours": 26, "check": "result+overdue", "disabled_ok": true }
+    { "task": "Narada_Figures",        "max_age_hours": 15, "check": "result+overdue" },
+    { "task": "Narada_Akhada_Checkin", "max_age_hours": 14, "check": "result+overdue" },
+    { "task": "Narada_Daily_Debrief",  "max_age_hours": 26, "check": "result+overdue" }
   ]
 }

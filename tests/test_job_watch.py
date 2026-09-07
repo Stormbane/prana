@@ -29,6 +29,11 @@ JOB_WATCH_PS1 = _SCRIPTS / "job-watch.ps1"
 HARNESS_PS1 = Path(__file__).resolve().parent / "jobwatch_mock_harness.ps1"
 
 
+def _ahead(hours: float) -> str:
+    """Absolute UTC ISO timestamp `hours` in the future."""
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+
 def _run(tmp_path: Path, *, tasks: dict, config: list | None = None,
          raw_config: str | None = None, write_config: bool = True,
          state: dict | None = None, page_fail: bool = False) -> tuple[str, dict]:
@@ -273,6 +278,32 @@ def test_expected_disabled_task_clears_prior_latch(tmp_path):
                       state={"Narada_Figures": "result=1@123"})
     assert "disabled (expected) - skipping" in out
     assert "Narada_Figures" not in saved  # latch cleared
+
+
+def test_never_run_task_waiting_for_first_trigger_is_ok(tmp_path):
+    # A freshly-armed task reports LastTaskResult 267011 (HAS_NOT_RUN)
+    # with a future NextRunTime — waiting for its first fire, NOT a
+    # failure (this false-paged all three tasks at live cutover).
+    out, saved = _run(tmp_path,
+                      tasks={"Narada_Figures": {"LastTaskResult": 267011,
+                                                "LastRunIso": _ago(500000),
+                                                "NextRunIso": _ahead(3)}},
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15}])
+    assert "MOCK-PAGE" not in out
+    assert "ok" in out
+    assert saved == {}
+
+
+def test_never_run_task_with_no_upcoming_run_pages(tmp_path):
+    # Never run AND nothing scheduled ahead = misconfigured/never-firing.
+    out, saved = _run(tmp_path,
+                      tasks={"Narada_Figures": {"LastTaskResult": 267011,
+                                                "LastRunIso": _ago(500000),
+                                                "NextRunIso": None}},
+                      config=[{"task": "Narada_Figures", "max_age_hours": 15}])
+    assert "never run and has no upcoming run" in out
+    assert "MOCK-PAGE" in out
+    assert saved.get("Narada_Figures") == "neverrun-nonext"
 
 
 def test_multiple_jobs_independent(tmp_path):

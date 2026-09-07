@@ -33,7 +33,11 @@ function global:Get-ScheduledTaskInfo {
     $t = $global:mockTasks.$TaskName
     if ($null -eq $t -or $t -eq 'MISSING') { throw "mock: no task $TaskName" }
     $lastRun = [datetime]::Parse($t.LastRunIso, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
-    [pscustomobject]@{ LastTaskResult = [int]$t.LastTaskResult; LastRunTime = $lastRun }
+    $next = $null
+    if ($null -ne $t.NextRunIso) {
+        $next = [datetime]::Parse($t.NextRunIso, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    }
+    [pscustomobject]@{ LastTaskResult = [int]$t.LastTaskResult; LastRunTime = $lastRun; NextRunTime = $next }
 }
 function global:Invoke-RestMethod {
     param($Method, $Uri, $ContentType, $Body, $TimeoutSec)
