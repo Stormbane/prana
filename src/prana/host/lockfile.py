@@ -56,29 +56,48 @@ _MUTEX_WAIT_MS = 10000
 
 
 class _CriticalSection:
-    """Interprocess mutex around lock acquisition. No-op (best-effort,
-    O_EXCL still guards the common fresh-lock race) where pywin32 is
-    absent — which is non-Windows, where the Startup-folder bootstrap
-    that creates the race does not exist."""
+    """Interprocess mutex around lock acquisition.
+
+    `owned` reports whether the caller may safely enter the protected
+    section. It is True only when we actually hold the mutex
+    (WAIT_OBJECT_0) or inherited it from a dead holder (WAIT_ABANDONED).
+    On WAIT_TIMEOUT the caller does NOT own the section and must refuse —
+    entering anyway would reopen the stale-reclaim race (Codex review).
+    Where pywin32 is absent (non-Windows, no Startup-folder bootstrap,
+    so no race) it degrades to best-effort: owned=True, O_EXCL alone.
+    """
 
     def __enter__(self):
         self._handle = None
+        self._held = False
+        self.owned = False
         if not HAS_WIN32:
+            self.owned = True  # best-effort degrade (race is Windows-only)
             return self
         try:
             self._handle = win32event.CreateMutex(None, False, _MUTEX_NAME)
-            win32event.WaitForSingleObject(self._handle, _MUTEX_WAIT_MS)
-        except Exception as exc:  # never let mutex trouble block startup
+            rc = win32event.WaitForSingleObject(self._handle, _MUTEX_WAIT_MS)
+            if rc in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED):
+                self._held = True
+                self.owned = True
+            else:
+                # WAIT_TIMEOUT (or unexpected): we do NOT own the mutex.
+                logger.error(
+                    "acquire mutex not obtained (rc=0x%X) — refusing to "
+                    "enter the lock section (avoids a double-host race)", rc)
+        except Exception as exc:  # mutex machinery failed entirely
             logger.warning("acquire mutex unavailable (%s) — O_EXCL only", exc)
-            self._handle = None
+            # Degrade rather than block startup on a broken mutex API.
+            self.owned = True
         return self
 
     def __exit__(self, *exc):
         if self._handle is not None:
-            try:
-                win32event.ReleaseMutex(self._handle)
-            except Exception:
-                pass
+            if self._held:  # release ONLY if we actually acquired it
+                try:
+                    win32event.ReleaseMutex(self._handle)
+                except Exception:
+                    pass
             try:
                 import win32api  # type: ignore
                 win32api.CloseHandle(self._handle)
@@ -232,7 +251,11 @@ def acquire(replace: bool = False) -> bool:
     # Serialize the entire inspect-reclaim-acquire section so two racers
     # cannot both reclaim the same stale lock (Codex review). O_EXCL alone
     # fixes the no-lock race; the mutex fixes the stale-reclaim race.
-    with _CriticalSection():
+    with _CriticalSection() as cs:
+        if not cs.owned:
+            # Could not obtain the section (contended >10s). Fail closed:
+            # one launcher not starting is safe; two starting is the bug.
+            return False
         return _acquire_locked(p, replace)
 
 

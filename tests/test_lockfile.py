@@ -175,3 +175,20 @@ def test_two_racers_on_stale_lock_only_one_wins(tmp_lockfile):
             assert lf.acquire() is False
     # A's lock survived — not clobbered by B.
     assert json.loads(tmp_lockfile.read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+
+def test_mutex_timeout_refuses_without_entering_section(tmp_lockfile, monkeypatch):
+    """WAIT_TIMEOUT must NOT enter the protected section (Codex review):
+    a contended mutex times out without ownership, and acquire() must
+    refuse rather than run _acquire_locked and race."""
+    if not lf.HAS_WIN32:
+        pytest.skip("requires pywin32")
+
+    monkeypatch.setattr(lf.win32event, "WaitForSingleObject",
+                        lambda h, ms: lf.win32event.WAIT_TIMEOUT)
+    called = {"n": 0}
+    orig = lf._acquire_locked
+    monkeypatch.setattr(lf, "_acquire_locked",
+                        lambda *a, **k: (called.__setitem__("n", called["n"] + 1), orig(*a, **k))[1])
+    assert lf.acquire() is False
+    assert called["n"] == 0  # never reached the protected section
