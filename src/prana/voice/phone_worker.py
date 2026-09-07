@@ -335,6 +335,14 @@ async def entrypoint(ctx: JobContext) -> None:
         @session.on("error")
         def _on_session_error(ev) -> None:
             logger.error("session error: %s", getattr(ev, "error", ev))
+            # A zombie call is worse than a dropped one: when the audio
+            # track fails to publish (LiveKit signal timeout, 2026-09-07
+            # — the agent replied four times into silence), end the
+            # session so the app shows "agent left" and Suti retries,
+            # instead of an eternal "listening".
+            if getattr(ev, "recoverable", True) is False:
+                logger.error("unrecoverable session error — ending call")
+                bye.set()
 
         async def _silence_watch() -> None:
             while True:
