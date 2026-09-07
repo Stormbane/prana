@@ -19,6 +19,7 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -366,6 +367,89 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         except Exception as exc:
             logger.warning("voice dispatch failed for %s: %s", room, exc)
             raise HTTPException(502, f"dispatch failed: {exc}")
+
+    # ── Voice prefs (operator-tunable VAD/noise/language knobs) ──────
+    # The phone worker reads ~/.narada/brain/voice-prefs.json at each
+    # job start, so a change here applies to the NEXT call, no restart.
+    _VOICE_PREFS = Path.home() / ".narada" / "brain" / "voice-prefs.json"
+    _NOISE_MODES = ("near_field", "far_field", "off")
+
+    @app.get("/api/voice/prefs")
+    async def voice_prefs_get(tier: str = Depends(require_tier)) -> dict:
+        try:
+            saved = json.loads(_VOICE_PREFS.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        return {
+            "vad_threshold": float(saved.get("vad_threshold", 0.7)),
+            "noise_reduction": saved.get("noise_reduction", "near_field"),
+            "language": saved.get("language", "en"),
+        }
+
+    @app.post("/api/voice/prefs")
+    async def voice_prefs_set(request: Request,
+                              tier: str = Depends(require_tier)) -> dict:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+        prefs: dict = {}
+        if "vad_threshold" in body:
+            try:
+                v = float(body["vad_threshold"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "vad_threshold must be a number")
+            if not 0.2 <= v <= 0.95:
+                raise HTTPException(400, "vad_threshold must be 0.2–0.95")
+            prefs["vad_threshold"] = v
+        if "noise_reduction" in body:
+            if body["noise_reduction"] not in _NOISE_MODES:
+                raise HTTPException(
+                    400, f"noise_reduction must be one of {_NOISE_MODES}")
+            prefs["noise_reduction"] = body["noise_reduction"]
+        if "language" in body:
+            lang = str(body["language"]).strip().lower()
+            if not (len(lang) == 2 and lang.isalpha()):
+                raise HTTPException(400, "language must be ISO-639-1 (e.g. en)")
+            prefs["language"] = lang
+        try:
+            saved = json.loads(_VOICE_PREFS.read_text(encoding="utf-8"))
+            if not isinstance(saved, dict):
+                saved = {}
+        except (OSError, ValueError):
+            saved = {}
+        saved.update(prefs)
+        _VOICE_PREFS.parent.mkdir(parents=True, exist_ok=True)
+        _VOICE_PREFS.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+        return {"saved": saved, "applies": "next call"}
+
+    # ── Fitness summary (the Data tab's read-only view) ──────────────
+    @app.get("/api/fitness/summary")
+    async def fitness_summary(day: str = "today",
+                              tier: str = Depends(require_tier)) -> dict:
+        """akhada's own tool-computed day summary (totals, targets,
+        meals, workouts) — the same numbers the voice agent reads out,
+        served to the app's Data tab. In-process read, no subprocess."""
+        if day not in ("today", "yesterday") and not (
+                len(day) == 10 and day[4] == "-" and day[7] == "-"):
+            raise HTTPException(400, "day must be today/yesterday/YYYY-MM-DD")
+        try:
+            from akhada.store.db import Store
+            from akhada.tools.catalog import dispatch
+        except ImportError:
+            raise HTTPException(503, "akhada not installed on this host")
+
+        def _read() -> dict:
+            return dispatch("get_today_summary", {"date": day},
+                            store=Store(), session_id="brain-data-tab",
+                            source="app")
+        try:
+            return await asyncio.to_thread(_read)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fitness summary failed: %s", exc)
+            raise HTTPException(502, f"summary failed: {exc}")
 
     # ── Web Push (the app leg of notify-suti fan-out) ────────────────
     @app.get("/api/push/vapid-key")

@@ -49,6 +49,27 @@ it and keep moving."""
 
 SILENCE_END_S = 75.0
 EMPTY_GRACE_S = 30.0
+# Seconds after a FINAL user transcript with no agent response before
+# the worker forces one. Field pattern (2026-09-07 transcript): Suti
+# lists items with pauses, each fragment's turn-end starts a response,
+# the next fragment interrupts it, and after the LAST fragment nothing
+# regenerates — 47s of "listening" until he said "Hello?".
+REPLY_NUDGE_S = float(os.environ.get("NARADA_PHONE_REPLY_NUDGE_S", "6"))
+
+
+def load_voice_prefs() -> dict:
+    """Operator-tunable voice knobs, written by the phone app through
+    the brain (POST /api/voice/prefs). Read at job start so a new call
+    picks up changes without a worker restart. Absent file = defaults."""
+    import json as _json
+    from pathlib import Path
+
+    path = Path.home() / ".narada" / "brain" / "voice-prefs.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def _humans(room: rtc.Room) -> list:
@@ -169,30 +190,37 @@ async def entrypoint(ctx: JobContext) -> None:
     try:
         from livekit.plugins.openai.realtime import realtime_model as _rt_mod
 
+        # First field call (2026-09-07): stock VAD (threshold 0.5)
+        # fired on random handset noise — each false turn burned a full
+        # ~7.5k-token response against the 40k TPM ceiling, and noise
+        # bursts came back transcribed in random languages. Raised
+        # threshold (community-effective range 0.6–0.75), near-field
+        # noise reduction (handset, not speakerphone), and an explicit
+        # language pin address all three. Prefs file (set from the
+        # phone app's Settings) overrides env, env overrides defaults.
+        prefs = load_voice_prefs()
+        vad_threshold = float(prefs.get("vad_threshold") or os.environ.get(
+            "NARADA_PHONE_VAD_THRESHOLD", "0.7"))
+        noise_pref = str(prefs.get("noise_reduction") or "near_field")
+        language = str(prefs.get("language") or os.environ.get(
+            "NARADA_PHONE_LANGUAGE", "en"))
         session = AgentSession(
             llm=lk_openai.realtime.RealtimeModel(
                 model=box.REALTIME_MODEL, voice=box.REALTIME_VOICE,
-                # First field call (2026-09-07): stock VAD (threshold
-                # 0.5) fired on random handset noise — each false turn
-                # burned a full ~7.5k-token response against the 40k
-                # TPM ceiling, and the noise bursts came back
-                # transcribed in random languages. Raised threshold
-                # (community-effective range 0.6–0.75), near-field
-                # noise reduction (handset, not speakerphone), and an
-                # explicit language pin address all three.
                 turn_detection=_rt_mod.TurnDetection(
                     type="server_vad",
-                    threshold=float(os.environ.get(
-                        "NARADA_PHONE_VAD_THRESHOLD", "0.7")),
+                    threshold=vad_threshold,
                     prefix_padding_ms=300,
                     silence_duration_ms=700),
-                input_audio_noise_reduction="near_field",
+                input_audio_noise_reduction=(
+                    None if noise_pref == "off" else noise_pref),
                 input_audio_transcription=_rt_mod.InputAudioTranscription(
                     model="gpt-4o-mini-transcribe",
-                    language=os.environ.get(
-                        "NARADA_PHONE_LANGUAGE", "en"))),
+                    language=language)),
             user_away_timeout=None,
         )
+        logger.info("voice prefs: vad=%.2f noise=%s lang=%s",
+                    vad_threshold, noise_pref, language)
 
         @session.on("metrics_collected")
         def _on_metrics(ev) -> None:
@@ -233,11 +261,24 @@ async def entrypoint(ctx: JobContext) -> None:
             handle = session.generate_reply(instructions=inst)
             await handle
 
+        async def _publish_activity(_topic: str, payload: dict) -> None:
+            """Tool-activity chips for the phone overlay (same candy the
+            box face shows): every toast a tool emits goes into the room
+            as a data message on the narada.activity topic; the app
+            renders it as a chip. Fire-and-forget — candy never blocks."""
+            import json as _json
+            try:
+                await ctx.room.local_participant.publish_data(
+                    _json.dumps(payload).encode("utf-8"),
+                    topic="narada.activity", reliable=True)
+            except Exception:  # noqa: BLE001
+                pass
+
         agent = Agent(
             instructions=instructions,
             tools=build_voice_tools(
                 tier=tier, session_id=ctx.job.id,
-                music=None, publish=None, end_session=bye.set,
+                music=None, publish=_publish_activity, end_session=bye.set,
                 speak=_session_speak,
                 voice_info={
                     "model": box.REALTIME_MODEL,
@@ -254,14 +295,42 @@ async def entrypoint(ctx: JobContext) -> None:
         # are activity even when agent state never transitions.
         last_activity = {"t": time.monotonic(), "state": ""}
 
+        # Reply-nudge state: set when a FINAL user transcript lands,
+        # cleared the moment the agent starts thinking/speaking.
+        awaiting_reply = {"since": 0.0}
+
         @session.on("agent_state_changed")
         def _on_agent_state(ev) -> None:
             last_activity["t"] = time.monotonic()
-            last_activity["state"] = str(getattr(ev, "new_state", ""))
+            state = str(getattr(ev, "new_state", ""))
+            last_activity["state"] = state
+            if state in ("thinking", "speaking"):
+                awaiting_reply["since"] = 0.0
 
         @session.on("user_input_transcribed")
-        def _on_user_words(_ev) -> None:
+        def _on_user_words(ev) -> None:
             last_activity["t"] = time.monotonic()
+            if getattr(ev, "is_final", False):
+                awaiting_reply["since"] = time.monotonic()
+
+        async def _reply_nudge() -> None:
+            """Force a response when the model goes quiet on him: his
+            next fragment interrupts the in-flight response and after
+            the last fragment nothing regenerates (2026-09-07 call —
+            47s of silence until "Hello?"). Never completes; cancelled
+            with the other waiters at session end."""
+            while True:
+                await asyncio.sleep(1.0)
+                since = awaiting_reply["since"]
+                if (since and time.monotonic() - since >= REPLY_NUDGE_S
+                        and last_activity["state"] in ("listening", "idle", "")):
+                    awaiting_reply["since"] = 0.0
+                    logger.info("no response %.0fs after his words — nudging",
+                                time.monotonic() - since)
+                    try:
+                        session.generate_reply()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("reply nudge failed: %r", exc)
 
         @session.on("error")
         def _on_session_error(ev) -> None:
@@ -296,6 +365,8 @@ async def entrypoint(ctx: JobContext) -> None:
             "hang-up": asyncio.ensure_future(empty.wait()),
             "goodbye": asyncio.ensure_future(bye.wait()),
             "silence-timeout": asyncio.ensure_future(_silence_watch()),
+            # Never completes on its own — always cancelled with the rest.
+            "reply-nudge": asyncio.ensure_future(_reply_nudge()),
         }
         done, pending = await asyncio.wait(
             waiters.values(), timeout=budget.session_cap_s,

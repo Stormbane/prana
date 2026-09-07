@@ -148,3 +148,54 @@ def test_dispatch_400_on_missing_room(client):
     res = client.post("/api/voice/dispatch", json={},
                       headers={"Authorization": "Bearer tok-app"})
     assert res.status_code == 400
+
+
+# ── voice prefs (operator-tunable knobs) ────────────────────────────────
+
+
+@pytest.fixture
+def prefs_client(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    wake = tmp_path / "wake-context.md"
+    wake.write_text("ctx", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "sessions",
+                        wake_context=wake)
+    tokens = {"prana": "tok-prana", "app": "tok-app"}
+    monkeypatch.setattr("prana.brain.api.load_brain_tokens", lambda: tokens)
+    app = create_app(config, _NoBackend)
+    with TestClient(app) as c:
+        yield c, tmp_path
+
+
+def test_prefs_defaults_and_roundtrip(prefs_client):
+    client, home = prefs_client
+    headers = {"Authorization": "Bearer tok-app"}
+    assert client.get("/api/voice/prefs", headers=headers).json() == {
+        "vad_threshold": 0.7, "noise_reduction": "near_field",
+        "language": "en"}
+    res = client.post("/api/voice/prefs", headers=headers,
+                      json={"vad_threshold": 0.55,
+                            "noise_reduction": "far_field"})
+    assert res.status_code == 200
+    got = client.get("/api/voice/prefs", headers=headers).json()
+    assert got["vad_threshold"] == 0.55
+    assert got["noise_reduction"] == "far_field"
+    # The worker reads the same file the endpoint writes.
+    import json as _json
+    on_disk = _json.loads(
+        (home / ".narada" / "brain" / "voice-prefs.json").read_text())
+    assert on_disk["vad_threshold"] == 0.55
+
+
+def test_prefs_validation(prefs_client):
+    client, _ = prefs_client
+    headers = {"Authorization": "Bearer tok-app"}
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"vad_threshold": 1.5}).status_code == 400
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"noise_reduction": "loud"}).status_code == 400
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"language": "english"}).status_code == 400
+    assert client.post("/api/voice/prefs", json={}).status_code == 401
