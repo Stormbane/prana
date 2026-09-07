@@ -172,14 +172,25 @@ async def entrypoint(ctx: JobContext) -> None:
         session = AgentSession(
             llm=lk_openai.realtime.RealtimeModel(
                 model=box.REALTIME_MODEL, voice=box.REALTIME_VOICE,
-                # Phone handsets do real AEC, so the box's raised
-                # echo-defense threshold isn't needed; stock server VAD.
+                # First field call (2026-09-07): stock VAD (threshold
+                # 0.5) fired on random handset noise — each false turn
+                # burned a full ~7.5k-token response against the 40k
+                # TPM ceiling, and the noise bursts came back
+                # transcribed in random languages. Raised threshold
+                # (community-effective range 0.6–0.75), near-field
+                # noise reduction (handset, not speakerphone), and an
+                # explicit language pin address all three.
                 turn_detection=_rt_mod.TurnDetection(
                     type="server_vad",
+                    threshold=float(os.environ.get(
+                        "NARADA_PHONE_VAD_THRESHOLD", "0.7")),
                     prefix_padding_ms=300,
                     silence_duration_ms=700),
+                input_audio_noise_reduction="near_field",
                 input_audio_transcription=_rt_mod.InputAudioTranscription(
-                    model="gpt-4o-mini-transcribe")),
+                    model="gpt-4o-mini-transcribe",
+                    language=os.environ.get(
+                        "NARADA_PHONE_LANGUAGE", "en"))),
             user_away_timeout=None,
         )
 
