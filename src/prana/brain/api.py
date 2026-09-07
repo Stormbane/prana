@@ -368,8 +368,16 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         room = body.get("room", "") if isinstance(body, dict) else ""
         if not isinstance(room, str) or not room:
             raise HTTPException(400, "missing room")
+        # Context pack (plan §T3a): the app names the brain session the
+        # call should read; the worker reads that session's transcript
+        # under the caller's tier — never another tier's.
+        session_id = body.get("session_id") if isinstance(body, dict) else None
+        metadata = None
+        if isinstance(session_id, str) and valid_session_id(session_id):
+            metadata = json.dumps({"session_id": session_id, "tier": tier})
         try:
-            return await asyncio.to_thread(voice.dispatch_agent, room)
+            return await asyncio.to_thread(
+                voice.dispatch_agent, room, metadata=metadata)
         except ValueError as exc:
             raise HTTPException(403, str(exc))
         except RuntimeError as exc:

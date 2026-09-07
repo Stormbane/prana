@@ -120,11 +120,14 @@ def _http_base(livekit_url: str) -> str:
 
 def dispatch_agent(room: str, env: dict[str, str] | None = None,
                    agent_name: str | None = None,
-                   opener=urllib.request.urlopen) -> dict:
+                   opener=urllib.request.urlopen,
+                   metadata: str | None = None) -> dict:
     """Explicitly dispatch the phone worker into `room` (twirp API).
 
     Called by the app AFTER it has joined, so the agent never lands in
     an empty room (the soak's ordering lesson). Refuses non-phone rooms.
+    `metadata` (a JSON string) rides the LiveKit dispatch to the worker's
+    job — the context pack pointer (plan §T3a).
     """
     if not room.startswith(ROOM_PREFIX):
         raise ValueError(f"refusing dispatch outside {ROOM_PREFIX}*: {room!r}")
@@ -136,7 +139,8 @@ def dispatch_agent(room: str, env: dict[str, str] | None = None,
     admin = mint_token(key, secret, "narada-brain",
                        {"roomAdmin": True, "room": room}, ttl_s=60)
     body = json.dumps({"agent_name": agent_name or AGENT_NAME,
-                       "room": room}).encode()
+                       "room": room,
+                       **({"metadata": metadata} if metadata else {})}).encode()
     req = urllib.request.Request(
         _http_base(url) + "/twirp/livekit.AgentDispatchService/CreateDispatch",
         data=body, method="POST",

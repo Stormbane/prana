@@ -82,12 +82,14 @@ def test_dispatch_posts_twirp_with_admin_token():
     out = voice.dispatch_agent(
         "narada-phone-1-ab", opener=opener,
         env={"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s",
-             "LIVEKIT_URL": "ws://127.0.0.1:7880"})
+             "LIVEKIT_URL": "ws://127.0.0.1:7880"},
+        metadata='{"session_id": "phone-1", "tier": "app"}')
     assert out == {"agent_dispatches": []}
     assert seen["url"].startswith("http://127.0.0.1:7880/twirp/")
     assert seen["auth"].startswith("Bearer ")
     assert seen["body"]["room"] == "narada-phone-1-ab"
     assert seen["body"]["agent_name"] == voice.AGENT_NAME
+    assert seen["body"]["metadata"] == '{"session_id": "phone-1", "tier": "app"}'
 
 
 # ── endpoints ───────────────────────────────────────────────────────────

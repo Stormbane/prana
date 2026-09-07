@@ -57,6 +57,48 @@ EMPTY_GRACE_S = 30.0
 REPLY_NUDGE_S = float(os.environ.get("NARADA_PHONE_REPLY_NUDGE_S", "6"))
 
 
+def context_pack(metadata: str | None, *, max_turns: int = 12,
+                 max_chars: int = 320) -> str:
+    """The brain session's recent typed turns, for the call's
+    instructions (plan §T3a — one-way, read-only). The dispatch
+    metadata names {session_id, tier}; the transcript lives at
+    ~/.narada/brain/sessions/<tier>/<session_id>/transcript.jsonl.
+    Absent, malformed, or foreign → empty string, never an error."""
+    import json as _json
+    from pathlib import Path
+
+    try:
+        meta = _json.loads(metadata or "")
+        session_id, tier = str(meta["session_id"]), str(meta["tier"])
+    except (ValueError, KeyError, TypeError):
+        return ""
+    if not session_id or not tier or "/" in session_id or "\\" in session_id:
+        return ""
+    path = (Path.home() / ".narada" / "brain" / "sessions" / tier / session_id
+            / "transcript.jsonl")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    turns: list[str] = []
+    for line in lines:
+        try:
+            e = _json.loads(line)
+        except ValueError:
+            continue
+        role, text = e.get("role"), str(e.get("content", "")).strip()
+        if role not in ("user", "assistant") or not text:
+            continue
+        who = "Suti" if role == "user" else "Narada"
+        turns.append(f"{who}: {text[:max_chars]}{'…' if len(text) > max_chars else ''}")
+    turns = turns[-max_turns:]
+    if not turns:
+        return ""
+    return ("RECENT TYPED CHAT with Suti in this same conversation — the "
+            "same person, continue from here; do not re-ask what is "
+            "already settled:\n" + "\n".join(turns))
+
+
 def load_voice_prefs() -> dict:
     """Operator-tunable voice knobs, written by the phone app through
     the brain (POST /api/voice/prefs). Read at job start so a new call
@@ -254,6 +296,10 @@ async def entrypoint(ctx: JobContext) -> None:
             pass
         except Exception as exc:
             logger.warning("akhada context failed: %s", exc)
+        pack_text = context_pack(getattr(ctx.job, "metadata", None))
+        if pack_text:
+            instructions += "\n\n" + pack_text
+            logger.info("context pack: %d chars from the chat session", len(pack_text))
 
         async def _session_speak(inst: str) -> None:
             # The rest timer's ring (akhada gym-session G4): a proactive

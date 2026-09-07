@@ -58,3 +58,32 @@ def test_prefix_agrees_with_akhada_dispatch_endpoint():
         import pytest
         pytest.skip("akhada not installed here")
     assert ROOM_PREFIX == box.PHONE_ROOM_PREFIX
+
+
+
+def test_context_pack_reads_the_named_session_only(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from prana.voice.phone_worker import context_pack
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    d = tmp_path / ".narada" / "brain" / "sessions" / "app" / "phone-1"
+    d.mkdir(parents=True)
+    lines = [
+        {"role": "user", "content": "log my lunch: chicken and rice"},
+        {"role": "assistant", "content": "Logged lunch — 620 kcal."},
+        {"role": "system", "content": "turn failed: x"},
+        {"role": "user", "content": "x" * 500},
+    ]
+    (d / "transcript.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    pack = context_pack(json.dumps({"session_id": "phone-1", "tier": "app"}))
+    assert "Suti: log my lunch" in pack and "Narada: Logged lunch" in pack
+    assert "turn failed" not in pack           # system lines never leak
+    assert "x" * 321 not in pack and "…" in pack  # long turns truncate
+    # Foreign tier, missing session, malformed metadata: silent empty.
+    assert context_pack(json.dumps({"session_id": "phone-1", "tier": "prana"})) == ""
+    assert context_pack(json.dumps({"session_id": "nope", "tier": "app"})) == ""
+    assert context_pack("not json") == "" and context_pack(None) == ""
+    assert context_pack(json.dumps({"session_id": "../phone-1", "tier": "app"})) == ""
