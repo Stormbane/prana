@@ -387,6 +387,29 @@ async def entrypoint(ctx: JobContext) -> None:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("reply nudge failed: %r", exc)
 
+        # A shake of the phone (Suti 2026-09-08: "an invitation to
+        # respond"): the app publishes on narada.nudge; answer now, in
+        # THIS session, once per couple of seconds.
+        last_shake = {"t": 0.0}
+
+        def _on_data(packet) -> None:
+            if getattr(packet, "topic", "") != "narada.nudge":
+                return
+            now = time.monotonic()
+            if now - last_shake["t"] < 3.0:
+                return
+            last_shake["t"] = now
+            logger.info("shake nudge from the phone — responding")
+            try:
+                session.generate_reply(instructions=(
+                    "Suti just shook the phone — his way of inviting you to "
+                    "speak. Respond to what was said, or if nothing is "
+                    "pending, ask him briefly what he needs."))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shake nudge failed: %r", exc)
+
+        ctx.room.on("data_received", _on_data)
+
         @session.on("error")
         def _on_session_error(ev) -> None:
             logger.error("session error: %s", getattr(ev, "error", ev))
