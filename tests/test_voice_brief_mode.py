@@ -116,3 +116,38 @@ def test_a_held_lock_surfaces_as_503_not_a_silent_success(client, tmp_path):
         assert client.post("/api/voice/prefs", json={"brevity": "brief"}, headers=h).status_code == 503
     finally:
         lock.unlink()
+
+
+def test_brief_mode_tool_waits_for_the_lock_off_the_event_loop(tmp_path, monkeypatch):
+    """Recheck: a held lock must not stall the voice session — other
+    coroutines keep running while the tool waits (and then refuses)."""
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    from prana.voice.prefs import prefs_path
+
+    lock = prefs_path().with_suffix(".json.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("held", encoding="utf-8")
+    tool = {next(iter(_names([t]))): t for t in _build("personal", tmp_path)}["brief_mode"]
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.05)
+                ticks += 1
+
+        t = asyncio.ensure_future(ticker())
+        try:
+            result = await tool(on=True)
+        finally:
+            t.cancel()
+        return result, ticks
+
+    try:
+        result, ticks = asyncio.run(scenario())
+    finally:
+        lock.unlink()
+    assert result["ok"] is False and "PrefsError" in result["reason"]
+    assert ticks > 20  # ~5s of waiting, the loop kept turning

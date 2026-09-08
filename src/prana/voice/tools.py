@@ -552,11 +552,15 @@ def build_voice_tools(
         """Turn brief mode on or off (Suti: 'brief mode on'). Persists
         as a voice pref, like the phone's Settings toggle, so the NEXT
         call starts brief too. Obey the returned instruction now."""
+        import asyncio as _aio
+
         from prana.voice.prefs import PrefsError, update_prefs
 
         brevity = "brief" if on else "normal"
         try:
-            saved = update_prefs({"brevity": brevity})
+            # Off the loop: the lock wait sleeps (recheck — a held lock
+            # stalled the whole voice session for five seconds).
+            saved = await _aio.to_thread(update_prefs, {"brevity": brevity})
         except (PrefsError, OSError) as exc:
             return {"ok": False, "reason": f"could not save: {exc.__class__.__name__}"}
         _toast("brief", "brief mode on" if on else "brief mode off")
