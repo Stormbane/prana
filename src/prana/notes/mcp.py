@@ -42,12 +42,13 @@ def notes_get(note_id: str) -> str:
 
 @mcp.tool()
 def notes_create(title: str, kind: str = "text", text: str = "",
-                 items: list[str] | None = None) -> str:
+                 items: list[str] | None = None, color: str = "none") -> str:
     """Create a note. kind 'text' (free text) or 'checklist' (e.g. a
-    shopping list — pass items as a list of strings)."""
+    shopping list — pass items as a list of strings). color: none,
+    amber, cyan, violet, green, rose or cream."""
     try:
         return json.dumps(store.create_note(title, kind=kind, text=text,
-                                            items=items))
+                                            items=items, color=color))
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
 
@@ -55,13 +56,16 @@ def notes_create(title: str, kind: str = "text", text: str = "",
 @mcp.tool()
 def notes_update(note_id: str, title: str | None = None,
                  text: str | None = None,
-                 add_items: list[str] | None = None) -> str:
-    """Update a note's title or text, or append checklist items."""
+                 add_items: list[str] | None = None,
+                 color: str | None = None) -> str:
+    """Update a note's title, text or color, or append checklist items."""
     try:
         return json.dumps(store.update_note(
-            note_id, title=title, text=text, add_items=add_items))
+            note_id, title=title, text=text, add_items=add_items, color=color))
     except KeyError:
         return json.dumps({"error": "no such note"})
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
 
 
 @mcp.tool()

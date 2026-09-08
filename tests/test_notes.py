@@ -113,3 +113,24 @@ def test_notification_feed(client):
     feed = client.get("/api/notifications", headers=HEADERS).json()
     assert [n["body"] for n in feed] == ["morning message", "deploy finished"]
     assert client.get("/api/notifications").status_code == 401
+
+
+def test_note_colours_store_and_rest(client):
+    # Store: default none, named colours only, update keeps the rest.
+    n = store.create_note("Gym bag", color="violet")
+    assert n["color"] == "violet"
+    assert store.create_note("Plain")["color"] == "none"
+    with pytest.raises(ValueError):
+        store.create_note("x", color="#ff00ff")
+    updated = store.update_note(n["id"], color="green")
+    assert updated["color"] == "green" and updated["title"] == "Gym bag"
+    with pytest.raises(ValueError):
+        store.update_note(n["id"], color="plaid")
+    # REST: create with a colour, recolour, refuse an unknown one.
+    h = {"Authorization": "Bearer tok-app"}
+    r = client.post("/api/notes", json={"title": "Rose list", "kind": "checklist",
+                                        "color": "rose"}, headers=h)
+    assert r.status_code == 200 and r.json()["color"] == "rose"
+    nid = r.json()["id"]
+    assert client.patch(f"/api/notes/{nid}", json={"color": "cyan"}, headers=h).json()["color"] == "cyan"
+    assert client.patch(f"/api/notes/{nid}", json={"color": "plaid"}, headers=h).status_code == 400

@@ -561,6 +561,7 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 text=str(body.get("text", "")),
                 items=[str(t) for t in body.get("items", [])
                        if isinstance(t, str)],
+                color=str(body["color"]) if "color" in body else None,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -588,10 +589,14 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         if isinstance(body.get("check"), dict):
             kwargs["check"] = {str(k): bool(v)
                                for k, v in body["check"].items()}
+        if "color" in body:
+            kwargs["color"] = str(body["color"])
         try:
             return notes_store.update_note(note_id, **kwargs)
         except KeyError:
             raise HTTPException(404, "no such note")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     @app.delete("/api/notes/{note_id}")
     async def notes_delete(note_id: str,

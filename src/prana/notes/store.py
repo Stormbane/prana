@@ -60,8 +60,20 @@ def get_note(note_id: str) -> dict | None:
     return next((n for n in _load() if n.get("id") == note_id), None)
 
 
+# Note colours (Suti 2026-09-08: "let me choose note colours") — names,
+# not hex: each theme paints them in its own palette.
+COLORS = ("none", "amber", "cyan", "violet", "green", "rose", "cream")
+
+
+def _color(value: str | None) -> str:
+    c = (value or "none").strip().lower()
+    if c not in COLORS:
+        raise ValueError(f"color must be one of {', '.join(COLORS)}")
+    return c
+
+
 def create_note(title: str, *, kind: str = "text", text: str = "",
-                items: list[str] | None = None) -> dict:
+                items: list[str] | None = None, color: str | None = None) -> dict:
     if kind not in ("text", "checklist"):
         raise ValueError("kind must be text or checklist")
     if not title.strip():
@@ -70,6 +82,7 @@ def create_note(title: str, *, kind: str = "text", text: str = "",
         "id": _new_id(),
         "title": title.strip()[:120],
         "kind": kind,
+        "color": _color(color),
         "text": text,
         "items": [{"id": _new_id(), "text": t.strip(), "done": False}
                   for t in (items or []) if t.strip()],
@@ -87,8 +100,11 @@ def update_note(note_id: str, *, title: str | None = None,
                 text: str | None = None,
                 add_items: list[str] | None = None,
                 remove_item_ids: list[str] | None = None,
-                check: dict[str, bool] | None = None) -> dict:
-    """Merge-style update; raises KeyError for an unknown note."""
+                check: dict[str, bool] | None = None,
+                color: str | None = None) -> dict:
+    """Merge-style update; raises KeyError for an unknown note,
+    ValueError for a colour outside COLORS."""
+    resolved_color = _color(color) if color is not None else None
     with _LOCK:
         notes = _load()
         note = next((n for n in notes if n.get("id") == note_id), None)
@@ -96,6 +112,8 @@ def update_note(note_id: str, *, title: str | None = None,
             raise KeyError(note_id)
         if title is not None and title.strip():
             note["title"] = title.strip()[:120]
+        if resolved_color is not None:
+            note["color"] = resolved_color
         if text is not None:
             note["text"] = text
         if add_items:
