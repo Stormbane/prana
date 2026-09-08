@@ -404,10 +404,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
 
     @app.get("/api/voice/prefs")
     async def voice_prefs_get(tier: str = Depends(require_tier)) -> dict:
-        try:
-            saved = json.loads(_VOICE_PREFS.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            saved = {}
+        from prana.voice.prefs import read_prefs
+
+        saved = read_prefs(_VOICE_PREFS)
         return {
             "vad_threshold": float(saved.get("vad_threshold", 0.7)),
             "noise_reduction": saved.get("noise_reduction", "near_field"),
@@ -450,15 +449,14 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 raise HTTPException(
                     400, f"brevity must be one of {_BREVITY_MODES}")
             prefs["brevity"] = body["brevity"]
+        # One writer for the file, shared with the voice tool (review:
+        # two independent read-modify-writes lost updates).
+        from prana.voice.prefs import PrefsError, update_prefs
+
         try:
-            saved = json.loads(_VOICE_PREFS.read_text(encoding="utf-8"))
-            if not isinstance(saved, dict):
-                saved = {}
-        except (OSError, ValueError):
-            saved = {}
-        saved.update(prefs)
-        _VOICE_PREFS.parent.mkdir(parents=True, exist_ok=True)
-        _VOICE_PREFS.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+            saved = await asyncio.to_thread(update_prefs, prefs, _VOICE_PREFS)
+        except PrefsError as exc:
+            raise HTTPException(503, str(exc))
         return {"saved": saved, "applies": "next call"}
 
     # ── Fitness summary (the Data tab's read-only view) ──────────────

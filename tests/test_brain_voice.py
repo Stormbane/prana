@@ -176,7 +176,7 @@ def test_prefs_defaults_and_roundtrip(prefs_client):
     headers = {"Authorization": "Bearer tok-app"}
     assert client.get("/api/voice/prefs", headers=headers).json() == {
         "vad_threshold": 0.7, "noise_reduction": "near_field",
-        "language": "en"}
+        "language": "en", "brevity": "normal"}
     res = client.post("/api/voice/prefs", headers=headers,
                       json={"vad_threshold": 0.55,
                             "noise_reduction": "far_field"})

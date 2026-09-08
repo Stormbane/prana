@@ -112,15 +112,9 @@ def load_voice_prefs() -> dict:
     """Operator-tunable voice knobs, written by the phone app through
     the brain (POST /api/voice/prefs). Read at job start so a new call
     picks up changes without a worker restart. Absent file = defaults."""
-    import json as _json
-    from pathlib import Path
+    from prana.voice.prefs import read_prefs
 
-    path = Path.home() / ".narada" / "brain" / "voice-prefs.json"
-    try:
-        data = _json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return read_prefs()
 
 
 def _humans(room: rtc.Room) -> list:

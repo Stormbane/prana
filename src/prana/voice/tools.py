@@ -552,21 +552,12 @@ def build_voice_tools(
         """Turn brief mode on or off (Suti: 'brief mode on'). Persists
         as a voice pref, like the phone's Settings toggle, so the NEXT
         call starts brief too. Obey the returned instruction now."""
-        import json as _json
-        from pathlib import Path as _Path
+        from prana.voice.prefs import PrefsError, update_prefs
 
-        path = _Path.home() / ".narada" / "brain" / "voice-prefs.json"
+        brevity = "brief" if on else "normal"
         try:
-            saved = _json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(saved, dict):
-                saved = {}
-        except (OSError, ValueError):
-            saved = {}
-        saved["brevity"] = "brief" if on else "normal"
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_json.dumps(saved, indent=1), encoding="utf-8")
-        except OSError as exc:
+            saved = update_prefs({"brevity": brevity})
+        except (PrefsError, OSError) as exc:
             return {"ok": False, "reason": f"could not save: {exc.__class__.__name__}"}
         _toast("brief", "brief mode on" if on else "brief mode off")
         return {

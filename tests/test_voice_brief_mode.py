@@ -79,3 +79,40 @@ def test_prefs_endpoint_carries_brevity(client):
     assert r.status_code == 200
     assert client.get("/api/voice/prefs", headers=h).json()["brevity"] == "brief"
     assert client.post("/api/voice/prefs", json={"brevity": "terse"}, headers=h).status_code == 400
+
+
+def test_update_prefs_is_locked_atomic_and_refuses_a_malformed_file(tmp_path):
+    from prana.voice.prefs import PrefsError, read_prefs, update_prefs
+
+    path = tmp_path / "voice-prefs.json"
+    update_prefs({"vad_threshold": 0.9}, path)
+    assert read_prefs(path) == {"vad_threshold": 0.9}
+    # Merge keeps other keys (the lost-update the review reproduced).
+    assert update_prefs({"brevity": "brief"}, path) == {"vad_threshold": 0.9, "brevity": "brief"}
+    assert not path.with_suffix(".json.tmp").exists()
+    assert not path.with_suffix(".json.lock").exists()
+    # A held lock refuses rather than racing.
+    lock = path.with_suffix(".json.lock")
+    lock.write_text("held", encoding="utf-8")
+    with pytest.raises(PrefsError):
+        update_prefs({"brevity": "normal"}, path)
+    lock.unlink()
+    # A malformed file is never overwritten by a writer; readers degrade.
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(PrefsError):
+        update_prefs({"brevity": "normal"}, path)
+    assert path.read_text(encoding="utf-8") == "{not json"
+    assert read_prefs(path) == {}
+
+
+def test_a_held_lock_surfaces_as_503_not_a_silent_success(client, tmp_path):
+    from prana.voice.prefs import prefs_path
+
+    h = {"Authorization": "Bearer tok-app"}
+    lock = prefs_path().with_suffix(".json.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("held", encoding="utf-8")
+    try:
+        assert client.post("/api/voice/prefs", json={"brevity": "brief"}, headers=h).status_code == 503
+    finally:
+        lock.unlink()
