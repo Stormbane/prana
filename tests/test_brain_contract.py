@@ -524,6 +524,71 @@ def test_model_switch_waits_for_the_running_turn(brain):
     assert session.model == "sonnet"
 
 
+def test_replay_and_rejected_requests_never_move_the_pin(brain):
+    """Review: a retry (or a 422'd reuse) that names another model must
+    replay/refuse exactly as before — and leave the pin where the last
+    NEW turn put it."""
+    client, config = brain
+    pin = config.sessions_root / "prana" / "s-replay" / "model"
+    r1 = _post(client, model="sonnet", narada={"session_id": "s-replay", "request_id": "r1"})
+    assert r1.status_code == 200
+    r2 = _post(client, model="haiku", narada={"session_id": "s-replay", "request_id": "r2"})
+    assert r2.status_code == 200 and pin.read_text() == "haiku"
+    n = len(FakeBackend.instances)
+    # Retry r1 with its original model: a replay, no switch, pin stays.
+    again = _post(client, model="sonnet", narada={"session_id": "s-replay", "request_id": "r1"})
+    assert again.status_code == 200
+    assert again.json()["choices"][0]["message"]["content"] == \
+        r1.json()["choices"][0]["message"]["content"]
+    assert pin.read_text() == "haiku" and len(FakeBackend.instances) == n
+    # Reuse r1 with a third model: 422, and still no switch.
+    bad = _post(client, model="opus", narada={"session_id": "s-replay", "request_id": "r1"})
+    assert bad.status_code == 422
+    assert pin.read_text() == "haiku" and len(FakeBackend.instances) == n
+    # A turn omitting the model lands on the pin.
+    r3 = _post(client, model=None, narada={"session_id": "s-replay"})
+    assert r3.json()["model"] == "haiku"
+
+
+def test_reaper_does_not_double_close_a_session_mid_switch(tmp_path):
+    """Review: while switch_model awaits the old backend's close, the
+    reaper must not find that session, close it again, or make the
+    switch fail with KeyError."""
+    import asyncio
+
+    from prana.brain.session import SessionPool
+
+    wake = tmp_path / "wake-context.md"
+    wake.write_text("ctx", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "sessions", wake_context=wake,
+                         idle_ttl_s=0.0)
+
+    class SlowClose(FakeBackend):
+        gate: "asyncio.Event"
+        closes = 0
+
+        async def close(self):
+            SlowClose.closes += 1
+            await SlowClose.gate.wait()
+            await super().close()
+
+    async def scenario():
+        SlowClose.gate = asyncio.Event()
+        pool = SessionPool(config, SlowClose)
+        first = await pool.get_or_create("s-race", "prana", "sonnet")
+        first.last_used = 0.0  # idle since forever
+        switching = asyncio.create_task(pool.switch_model("s-race", "prana", "haiku"))
+        await asyncio.sleep(0)  # let the switch reach the awaited close
+        assert SlowClose.closes == 1
+        await pool.reap_once()  # must not see the half-switched session
+        assert SlowClose.closes == 1
+        SlowClose.gate.set()
+        switched = await switching
+        assert switched.model == "haiku" and pool.peek("s-race", "prana") is switched
+
+    asyncio.run(scenario())
+
+
 def test_unknown_model_is_400(brain):
     client, _ = brain
     r = _post(client, model="gpt-9", narada={"session_id": "s-bad"})

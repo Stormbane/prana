@@ -200,43 +200,49 @@ class SessionPool:
                 if model is not None and model != existing.model:
                     raise ModelConflict(existing.model, model)
                 return existing
+            return await self._create_locked(session_id, tier, model)
 
-            session_dir = self._config.sessions_root / tier / session_id
-            session_dir.mkdir(parents=True, exist_ok=True)
-            resume = None
-            native_file = session_dir / "native-session-id"
-            if native_file.exists():
-                resume = native_file.read_text(encoding="utf-8").strip() or None
+    async def _create_locked(self, session_id: str, tier: str,
+                             model: str | None) -> BrainSession:
+        """Create, start and register a session. The caller holds
+        ``_create_lock`` and has ruled out a warm session under ``key``."""
+        key = f"{tier}:{session_id}"
+        session_dir = self._config.sessions_root / tier / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        resume = None
+        native_file = session_dir / "native-session-id"
+        if native_file.exists():
+            resume = native_file.read_text(encoding="utf-8").strip() or None
 
-            model_file = session_dir / "model"
-            pinned = (model_file.read_text(encoding="utf-8").strip() or None
-                      if model_file.exists() else None)
-            if pinned is not None and model is not None and model != pinned:
-                raise ModelConflict(pinned, model)
-            resolved = pinned or model or self._config.model
-            if pinned is None:
-                model_file.write_text(resolved, encoding="utf-8")
+        model_file = session_dir / "model"
+        pinned = (model_file.read_text(encoding="utf-8").strip() or None
+                  if model_file.exists() else None)
+        if pinned is not None and model is not None and model != pinned:
+            raise ModelConflict(pinned, model)
+        resolved = pinned or model or self._config.model
+        if pinned is None:
+            model_file.write_text(resolved, encoding="utf-8")
 
-            backend = self._factory(
-                model=resolved,
-                system_append=self._config.system_append(),
-                mcp_servers=self._tier_mcp(tier),
-                max_tool_iterations=self._config.max_tool_iterations,
-                cwd=str(session_dir),
-                resume=resume,
-            )
-            await backend.start()
-            store = TurnStore(
-                session_dir / "turns.json", window=self._config.idempotency_window
-            )
-            session = BrainSession(key, tier, backend, store, session_dir,
-                                   model=resolved)
-            self._sessions[key] = session
-            logger.info(
-                "session %s created (tier=%s, model=%s, resume=%s)",
-                key, tier, resolved, bool(resume),
-            )
-            return session
+        backend = self._factory(
+            model=resolved,
+            system_append=self._config.system_append(),
+            mcp_servers=self._tier_mcp(tier),
+            max_tool_iterations=self._config.max_tool_iterations,
+            cwd=str(session_dir),
+            resume=resume,
+        )
+        await backend.start()
+        store = TurnStore(
+            session_dir / "turns.json", window=self._config.idempotency_window
+        )
+        session = BrainSession(key, tier, backend, store, session_dir,
+                               model=resolved)
+        self._sessions[key] = session
+        logger.info(
+            "session %s created (tier=%s, model=%s, resume=%s)",
+            key, tier, resolved, bool(resume),
+        )
+        return session
 
     async def switch_model(self, session_id: str, tier: str,
                            model: str) -> BrainSession:
@@ -244,7 +250,11 @@ class SessionPool:
         closed and a new one starts on the SAME native transcript
         (resume), so the conversation continues under the new model —
         /model, not a new chat. Refused (SessionBusy) while a turn is
-        in flight: the running turn's model must not change under it."""
+        in flight: the running turn's model must not change under it.
+
+        One locked operation end to end (review): competing switches
+        serialize and the last one wins cleanly, never a ModelConflict
+        escaping from a re-creation that lost the race for the pin."""
         key = f"{tier}:{session_id}"
         async with self._create_lock:
             existing = self._sessions.get(key)
@@ -253,14 +263,16 @@ class SessionPool:
                     return existing
                 if existing.busy:
                     raise SessionBusy(key)
+                # Unregister BEFORE awaiting close: the reaper must not
+                # find (and double-close) a half-switched session (review).
+                self._sessions.pop(key, None)
                 existing._persist_native_id()
                 await existing.backend.close()
-                del self._sessions[key]
             session_dir = self._config.sessions_root / tier / session_id
             session_dir.mkdir(parents=True, exist_ok=True)
             (session_dir / "model").write_text(model, encoding="utf-8")
             logger.info("session %s re-pinned to %s", key, model)
-        return await self.get_or_create(session_id, tier, model)
+            return await self._create_locked(session_id, tier, model)
 
     def peek(self, session_id: str, tier: str) -> BrainSession | None:
         return self._sessions.get(f"{tier}:{session_id}")
@@ -271,12 +283,19 @@ class SessionPool:
     async def _reap(self) -> None:
         while True:
             await asyncio.sleep(60)
-            cutoff = time.monotonic() - self._config.idle_ttl_s
-            for sid, sess in list(self._sessions.items()):
-                if sess.last_used < cutoff and not sess.busy:
-                    logger.info("reaping idle session %s", sid)
-                    del self._sessions[sid]
-                    await sess.backend.close()
+            await self.reap_once()
+
+    async def reap_once(self) -> None:
+        cutoff = time.monotonic() - self._config.idle_ttl_s
+        for sid, sess in list(self._sessions.items()):
+            if sess.last_used < cutoff and not sess.busy:
+                # Identity re-check: a switch may have replaced this
+                # entry while an earlier close awaited (review).
+                if self._sessions.get(sid) is not sess:
+                    continue
+                logger.info("reaping idle session %s", sid)
+                self._sessions.pop(sid, None)
+                await sess.backend.close()
 
     async def close(self) -> None:
         if self._reaper_task is not None:

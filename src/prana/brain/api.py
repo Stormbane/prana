@@ -744,21 +744,21 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         # can never open another credential's session (spec §1a). The
         # model pins on first creation (plan §T2); a request naming a
         # different one re-pins the session on the same transcript
-        # (Suti 2026-09-08: "I can't change the model in the chat").
-        # Only a turn in flight blocks the switch — 409, the client's
-        # "busy, retry" signal.
+        # (Suti 2026-09-08: "I can't change the model in the chat") —
+        # but only a NEW turn does. A replay or a rejected request_id
+        # must never move the pin (review), so the switch waits until
+        # the record check below has passed.
         try:
             session = await pool.get_or_create(
                 str(session_id), tier, requested_model)
+            needs_switch = False
         except ModelConflict:
-            try:
-                session = await pool.switch_model(
-                    str(session_id), tier, requested_model)
-            except SessionBusy:
-                return _openai_error(
-                    409, "session has an active turn — change the model "
-                    "after it finishes", "server_error",
-                    headers={"Retry-After": "5"})
+            session = await pool.get_or_create(str(session_id), tier, None)
+            needs_switch = True
+        # The model this request means: the one it names, else the pin.
+        # Fingerprints bind to it, so a retry that names the old model
+        # still replays after a switch.
+        effective_model = requested_model or session.model
 
         # Fingerprint binds the images too — same id + different image
         # must 422 like different text (spec §1a state machine).
@@ -769,19 +769,46 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             fp_payload += "|" + "|".join(
                 _hashlib.sha256(i["data"].encode("utf-8")).hexdigest()
                 for i in images)
-        fp = fingerprint(session.session_id, session.model, fp_payload)
+        fp = fingerprint(session.session_id, effective_model, fp_payload)
         if request_id is not None:
             request_id = str(request_id)
-            record = session.turns.get(request_id)
-            if record is not None:
-                if record.fingerprint != fp:
-                    return _openai_error(
-                        422, "request_id already used with a different request")
-                if record.state not in TERMINAL_STATES:
-                    return _openai_error(
-                        409, "turn with this request_id is in flight",
-                        "server_error", headers={"Retry-After": "5"})
-                return _replay(record, completion_id, stream, session.model)
+
+        def _known(sess):
+            """Replay / 422 / 409 for a request_id already on record;
+            None for a fresh one. Synchronous — no await inside."""
+            if request_id is None:
+                return None
+            record = sess.turns.get(request_id)
+            if record is None:
+                return None
+            if record.fingerprint != fp:
+                return _openai_error(
+                    422, "request_id already used with a different request")
+            if record.state not in TERMINAL_STATES:
+                return _openai_error(
+                    409, "turn with this request_id is in flight",
+                    "server_error", headers={"Retry-After": "5"})
+            return _replay(record, completion_id, stream, effective_model)
+
+        known = _known(session)
+        if known is not None:
+            return known
+        if needs_switch:
+            # Only a turn in flight blocks the switch — 409, the
+            # client's "busy, retry" signal.
+            try:
+                session = await pool.switch_model(
+                    str(session_id), tier, requested_model)
+            except SessionBusy:
+                return _openai_error(
+                    409, "session has an active turn — change the model "
+                    "after it finishes", "server_error",
+                    headers={"Retry-After": "5"})
+            # The switch awaited: re-run the record check on the new
+            # session object before the atomic reserve below.
+            known = _known(session)
+            if known is not None:
+                return known
 
         # Reserve + accept in one event-loop tick (no await between the
         # record check above and here) — atomic w.r.t. every other
