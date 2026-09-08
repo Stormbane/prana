@@ -29,6 +29,7 @@ from prana.brain.cards import CardEvent
 from prana.brain.config import MODELS, BrainConfig
 from prana.brain.session import (
     ModelConflict,
+    SwitchRefused,
     BrainSession,
     SessionBusy,
     SessionPool,
@@ -795,18 +796,23 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             return known
         if needs_switch:
             # Only a turn in flight blocks the switch — 409, the
-            # client's "busy, retry" signal.
+            # client's "busy, retry" signal. The guard re-runs the
+            # record check under the pool lock: a queued request may
+            # have completed this request_id while we waited (recheck).
             try:
                 session = await pool.switch_model(
-                    str(session_id), tier, requested_model)
+                    str(session_id), tier, requested_model,
+                    guard=lambda warm: _known(warm or session) is None)
             except SessionBusy:
                 return _openai_error(
                     409, "session has an active turn — change the model "
                     "after it finishes", "server_error",
                     headers={"Retry-After": "5"})
+            except SwitchRefused:
+                pass  # the record check below answers instead
             # The switch awaited: re-run the record check on the new
             # session object before the atomic reserve below.
-            known = _known(session)
+            known = _known(pool.peek(str(session_id), tier) or session)
             if known is not None:
                 return known
 

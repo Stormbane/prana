@@ -550,6 +550,37 @@ def test_replay_and_rejected_requests_never_move_the_pin(brain):
     assert r3.json()["model"] == "haiku"
 
 
+def test_switch_guard_runs_under_the_lock_and_refuses(tmp_path):
+    """Recheck: a request that passed its record check, then waited for
+    the pool lock while a queued request completed the same request_id,
+    must not move the pin — the guard sees the completed record."""
+    import asyncio
+
+    from prana.brain.session import SessionPool, SwitchRefused
+
+    wake = tmp_path / "wake-context.md"
+    wake.write_text("ctx", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "sessions", wake_context=wake)
+
+    async def scenario():
+        pool = SessionPool(config, FakeBackend)
+        first = await pool.get_or_create("s-guard", "prana", "sonnet")
+        # Someone else completes r1 while our switch waits for the lock.
+        first.turns.accept("r1", "fp-r1")
+        first.turns.transition("r1", "completed", "done")
+        with pytest.raises(SwitchRefused):
+            await pool.switch_model("s-guard", "prana", "haiku",
+                                    guard=lambda warm: warm.turns.get("r1") is None)
+        assert pool.peek("s-guard", "prana") is first and first.model == "sonnet"
+        assert (config.sessions_root / "prana" / "s-guard" / "model").read_text() == "sonnet"
+        # A truthful guard lets the switch through.
+        switched = await pool.switch_model("s-guard", "prana", "haiku",
+                                           guard=lambda warm: True)
+        assert switched.model == "haiku"
+
+    asyncio.run(scenario())
+
+
 def test_reaper_does_not_double_close_a_session_mid_switch(tmp_path):
     """Review: while switch_model awaits the old backend's close, the
     reaper must not find that session, close it again, or make the

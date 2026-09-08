@@ -34,6 +34,11 @@ class SessionBusy(Exception):
     """A second turn arrived while one is active (contract: 409)."""
 
 
+class SwitchRefused(Exception):
+    """``switch_model``'s guard said no under the lock: the request that
+    asked for the switch is no longer a fresh turn (recheck finding)."""
+
+
 class ModelConflict(Exception):
     """A request named a model other than the one this session is
     pinned to (plan §T2). ``get_or_create`` raises it so the pin is
@@ -244,8 +249,9 @@ class SessionPool:
         )
         return session
 
-    async def switch_model(self, session_id: str, tier: str,
-                           model: str) -> BrainSession:
+    async def switch_model(self, session_id: str, tier: str, model: str,
+                           guard: Callable[[BrainSession | None], bool] | None = None,
+                           ) -> BrainSession:
         """Re-pin a session to ``model`` mid-life. The warm client is
         closed and a new one starts on the SAME native transcript
         (resume), so the conversation continues under the new model —
@@ -254,10 +260,18 @@ class SessionPool:
 
         One locked operation end to end (review): competing switches
         serialize and the last one wins cleanly, never a ModelConflict
-        escaping from a re-creation that lost the race for the pin."""
+        escaping from a re-creation that lost the race for the pin.
+
+        ``guard`` runs UNDER the lock, before anything changes, with the
+        warm session (or None): the caller's "is this still a fresh
+        turn?" check. Waiting for the lock is an await, and a queued
+        request can complete the same request_id meanwhile; a False
+        guard raises SwitchRefused and nothing moves (recheck)."""
         key = f"{tier}:{session_id}"
         async with self._create_lock:
             existing = self._sessions.get(key)
+            if guard is not None and not guard(existing):
+                raise SwitchRefused(key)
             if existing is not None:
                 if existing.model == model:
                     return existing
