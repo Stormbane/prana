@@ -108,6 +108,34 @@ BRIEF_NOTE = (
 )
 
 
+NUDGE_COOLDOWN_S = 3.0
+
+
+def _speech_busy(handle: object) -> bool:
+    """A SpeechHandle that has not finished — generation pending or audio
+    still playing. Duck-typed: agents' SpeechHandle exposes done()."""
+    if handle is None:
+        return False
+    done = getattr(handle, "done", None)
+    try:
+        return not done() if callable(done) else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def nudge_allowed(now: float, last: float, own_handle: object,
+                  current_speech: object) -> bool:
+    """One nudge at a time (review): not within the cool-down, not while
+    the previous nudge's reply is pending or playing, and not while
+    Narada is already speaking — a queued invitation would fire AFTER
+    the answer as unsolicited follow-up speech."""
+    if now - last < NUDGE_COOLDOWN_S:
+        return False
+    if _speech_busy(own_handle) or _speech_busy(current_speech):
+        return False
+    return True
+
+
 def load_voice_prefs() -> dict:
     """Operator-tunable voice knobs, written by the phone app through
     the brain (POST /api/voice/prefs). Read at job start so a new call
@@ -390,18 +418,19 @@ async def entrypoint(ctx: JobContext) -> None:
         # A shake of the phone (Suti 2026-09-08: "an invitation to
         # respond"): the app publishes on narada.nudge; answer now, in
         # THIS session, once per couple of seconds.
-        last_shake = {"t": 0.0}
+        nudge = {"t": 0.0, "handle": None}
 
         def _on_data(packet) -> None:
             if getattr(packet, "topic", "") != "narada.nudge":
                 return
             now = time.monotonic()
-            if now - last_shake["t"] < 3.0:
+            if not nudge_allowed(now, nudge["t"], nudge["handle"],
+                                 getattr(session, "current_speech", None)):
                 return
-            last_shake["t"] = now
+            nudge["t"] = now
             logger.info("shake nudge from the phone — responding")
             try:
-                session.generate_reply(instructions=(
+                nudge["handle"] = session.generate_reply(instructions=(
                     "Suti just shook the phone — his way of inviting you to "
                     "speak. Respond to what was said, or if nothing is "
                     "pending, ask him briefly what he needs."))
