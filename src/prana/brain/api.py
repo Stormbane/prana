@@ -966,6 +966,12 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                             raise TimeoutError(
                                 f"turn exceeded {config.turn_deadline_s:.0f}s"
                                 " wall-clock bound") from None
+                        # Stateless is text-only by contract: the SDK's
+                        # built-in tools still run without MCP servers,
+                        # so card and activity events arrive here too and
+                        # are dropped, never serialized as text (review).
+                        if not isinstance(text, str):
+                            continue
                         yield text
                 finally:
                     pool.turn_semaphore.release()

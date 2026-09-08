@@ -129,6 +129,22 @@ def test_stream_carries_activity_chips_live_but_not_on_replay(client):
     assert "".join(e["choices"][0]["delta"].get("content", "") for e in replay) == "Logging done."
 
 
+def test_stateless_path_drops_events_and_keeps_the_text(client):
+    """Review: the SDK's built-in tools run even with no MCP servers, so
+    activity/card events reach the stateless path too — text only."""
+    h = {"Authorization": "Bearer tok-app"}
+    body = {"model": "sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    r = client.post("/v1/chat/completions", json={**body, "stream": False}, headers=h)
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "Logging done."
+    with client.stream("POST", "/v1/chat/completions", json={**body, "stream": True},
+                       headers=h) as s:
+        events = [json.loads(line[6:]) for line in s.iter_lines()
+                  if line.startswith("data: ") and line != "data: [DONE]"]
+    assert "".join(e["choices"][0]["delta"].get("content", "") for e in events) == "Logging done."
+    assert not any("error" in e or "narada_activity" in e or "narada_card" in e for e in events)
+
+
 def test_non_stream_body_lists_cards(client):
     r = client.post("/v1/chat/completions", json=_body(stream=False),
                     headers={"Authorization": "Bearer tok-app"})

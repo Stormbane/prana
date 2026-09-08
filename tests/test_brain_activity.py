@@ -35,3 +35,23 @@ def test_labels_are_short():
     long = "x" * 200
     text = activity_for("WebSearch", {"query": long})["text"]
     assert len(text) < 70 and text.endswith("…")
+
+
+def test_labels_never_carry_urls_beyond_the_host_or_command_text():
+    assert activity_for("WebFetch", {"url": "https://user:example-secret@example.test/p?k=v"}) == {
+        "text": "Reading example.test", "kind": "read"}
+    assert activity_for("WebFetch", {"url": "https://example.test?token=example-secret"})["text"] == \
+        "Reading example.test"
+    assert activity_for("WebFetch", {"url": "not a url"})["text"] == "Reading a page"
+    assert activity_for("Bash", {"command": "curl -H 'Authorization: Bearer example-secret' x"}) == {
+        "text": "Running a command", "kind": "files"}
+    assert activity_for("Read", {"file_path": "C:/secrets/.env"}) == {
+        "text": "Reading a file", "kind": "files"}
+
+
+def test_malformed_tool_inputs_never_raise():
+    for bad in ("a string", 7, ["x"], None, {"query": None}, {"url": 12}):
+        out = activity_for("WebSearch", bad)
+        assert out is None or isinstance(out["text"], str)
+        assert activity_for("WebFetch", bad)["kind"] == "read"
+        assert activity_for("mcp__house__play", bad)["kind"] == "music"

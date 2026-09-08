@@ -99,7 +99,11 @@ class SdkBackend:
                     if isinstance(block, TextBlock):
                         yield block.text
                     elif isinstance(block, ToolUseBlock):
-                        tool_input = dict(block.input or {})
+                        # The SDK forwards `input` unvalidated; a string
+                        # or list here must not abort the turn just to
+                        # label a chip (review).
+                        raw_input = block.input
+                        tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
                         activity = activity_for(block.name, tool_input)
                         if activity is not None:
                             yield ActivityEvent(activity)

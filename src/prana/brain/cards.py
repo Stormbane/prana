@@ -73,21 +73,42 @@ _FITNESS_VERBS = {
 }
 
 
-def activity_for(tool_name: str, tool_input: dict | None) -> dict[str, str] | None:
+def _host_of(url: Any) -> str:
+    """Hostname only — never userinfo, port, path or query, any of
+    which can carry a credential (review)."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(str(url or "")).hostname or ""
+    except ValueError:
+        host = ""
+    return _short(host, 40) or "a page"
+
+
+_FILE_VERBS = {
+    "Read": "Reading a file", "Glob": "Finding files", "Grep": "Searching files",
+    "Edit": "Editing a file", "Write": "Writing a file",
+    "Bash": "Running a command", "PowerShell": "Running a command",
+}
+
+
+def activity_for(tool_name: str, tool_input: Any) -> dict[str, str] | None:
     """Label + kind for a tool call, or None for calls not worth a chip
-    (TodoWrite, ToolSearch and the like)."""
-    inp = tool_input or {}
+    (TodoWrite, ToolSearch and the like).
+
+    Disclosure policy (review): the phone sees WHAT KIND of thing is
+    happening, plus the user's own search/memory query. Never a URL
+    beyond its hostname, never a command line, never a file path —
+    those are the agent's workings and can carry secrets."""
+    inp = tool_input if isinstance(tool_input, dict) else {}
     bare = bare_tool_name(tool_name)
     server = _server_of(tool_name)
     if tool_name == "WebSearch":
         return {"text": f"Web search: {_short(inp.get('query'))}", "kind": "search"}
     if tool_name == "WebFetch":
-        url = str(inp.get("url") or "")
-        host = url.split("//", 1)[-1].split("/", 1)[0] or _short(url)
-        return {"text": f"Reading {host}", "kind": "read"}
-    if tool_name in ("Read", "Glob", "Grep", "Bash", "Edit", "Write", "PowerShell"):
-        return {"text": f"{tool_name}: {_short(inp.get('file_path') or inp.get('pattern') or inp.get('command') or inp.get('description'), 40)}",
-                "kind": "files"}
+        return {"text": f"Reading {_host_of(inp.get('url'))}", "kind": "read"}
+    if tool_name in _FILE_VERBS:
+        return {"text": _FILE_VERBS[tool_name], "kind": "files"}
     if server == "smriti" or bare.startswith("smriti_"):
         if bare in ("smriti_read",):
             return {"text": f"Remembering: {_short(inp.get('query'), 40)}", "kind": "memory"}
