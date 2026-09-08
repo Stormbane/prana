@@ -9,7 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from prana.brain.api import create_app
-from prana.brain.cards import CardEvent, card_for, interesting
+from prana.brain.cards import ActivityEvent, CardEvent, card_for, interesting
 from prana.brain.config import BrainConfig
 
 
@@ -69,6 +69,7 @@ class CardBackend:
         pass
 
     async def run_turn(self, prompt):
+        yield ActivityEvent({"text": "Logging a meal", "kind": "fitness"})
         yield "Logging "
         yield CardEvent({"card_id": "auto-1", "kind": "kv", "v": 1, "as_of": "t",
                          "caption": "Logged lunch", "data": {"chicken": "300 kcal"}})
@@ -111,6 +112,21 @@ def test_stream_carries_card_chunks_between_text(client):
     assert texts == "Logging done."
     assert cards == [{"card_id": "auto-1", "kind": "kv", "v": 1, "as_of": "t",
                       "caption": "Logged lunch", "data": {"chicken": "300 kcal"}}]
+
+
+def test_stream_carries_activity_chips_live_but_not_on_replay(client):
+    h = {"Authorization": "Bearer tok-app"}
+    with client.stream("POST", "/v1/chat/completions", json=_body(stream=True), headers=h) as r:
+        events = [json.loads(line[6:]) for line in r.iter_lines()
+                  if line.startswith("data: ") and line != "data: [DONE]"]
+    acts = [e["narada_activity"] for e in events if "narada_activity" in e]
+    assert acts == [{"text": "Logging a meal", "kind": "fitness"}]
+    # Chips are the turn's motion, not its record: a replay has none.
+    with client.stream("POST", "/v1/chat/completions", json=_body(stream=True), headers=h) as r:
+        replay = [json.loads(line[6:]) for line in r.iter_lines()
+                  if line.startswith("data: ") and line != "data: [DONE]"]
+    assert not any("narada_activity" in e for e in replay)
+    assert "".join(e["choices"][0]["delta"].get("content", "") for e in replay) == "Logging done."
 
 
 def test_non_stream_body_lists_cards(client):

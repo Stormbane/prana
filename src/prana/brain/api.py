@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from prana.brain.cards import CardEvent
+from prana.brain.cards import ActivityEvent, CardEvent
 from prana.brain.config import MODELS, BrainConfig
 from prana.brain.session import (
     ModelConflict,
@@ -70,7 +70,8 @@ def _completion_body(model: str, text: str, completion_id: str) -> dict:
 
 
 def _chunk(model: str, completion_id: str, delta: dict,
-           finish: str | None = None, card: dict | None = None) -> str:
+           finish: str | None = None, card: dict | None = None,
+           activity: dict | None = None) -> str:
     payload: dict = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -80,6 +81,8 @@ def _chunk(model: str, completion_id: str, delta: dict,
     }
     if card is not None:
         payload["narada_card"] = card
+    if activity is not None:
+        payload["narada_activity"] = activity
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -235,6 +238,11 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
                 if isinstance(chunk, CardEvent):
                     run.cards.append(chunk.spec)
                     run._emit(("card", chunk.spec))
+                    continue
+                if isinstance(chunk, ActivityEvent):
+                    # Live only: chips are the turn's motion, not its
+                    # record — a replay carries text and cards.
+                    run._emit(("activity", chunk.activity))
                     continue
                 parts.append(chunk)
                 run._emit(("delta", chunk))
@@ -870,6 +878,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 # An extension field on an otherwise-empty delta chunk:
                 # baseline OpenAI clients ignore it, ours renders it.
                 yield _chunk(model, completion_id, {}, card=event[1])
+                continue
+            if event[0] == "activity":
+                yield _chunk(model, completion_id, {}, activity=event[1])
                 continue
             _, state, detail = event
             if state == "completed":

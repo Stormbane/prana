@@ -36,8 +36,83 @@ class CardEvent:
     spec: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ActivityEvent:
+    """A tool-activity chip, yielded the moment a tool call starts
+    (Suti 2026-09-08: "when a web search happens a little chip comes
+    up… music playing… bundle into a section"). ``activity`` is
+    {"text": short label, "kind": search|read|memory|fitness|notes|
+    music|files|tool} — the app picks glyph and color by kind."""
+
+    activity: dict[str, str] = field(default_factory=dict)
+
+
 def bare_tool_name(name: str) -> str:
     return name.rsplit("__", 1)[-1] if "__" in name else name
+
+
+def _server_of(name: str) -> str:
+    """mcp__akhada__log_meal → akhada; builtins → ""."""
+    parts = name.split("__")
+    return parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
+
+
+def _short(value: Any, n: int = 48) -> str:
+    s = str(value or "").strip().replace("\n", " ")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+_FITNESS_VERBS = {
+    "log_meal": "Logging a meal", "add_meal_items": "Adding to a meal",
+    "log_workout": "Logging a workout", "log_set": "Logging a set",
+    "log_vital": "Logging a vital", "log_weight": "Logging weight",
+    "log_habit": "Logging a habit", "get_today_summary": "Checking today",
+    "get_recent": "Checking recent days", "search_food_log": "Searching the food log",
+    "remember_food": "Remembering a food", "void_entry": "Voiding an entry",
+    "amend_entry": "Amending an entry", "get_goals": "Checking goals",
+}
+
+
+def activity_for(tool_name: str, tool_input: dict | None) -> dict[str, str] | None:
+    """Label + kind for a tool call, or None for calls not worth a chip
+    (TodoWrite, ToolSearch and the like)."""
+    inp = tool_input or {}
+    bare = bare_tool_name(tool_name)
+    server = _server_of(tool_name)
+    if tool_name == "WebSearch":
+        return {"text": f"Web search: {_short(inp.get('query'))}", "kind": "search"}
+    if tool_name == "WebFetch":
+        url = str(inp.get("url") or "")
+        host = url.split("//", 1)[-1].split("/", 1)[0] or _short(url)
+        return {"text": f"Reading {host}", "kind": "read"}
+    if tool_name in ("Read", "Glob", "Grep", "Bash", "Edit", "Write", "PowerShell"):
+        return {"text": f"{tool_name}: {_short(inp.get('file_path') or inp.get('pattern') or inp.get('command') or inp.get('description'), 40)}",
+                "kind": "files"}
+    if server == "smriti" or bare.startswith("smriti_"):
+        if bare in ("smriti_read",):
+            return {"text": f"Remembering: {_short(inp.get('query'), 40)}", "kind": "memory"}
+        if bare in ("smriti_write", "smriti_record_decision", "smriti_record_finding"):
+            return {"text": "Writing memory", "kind": "memory"}
+        return {"text": f"Memory: {bare.removeprefix('smriti_').replace('_', ' ')}", "kind": "memory"}
+    if server == "akhada" or bare in _FITNESS_VERBS:
+        return {"text": _FITNESS_VERBS.get(bare, f"Akhada: {bare.replace('_', ' ')}"),
+                "kind": "fitness"}
+    if server in ("narada-notes", "notes") or bare.startswith("note"):
+        return {"text": f"Notes: {bare.replace('_', ' ')}", "kind": "notes"}
+    if bare in ("play", "cast_play", "play_music", "play_station"):
+        station = _short(inp.get("station") or inp.get("station_query") or inp.get("query"), 30)
+        speaker = _short(inp.get("speaker") or inp.get("speaker_query"), 20)
+        where = f" on {speaker}" if speaker else ""
+        return {"text": f"Playing {station}{where}", "kind": "music"}
+    if bare in ("stop", "cast_stop", "stop_music"):
+        return {"text": "Stopping the music", "kind": "music"}
+    if bare in ("volume", "cast_volume"):
+        return {"text": f"Volume {_short(inp.get('percent'), 6)}%", "kind": "music"}
+    if bare in ("speak",):
+        return {"text": "Speaking through the house", "kind": "music"}
+    if tool_name in ("TodoWrite", "ToolSearch", "Task", "Agent", "AskUserQuestion"):
+        return None
+    return {"text": bare.replace("_", " "), "kind": "tool"}
 
 
 def interesting(name: str) -> bool:
