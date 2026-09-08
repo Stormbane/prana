@@ -99,6 +99,15 @@ def context_pack(metadata: str | None, *, max_turns: int = 12,
             "already settled:\n" + "\n".join(turns))
 
 
+BRIEF_NOTE = (
+    "BRIEF MODE is on. Suti asked for short answers on this phone: reply "
+    "in one or two short sentences, no preamble, no recap, no flourish, "
+    "no offers of more. If a question truly needs more, give the one-line "
+    "answer first and ask whether he wants the rest. Stay brief until he "
+    "says otherwise or turns brief mode off."
+)
+
+
 def load_voice_prefs() -> dict:
     """Operator-tunable voice knobs, written by the phone app through
     the brain (POST /api/voice/prefs). Read at job start so a new call
@@ -300,6 +309,12 @@ async def entrypoint(ctx: JobContext) -> None:
         if pack_text:
             instructions += "\n\n" + pack_text
             logger.info("context pack: %d chars from the chat session", len(pack_text))
+        # Brief mode (Suti on the phone 2026-09-08: "let's have a brief
+        # mode… toggle it on and off"): a pref like VAD, flipped from
+        # Settings or by voice through the brief_mode tool.
+        if str(prefs.get("brevity") or "normal") == "brief":
+            instructions += "\n\n" + BRIEF_NOTE
+            logger.info("brief mode on")
 
         async def _session_speak(inst: str) -> None:
             # The rest timer's ring (akhada gym-session G4): a proactive

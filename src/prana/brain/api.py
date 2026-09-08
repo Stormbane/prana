@@ -400,6 +400,7 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
     # job start, so a change here applies to the NEXT call, no restart.
     _VOICE_PREFS = Path.home() / ".narada" / "brain" / "voice-prefs.json"
     _NOISE_MODES = ("near_field", "far_field", "off")
+    _BREVITY_MODES = ("normal", "brief")
 
     @app.get("/api/voice/prefs")
     async def voice_prefs_get(tier: str = Depends(require_tier)) -> dict:
@@ -411,6 +412,9 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             "vad_threshold": float(saved.get("vad_threshold", 0.7)),
             "noise_reduction": saved.get("noise_reduction", "near_field"),
             "language": saved.get("language", "en"),
+            # Brief mode (Suti on the phone 2026-09-08: "like TV mode —
+            # toggle it from the phone"): short replies on calls.
+            "brevity": saved.get("brevity", "normal"),
         }
 
     @app.post("/api/voice/prefs")
@@ -441,6 +445,11 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             if not (len(lang) == 2 and lang.isalpha()):
                 raise HTTPException(400, "language must be ISO-639-1 (e.g. en)")
             prefs["language"] = lang
+        if "brevity" in body:
+            if body["brevity"] not in _BREVITY_MODES:
+                raise HTTPException(
+                    400, f"brevity must be one of {_BREVITY_MODES}")
+            prefs["brevity"] = body["brevity"]
         try:
             saved = json.loads(_VOICE_PREFS.read_text(encoding="utf-8"))
             if not isinstance(saved, dict):

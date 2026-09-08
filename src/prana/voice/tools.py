@@ -545,15 +545,49 @@ def build_voice_tools(
         except timers.TimerError as exc:
             return {"cancelled": False, "reason": str(exc)}
 
+    @function_tool()
+    async def brief_mode(
+        on: Annotated[bool, "true to keep replies to a sentence or two"],
+    ) -> dict:
+        """Turn brief mode on or off (Suti: 'brief mode on'). Persists
+        as a voice pref, like the phone's Settings toggle, so the NEXT
+        call starts brief too. Obey the returned instruction now."""
+        import json as _json
+        from pathlib import Path as _Path
+
+        path = _Path.home() / ".narada" / "brain" / "voice-prefs.json"
+        try:
+            saved = _json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(saved, dict):
+                saved = {}
+        except (OSError, ValueError):
+            saved = {}
+        saved["brevity"] = "brief" if on else "normal"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(saved, indent=1), encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "reason": f"could not save: {exc.__class__.__name__}"}
+        _toast("brief", "brief mode on" if on else "brief mode off")
+        return {
+            "ok": True, "brevity": saved["brevity"],
+            "instruction": (
+                "Brief mode is ON: from now on answer in one or two short "
+                "sentences, no preamble, no offers of more."
+                if on else
+                "Brief mode is OFF: normal conversational length again."),
+        }
+
     # message_suti and the timer tools exist ONLY on the personal
     # surface (B2/C1): a shareable session does not carry them, and the
     # underlying modules re-check the tier in code besides. Timers open
     # to the shareable tier (local-only chime, no Telegram) once B5's
     # audio owner gives the body a local announcement channel.
+    # brief_mode is personal too: it writes Suti's own voice prefs.
     if tier == "personal":
         tools.extend([message_suti, set_timer, set_reminder,
                       list_timers, cancel_timer,
-                      set_rest_timer, cancel_rest_timer])
+                      set_rest_timer, cancel_rest_timer, brief_mode])
         tools.extend(_akhada_tools(session_id, _toast))
     return tools
 
