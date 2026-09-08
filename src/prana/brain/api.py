@@ -742,15 +742,23 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 400, f"model must be one of {', '.join(MODELS)}")
         # The pool namespaces by the authenticated tier: one credential
         # can never open another credential's session (spec §1a). The
-        # model pins on first creation; a conflicting request is
-        # refused before any turn is accepted (plan §T2). 400, not 409:
-        # the client treats 409 as "busy, retry", and this is not that.
+        # model pins on first creation (plan §T2); a request naming a
+        # different one re-pins the session on the same transcript
+        # (Suti 2026-09-08: "I can't change the model in the chat").
+        # Only a turn in flight blocks the switch — 409, the client's
+        # "busy, retry" signal.
         try:
             session = await pool.get_or_create(
                 str(session_id), tier, requested_model)
-        except ModelConflict as exc:
-            return _openai_error(
-                400, f"{exc} — start a new chat to use {exc.requested}")
+        except ModelConflict:
+            try:
+                session = await pool.switch_model(
+                    str(session_id), tier, requested_model)
+            except SessionBusy:
+                return _openai_error(
+                    409, "session has an active turn — change the model "
+                    "after it finishes", "server_error",
+                    headers={"Retry-After": "5"})
 
         # Fingerprint binds the images too — same id + different image
         # must 422 like different text (spec §1a state machine).

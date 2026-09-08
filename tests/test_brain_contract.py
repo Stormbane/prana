@@ -485,13 +485,43 @@ def test_model_pins_on_first_turn_and_persists(brain):
     assert r2.json()["model"] == "opus"
 
 
-def test_conflicting_model_is_refused_before_any_turn(brain):
-    client, _ = brain
+def test_different_model_repins_on_the_same_transcript(brain):
+    """Suti 2026-09-08: the model is changeable mid-chat. The warm client
+    is replaced by one on the new model that RESUMES the same native
+    transcript; the pin file follows; a later turn without a model
+    lands on the new pin."""
+    client, config = brain
     _post(client, model="sonnet", narada={"session_id": "s-conf"})
+    first = FakeBackend.instances[-1]
     r = _post(client, model="haiku", narada={"session_id": "s-conf"})
-    assert r.status_code == 400
-    assert "pinned to sonnet" in r.json()["error"]["message"]
-    assert "new chat" in r.json()["error"]["message"]
+    assert r.status_code == 200
+    assert r.json()["model"] == "haiku"
+    second = FakeBackend.instances[-1]
+    assert second is not first and second.model == "haiku"
+    assert first.closed
+    assert second.resume == first.native_session_id
+    assert (config.sessions_root / "prana" / "s-conf" / "model").read_text() == "haiku"
+    r3 = _post(client, model=None, narada={"session_id": "s-conf"})
+    assert r3.json()["model"] == "haiku"
+    assert FakeBackend.instances[-1] is second  # no churn when the pin matches
+
+
+def test_model_switch_waits_for_the_running_turn(brain):
+    client, _ = brain
+    _post(client, model="sonnet", narada={"session_id": "s-busy-model"})
+    import asyncio
+
+    from prana.brain.session import SessionBusy
+
+    pool = client.app.state.pool
+    session = pool.peek("s-busy-model", "prana")
+    session.reserve()
+    try:
+        with pytest.raises(SessionBusy):
+            asyncio.run(pool.switch_model("s-busy-model", "prana", "opus"))
+    finally:
+        session.release()
+    assert session.model == "sonnet"
 
 
 def test_unknown_model_is_400(brain):
@@ -511,9 +541,11 @@ def test_pin_survives_restart(brain):
         assert r.status_code == 200
         assert r.json()["model"] == "haiku"
         assert FakeBackend.instances[-1].model == "haiku"
-        # And a conflicting request against the recreated session still refuses.
+        # And a different model against the recreated session re-pins it.
         r = _post(client2, model="opus", narada={"session_id": "s-again"})
-        assert r.status_code == 400
+        assert r.status_code == 200
+        assert r.json()["model"] == "opus"
+        assert (config.sessions_root / "prana" / "s-again" / "model").read_text() == "opus"
 
 
 def test_models_endpoint_lists_the_allowlist(brain):

@@ -36,8 +36,10 @@ class SessionBusy(Exception):
 
 class ModelConflict(Exception):
     """A request named a model other than the one this session is
-    pinned to (plan §T2): a session's model never flips mid-life — the
-    client starts a new chat for a new model, exactly like ChatGPT."""
+    pinned to (plan §T2). ``get_or_create`` raises it so the pin is
+    never flipped as a side effect of a turn; the API answers it with
+    ``SessionPool.switch_model`` (Suti 2026-09-08: the model must be
+    changeable mid-chat, like /model in Claude Code)."""
 
     def __init__(self, pinned: str, requested: str):
         super().__init__(f"session is pinned to {pinned}, not {requested}")
@@ -235,6 +237,30 @@ class SessionPool:
                 key, tier, resolved, bool(resume),
             )
             return session
+
+    async def switch_model(self, session_id: str, tier: str,
+                           model: str) -> BrainSession:
+        """Re-pin a session to ``model`` mid-life. The warm client is
+        closed and a new one starts on the SAME native transcript
+        (resume), so the conversation continues under the new model —
+        /model, not a new chat. Refused (SessionBusy) while a turn is
+        in flight: the running turn's model must not change under it."""
+        key = f"{tier}:{session_id}"
+        async with self._create_lock:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                if existing.model == model:
+                    return existing
+                if existing.busy:
+                    raise SessionBusy(key)
+                existing._persist_native_id()
+                await existing.backend.close()
+                del self._sessions[key]
+            session_dir = self._config.sessions_root / tier / session_id
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "model").write_text(model, encoding="utf-8")
+            logger.info("session %s re-pinned to %s", key, model)
+        return await self.get_or_create(session_id, tier, model)
 
     def peek(self, session_id: str, tier: str) -> BrainSession | None:
         return self._sessions.get(f"{tier}:{session_id}")
