@@ -561,7 +561,7 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 text=str(body.get("text", "")),
                 items=[str(t) for t in body.get("items", [])
                        if isinstance(t, str)],
-                color=str(body["color"]) if "color" in body else None,
+                color=body["color"] if isinstance(body.get("color"), str) else None,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -589,8 +589,12 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         if isinstance(body.get("check"), dict):
             kwargs["check"] = {str(k): bool(v)
                                for k, v in body["check"].items()}
-        if "color" in body:
-            kwargs["color"] = str(body["color"])
+        if body.get("color") is not None:
+            # null = no change (like the store and the MCP tool); "none"
+            # is the explicit clear (review: str(None) became "none").
+            if not isinstance(body["color"], str):
+                raise HTTPException(400, "color must be a string")
+            kwargs["color"] = body["color"]
         try:
             return notes_store.update_note(note_id, **kwargs)
         except KeyError:

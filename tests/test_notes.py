@@ -134,3 +134,15 @@ def test_note_colours_store_and_rest(client):
     nid = r.json()["id"]
     assert client.patch(f"/api/notes/{nid}", json={"color": "cyan"}, headers=h).json()["color"] == "cyan"
     assert client.patch(f"/api/notes/{nid}", json={"color": "plaid"}, headers=h).status_code == 400
+
+
+def test_patch_null_colour_is_no_change_and_none_clears(client):
+    h = {"Authorization": "Bearer tok-app"}
+    nid = client.post("/api/notes", json={"title": "Rose", "color": "rose"}, headers=h).json()["id"]
+    # An unrelated edit that serializes an unset colour as null keeps rose.
+    r = client.patch(f"/api/notes/{nid}", json={"text": "edited", "color": None}, headers=h)
+    assert r.status_code == 200 and r.json()["color"] == "rose" and r.json()["text"] == "edited"
+    # Omitted: unchanged. Explicit "none": cleared. Non-string: refused.
+    assert client.patch(f"/api/notes/{nid}", json={"text": "again"}, headers=h).json()["color"] == "rose"
+    assert client.patch(f"/api/notes/{nid}", json={"color": "none"}, headers=h).json()["color"] == "none"
+    assert client.patch(f"/api/notes/{nid}", json={"color": 7}, headers=h).status_code == 400
