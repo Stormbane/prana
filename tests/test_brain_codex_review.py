@@ -13,32 +13,28 @@ import time
 import pytest
 
 from prana.brain.codex_backend import (
-    CodexBackend, build_command, host_mcp_servers, kill_tree,
+    CodexBackend, build_command, kill_tree,
 )
 from prana.brain.config import CODEX_MODELS, BrainConfig
 from prana.brain.session import SessionPool
 
 
-def test_host_servers_are_off_unless_the_tier_wires_them(tmp_path, monkeypatch):
-    (tmp_path / "config.toml").write_text(
-        '[mcp_servers.smriti]\ncommand = "python"\n'
-        '[mcp_servers.akhada]\ncommand = "python"\n'
-        '[mcp_servers.privileged]\ncommand = "python"\n'
-        '[mcp_servers.supabase]\nurl = "https://x"\n', encoding="utf-8")
-    hosts = host_mcp_servers(tmp_path)
-    assert hosts == {"smriti", "akhada", "privileged", "supabase"}
-    assert host_mcp_servers(tmp_path / "nowhere") == set()
+def test_a_controlled_configuration_every_launch(monkeypatch):
+    """The user's config is ignored, the account bridges are off, and
+    only the tier's servers are declared (recheck: host servers and
+    plugins leaked into tiers; Codex "apps" exposed Gmail and Drive)."""
     monkeypatch.setenv("NARADA_CODEX_BIN", "codex.exe")
     tier = {"smriti": {"command": "py", "args": ["-m", "smriti.mcp_server"]},
             "narada-notes": {"command": "py", "args": ["-m", "prana.notes.mcp"]}}
     cmd = build_command(model="m", reasoning="low", disabled_servers=("playwright",), images=[],
-                        resume=None, mcp_servers=tier, host_servers=hosts)
-    off = [c for c in cmd if c.endswith(".enabled=false")]
-    assert set(off) == {"mcp_servers.akhada.enabled=false", "mcp_servers.privileged.enabled=false",
-                        "mcp_servers.supabase.enabled=false", "mcp_servers.playwright.enabled=false"}
+                        resume="t1", mcp_servers=tier)
+    assert "--ignore-user-config" in cmd
+    for feature in ("apps", "browser_use", "computer_use", "multi_agent"):
+        assert cmd[cmd.index(feature) - 1] == "--disable"
     assert "mcp_servers.smriti.enabled=true" in cmd
-    assert "mcp_servers.narada-notes.enabled=true" in cmd  # wired even though the host lacks it
-    assert "mcp_servers.smriti.enabled=false" not in cmd
+    assert "mcp_servers.narada-notes.enabled=true" in cmd
+    assert "mcp_servers.playwright.enabled=false" in cmd
+    assert all(cmd.index(c) < cmd.index("resume") for c in ("--ignore-user-config", "--disable"))
 
 
 def test_the_workspace_is_a_scratch_subdirectory(tmp_path):
@@ -208,3 +204,32 @@ def test_a_failed_first_turn_keeps_the_pending_handover(tmp_path):
         s2.release()
         assert pending.exists()  # still owed to the new backend
     asyncio.run(go())
+
+
+def test_sdk_stream_ending_without_a_result_is_a_failed_turn_and_keeps_the_handover(tmp_path):
+    pytest.importorskip("claude_agent_sdk")
+    from prana.brain.backend import SdkBackend
+
+    b = SdkBackend(model="sonnet", system_append="ctx", mcp_servers={}, max_tool_iterations=3,
+                   cwd=str(tmp_path), handover="[Context] earlier")
+
+    class _Client:
+        def __init__(self):
+            self.queries = []
+
+        async def query(self, prompt):
+            self.queries.append(prompt)
+
+        async def receive_response(self):
+            return
+            yield  # pragma: no cover
+
+    b._client = _Client()
+
+    async def go():
+        with pytest.raises(RuntimeError, match="without a result"):
+            async for _ in b.run_turn("hello"):
+                pass
+    asyncio.run(go())
+    assert b._client.queries[0].startswith("[Context] earlier")
+    assert b._handover == "[Context] earlier"  # still owed to the next attempt

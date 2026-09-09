@@ -107,6 +107,7 @@ class SdkBackend:
         # (if the result mints one) and the chip's closing state, in
         # place between the text they accompany.
         tracker = ToolTracker()
+        concluded = False
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
@@ -139,7 +140,13 @@ class SdkBackend:
                         f"agent turn ended in error (subtype={subtype})"
                     )
                 self._handover = None  # delivered (review: not before)
+                concluded = True
                 break
+        if not concluded:
+            # A clean transport EOF without a result is not a completed
+            # turn (recheck): ending normally here would have retired a
+            # pending handover and persisted partial text as complete.
+            raise RuntimeError("agent stream ended without a result")
 
     async def cancel(self) -> None:
         await self._client.interrupt()

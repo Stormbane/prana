@@ -95,21 +95,12 @@ def _toml_str(value: str) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def host_mcp_servers(codex_home: Path) -> set[str]:
-    """The MCP servers the user's own Codex config declares. Every one
-    of them is switched OFF for a brain session unless the tier wires
-    it (review: the host's servers leaked into app and voice tiers;
-    TIER_SERVERS, not the host config, decides). Plugin-provided servers
-    are not in the file and cannot be disabled by override."""
-    path = codex_home / "config.toml"
-    try:
-        import tomllib
-
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    servers = data.get("mcp_servers")
-    return set(servers) if isinstance(servers, dict) else set()
+# Codex features a brain session must not have (recheck): "apps" is
+# Codex's bridge to the user's Google accounts (Gmail, Drive, Calendar…)
+# and would have been Narada's too; the browser and computer-use
+# bridges and sub-agent spawning likewise. Disabled per launch, so no
+# host setting can turn them back on.
+DISABLED_FEATURES: tuple[str, ...] = ("apps", "browser_use", "computer_use", "multi_agent")
 
 
 def mcp_overrides(mcp_servers: dict) -> list[str]:
@@ -134,24 +125,26 @@ def mcp_overrides(mcp_servers: dict) -> list[str]:
 
 def build_command(*, model: str, reasoning: str, disabled_servers: tuple[str, ...],
                   images: list[str], resume: str | None,
-                  mcp_servers: dict | None = None,
-                  host_servers: set[str] | None = None) -> list[str]:
+                  mcp_servers: dict | None = None) -> list[str]:
     """The argv for one turn. The prompt travels on stdin, never argv
     (a .cmd shim truncates an argument at its first newline — the
     morning-message lesson, 2026-09-08). Flags sit BEFORE ``resume``:
     the subcommand accepts only a subset and the parent's carry through.
 
-    Servers: everything the host config declares is disabled unless the
-    tier wires it; the tier's servers are (re)declared with the brain's
-    command, args and env."""
+    A controlled configuration (recheck): the user's config.toml is
+    ignored outright — no host MCP servers, no plugins, nothing that
+    can change between two turns — and the tier's servers are declared
+    here with the brain's command, args and env. Auth is separate from
+    config and stays."""
     cmd = codex_binary() + [
-        "exec", "--json", "--skip-git-repo-check", "--approve-for-me",
+        "exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--approve-for-me",
         "-m", model,
         "-c", f'model_reasoning_effort="{reasoning}"',
     ]
+    for feature in DISABLED_FEATURES:
+        cmd += ["--disable", feature]
     tier = set((mcp_servers or {}).keys())
-    off = sorted((set(host_servers or ()) | set(disabled_servers)) - tier)
-    for server in off:
+    for server in sorted(set(disabled_servers) - tier):
         cmd += ["-c", f"mcp_servers.{server}.enabled=false"]
     cmd += mcp_overrides(mcp_servers or {})
     for path in images:
@@ -307,7 +300,6 @@ class CodexBackend:
         self._images_dir = images_dir or (Path.home() / ".narada" / "brain" / "images")
         self._reasoning = reasoning
         self._disabled = tuple(disabled_servers)
-        self._host_servers = host_mcp_servers(self._codex_home)
         self._proc: asyncio.subprocess.Process | None = None
 
     async def start(self) -> None:
@@ -352,8 +344,7 @@ class CodexBackend:
             text = self._handover.rstrip() + "\n\n" + text
         cmd = build_command(model=self._model, reasoning=self._reasoning,
                             disabled_servers=self._disabled, images=images,
-                            resume=self._native_session_id, mcp_servers=self._mcp_servers,
-                            host_servers=self._host_servers)
+                            resume=self._native_session_id, mcp_servers=self._mcp_servers)
         started = time.time()
         reader = TurnReader()
         try:
