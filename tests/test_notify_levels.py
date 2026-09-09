@@ -256,3 +256,19 @@ def test_push_payload_carries_the_row_identity(monkeypatch):
     r = push.notify(body="Water!", level="emergency", source="narada", webpush_fn=fake_webpush)
     assert seen and seen[0]["id"] == r["row"]["id"] and seen[0]["at"] == r["row"]["at"]
     assert seen[0]["level"] == "emergency"
+
+
+def test_episode_revision_is_monotonic_even_within_one_second(monkeypatch):
+    monkeypatch.setattr(push, "_push_all", lambda *a, **k: {"sent": 0, "failed": 0, "dropped": 0})
+    monkeypatch.setattr(push, "_telegram", lambda *a, **k: True)
+    a = push.notify(body="disk 90%", level="warn", source="host", category="disk", event_id="d-1")
+    b = push.notify(body="disk full", level="emergency", source="host", category="disk", event_id="d-2")
+    assert a["row"]["id"] == b["row"]["id"]
+    assert a["row"]["rev"] == 1 and b["row"]["rev"] == 2
+    seen = []
+    monkeypatch.setattr(push, "_load_subs", lambda: {"ep": {"endpoint": "ep"}})
+    monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
+    monkeypatch.setattr(push, "_push_all", push.__dict__["_push_all"])  # restore the real one
+    push.notify(body="disk on fire", level="emergency", source="host", category="disk", event_id="d-3",
+                webpush_fn=lambda **kw: seen.append(json.loads(kw["data"])))
+    assert seen[-1]["rev"] == 3

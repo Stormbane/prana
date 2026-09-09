@@ -301,6 +301,10 @@ def record(*, level: str, source: str, title: str, body: str,
                 else:
                     open_row["count"] = int(open_row.get("count", 1)) + 1
                     open_row["at"] = now_iso
+                    # A monotonic revision: `at` is second-resolution and
+                    # two updates can share it (review). Read/alarm keys
+                    # in the app are id@rev.
+                    open_row["rev"] = int(open_row.get("rev", 1)) + 1
                     open_row["title"], open_row["body"] = title, body
                     if level_rank(level) > level_rank(open_row["level"]):
                         open_row["level"] = level
@@ -319,7 +323,7 @@ def record(*, level: str, source: str, title: str, body: str,
                 "at": now_iso, "first_at": now_iso,
                 "level": level, "source": source, "category": category,
                 "title": title, "body": body, "url": url,
-                "count": 1,
+                "count": 1, "rev": 1,
                 "open": bool(category) and level not in ("log", "message"),
                 **({"event_id": event_id} if event_id else {}),
             }
@@ -344,7 +348,8 @@ def _push_all(title: str, body: str, url: str, level: str, webpush_fn=None,
     # id + at: the row's identity AND revision, so the app can dedupe the
     # alarm between the push door and the feed door (review).
     payload = json.dumps({"title": title, "body": body, "url": url, "level": level,
-                          "id": (row or {}).get("id"), "at": (row or {}).get("at")})
+                          "id": (row or {}).get("id"), "at": (row or {}).get("at"),
+                          "rev": (row or {}).get("rev", 1)})
     with _LOCK:
         subs = _load_subs()
     sent, failed, dropped = 0, 0, []
