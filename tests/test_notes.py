@@ -146,3 +146,20 @@ def test_patch_null_colour_is_no_change_and_none_clears(client):
     assert client.patch(f"/api/notes/{nid}", json={"text": "again"}, headers=h).json()["color"] == "rose"
     assert client.patch(f"/api/notes/{nid}", json={"color": "none"}, headers=h).json()["color"] == "none"
     assert client.patch(f"/api/notes/{nid}", json={"color": 7}, headers=h).status_code == 400
+
+
+def test_every_mutation_advances_the_revision(tmp_path, monkeypatch):
+    from prana.notes import store
+
+    monkeypatch.setattr(store, "_path", lambda: tmp_path / "notes.json")
+    n = store.create_note("Shopping", kind="checklist", items=["milk"])
+    assert n["rev"] == 1
+    n = store.update_note(n["id"], add_items=["eggs"])
+    assert n["rev"] == 2
+    n = store.update_note(n["id"], text="", title="Shopping list")
+    assert n["rev"] == 3
+    # a note written before revisions existed starts counting from its first update
+    notes = store._load()
+    del notes[0]["rev"]
+    store._save(notes)
+    assert store.update_note(n["id"], title="x")["rev"] == 1

@@ -88,6 +88,10 @@ def create_note(title: str, *, kind: str = "text", text: str = "",
                   for t in (items or []) if t.strip()],
         "created_at": _now(),
         "updated_at": _now(),
+        # Monotonic per-note revision (2026-09-09): updated_at is whole
+        # seconds, so the phone app cannot order two mutations in one
+        # second by stamp — it orders by this.
+        "rev": 1,
     }
     with _LOCK:
         notes = _load()
@@ -128,6 +132,7 @@ def update_note(note_id: str, *, title: str | None = None,
                 if item.get("id") in check:
                     item["done"] = bool(check[item["id"]])
         note["updated_at"] = _now()
+        note["rev"] = int(note.get("rev", 0) or 0) + 1
         _save(notes)
         return note
 
