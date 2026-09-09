@@ -27,7 +27,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from prana.brain.cards import ActivityEvent, CardEvent
-from prana.brain.config import MODELS, BrainConfig
+from prana.brain.config import MODELS, BrainConfig, backend_for
 from prana.brain.session import (
     ModelConflict,
     SwitchRefused,
@@ -268,10 +268,15 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
 # ── App factory ─────────────────────────────────────────────────────────
 
 
-def create_app(config: BrainConfig, backend_factory) -> FastAPI:
+def create_app(config: BrainConfig, backend_factory,
+               backends: dict | None = None) -> FastAPI:
+    """``backend_factory`` builds the default (Claude) backend;
+    ``backends`` maps other backend names from the model registry to
+    their factories — the server passes Codex, tests pass nothing and
+    every model gets the fake."""
     from contextlib import asynccontextmanager
 
-    pool = SessionPool(config, backend_factory)
+    pool = SessionPool(config, backend_factory, backends)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -349,9 +354,23 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         return {
             "object": "list",
             "data": [{"id": m, "object": "model", "created": 0,
-                      "owned_by": "narada",
+                      "owned_by": "narada", "backend": backend_for(m),
                       "default": m == config.model} for m in MODELS],
         }
+
+    # ── Images Narada generated (codex_backend.harvest_images) ───────
+    @app.get("/api/images/{name}")
+    async def image(name: str, tier: str = Depends(require_tier)):
+        import re as _re
+
+        from fastapi.responses import FileResponse
+
+        if not _re.fullmatch(r"[a-z0-9-]{1,64}\.(png|jpg|jpeg|webp)", name):
+            raise HTTPException(400, "bad image name")
+        path = config.images_dir / name
+        if not path.is_file():
+            raise HTTPException(404, "no such image")
+        return FileResponse(str(path))
 
     # ── Phone-app voice (spec: the one prana-side proxy) ─────────────
     # GET session → {room, token, identity, url, agent}; the app joins,

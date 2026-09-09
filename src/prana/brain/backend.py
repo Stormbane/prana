@@ -45,10 +45,15 @@ class SdkBackend:
         cwd: str,
         resume: str | None = None,
         disallowed_tools: list[str] | None = None,
+        handover: str | None = None,
     ):
         # Import here so the API layer stays importable (and testable
         # with FakeBackend) on machines without the SDK.
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+        # A conversation carried over from another backend rides the
+        # first turn as a context block (registry, 2026-09-09).
+        self._handover = handover
 
         self._options = ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code",
@@ -75,6 +80,13 @@ class SdkBackend:
         (text + base64 image blocks) for multimodal turns."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
+        if self._handover:
+            preamble = self._handover.rstrip() + "\n\n"
+            self._handover = None
+            if isinstance(prompt, str):
+                prompt = preamble + prompt
+            elif isinstance(prompt, list):
+                prompt = [{"type": "text", "text": preamble}, *prompt]
         if isinstance(prompt, str):
             await self._client.query(prompt)
         else:

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
-from prana.brain.config import TIER_SERVERS, BrainConfig
+from prana.brain.config import TIER_SERVERS, BrainConfig, backend_for
 from prana.brain.turns import TurnStore
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,41 @@ class ModelConflict(Exception):
 
 def valid_session_id(session_id: str) -> bool:
     return bool(_SESSION_ID_RE.match(session_id))
+
+
+HANDOVER_TURNS = 40
+HANDOVER_CHARS = 12_000
+
+
+def handover_text(session_dir: Path) -> str | None:
+    """The conversation so far, from transcript.jsonl, as a context
+    block for a backend that cannot resume the other one's session.
+    The newest turns, bounded; None when there is nothing to carry."""
+    path = session_dir / "transcript.jsonl"
+    if not path.exists():
+        return None
+    lines: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            role = rec.get("role")
+            content = rec.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            lines.append(f"{'Suti' if role == 'user' else 'Narada'}: {content.strip()}")
+    except OSError:
+        return None
+    if not lines:
+        return None
+    tail = lines[-HANDOVER_TURNS:]
+    body = "\n".join(tail)
+    if len(body) > HANDOVER_CHARS:
+        body = body[-HANDOVER_CHARS:]
+    return ("[Context — this conversation so far, carried over from another "
+            "model. Continue it; do not repeat it back.]\n" + body)
 
 
 @dataclass
@@ -166,9 +201,13 @@ class BrainSession:
 
 
 class SessionPool:
-    def __init__(self, config: BrainConfig, backend_factory: BackendFactory):
+    def __init__(self, config: BrainConfig, backend_factory: BackendFactory,
+                 backends: dict[str, BackendFactory] | None = None):
         self._config = config
         self._factory = backend_factory
+        # Per-backend factories (registry, 2026-09-09); a backend with no
+        # entry falls back to the default one (tests: one fake for all).
+        self._backends = dict(backends or {})
         self._sessions: dict[str, BrainSession] = {}
         self._create_lock = asyncio.Lock()
         # Global cap on concurrently RUNNING turns, not on live sessions —
@@ -228,7 +267,29 @@ class SessionPool:
         if pinned is None:
             model_file.write_text(resolved, encoding="utf-8")
 
-        backend = self._factory(
+        # A native session id belongs to ONE backend: a Claude session
+        # id means nothing to Codex and vice versa. Crossing backends
+        # (a model switch, or a restart after one) drops the resume and
+        # hands the conversation over as text from the brain's own
+        # transcript (registry, 2026-09-09).
+        backend_name = backend_for(resolved)
+        backend_file = session_dir / "backend"
+        prior = (backend_file.read_text(encoding="utf-8").strip() or None
+                 if backend_file.exists() else None)
+        handover = None
+        if prior is not None and prior != backend_name:
+            resume = None
+            handover = handover_text(session_dir)
+            # The other backend's id must not linger: a later same-backend
+            # recreation would resume a foreign session (test caught it).
+            native_file.write_text("", encoding="utf-8")
+            logger.info("session %s crosses %s → %s: handover of %d chars",
+                        key, prior, backend_name, len(handover or ""))
+        if prior != backend_name:
+            backend_file.write_text(backend_name, encoding="utf-8")
+
+        factory = self._backends.get(backend_name, self._factory)
+        backend = factory(
             model=resolved,
             system_append=self._config.system_append(),
             mcp_servers=self._tier_mcp(tier),
@@ -236,6 +297,7 @@ class SessionPool:
             cwd=str(session_dir),
             resume=resume,
             disallowed_tools=self._config.disallowed_tools,
+            handover=handover,
         )
         await backend.start()
         store = TurnStore(

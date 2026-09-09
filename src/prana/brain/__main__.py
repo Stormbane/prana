@@ -15,6 +15,7 @@ import uvicorn
 
 from prana.brain.api import create_app
 from prana.brain.backend import SdkBackend
+from prana.brain.codex_backend import CodexBackend
 from prana.brain.config import BrainConfig
 from prana.brain.tokens import load_brain_tokens
 
@@ -24,6 +25,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("prana.brain")
+
+
+def codex_backends(config: BrainConfig) -> dict:
+    """The Codex factory, bound to this host's knobs (registry, 2026-09-09)."""
+    import functools
+
+    return {"codex": functools.partial(
+        CodexBackend, codex_home=config.codex_home, images_dir=config.images_dir,
+        reasoning=config.codex_reasoning, disabled_servers=config.codex_disabled_servers)}
 
 
 def main() -> None:
@@ -43,7 +53,7 @@ def main() -> None:
     config.sessions_root.mkdir(parents=True, exist_ok=True)
     logger.info("brain server starting on %s:%s (model=%s)",
                 config.host, config.port, config.model)
-    app = create_app(config, SdkBackend)
+    app = create_app(config, SdkBackend, codex_backends(config))
     uvicorn.run(app, host=config.host, port=config.port, log_level="info")
 
 

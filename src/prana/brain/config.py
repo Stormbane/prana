@@ -52,9 +52,25 @@ TIER_SERVERS: dict[str, tuple[str, ...]] = {
 
 # Models a client may pin a session to (plan §T2). Short names the
 # claude-agent-sdk resolves; the picker shows exactly these.
-MODELS: tuple[str, ...] = ("sonnet", "opus", "haiku")
+# The model registry (Suti 2026-09-09): every model names its backend.
+# Claude models run on the Claude Code subscription (SdkBackend), the
+# OpenAI ones on the ChatGPT subscription (CodexBackend). The app's
+# picker reads this through /v1/models.
+CLAUDE_MODELS: tuple[str, ...] = ("sonnet", "opus", "haiku")
+CODEX_MODELS: tuple[str, ...] = tuple(
+    m.strip() for m in os.environ.get("NARADA_CODEX_MODELS", "gpt-6-astra").split(",")
+    if m.strip())
+MODEL_BACKENDS: dict[str, str] = {
+    **{m: "claude" for m in CLAUDE_MODELS},
+    **{m: "codex" for m in CODEX_MODELS},
+}
+MODELS: tuple[str, ...] = tuple(MODEL_BACKENDS)
+
+
+def backend_for(model: str) -> str:
+    return MODEL_BACKENDS.get(model, "claude")
 # Wall-clock turn bound per model — opus thinks longer.
-MODEL_DEADLINES_S: dict[str, float] = {"opus": 480.0}
+MODEL_DEADLINES_S: dict[str, float] = {"opus": 480.0, **{m: 480.0 for m in CODEX_MODELS}}
 
 
 @dataclass
@@ -120,6 +136,19 @@ class BrainConfig:
     # Code-editing tools stay off for the phone chat (charter.py); the
     # env knob exists for a future coding mode, not for daily use.
     code_edits: bool = os.environ.get("NARADA_BRAIN_CODE_EDITS", "0") == "1"
+    # Codex (codex_backend.py): where its generated images land, how
+    # hard it thinks, and which of the user's MCP servers stay out of
+    # Narada's sessions (browser automation, a cloud DB needing login).
+    codex_home: Path = field(default_factory=lambda: Path(
+        os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))))
+    codex_reasoning: str = os.environ.get("NARADA_CODEX_REASONING", "medium")
+    codex_disabled_servers: tuple[str, ...] = tuple(
+        s.strip() for s in os.environ.get(
+            "NARADA_CODEX_DISABLED_MCP", "supabase,playwright,node_repl").split(",")
+        if s.strip())
+    # Images Narada generates, served at /api/images/<name>.
+    images_dir: Path = field(
+        default_factory=lambda: Path.home() / ".narada" / "brain" / "images")
 
     def system_append(self) -> str:
         from prana.brain.charter import PHONE_CHARTER

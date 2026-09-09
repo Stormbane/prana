@@ -23,9 +23,10 @@ class FakeBackend:
 
     def __init__(self, *, model, system_append, mcp_servers,
                  max_tool_iterations, cwd, resume=None, disallowed_tools=None,
-                 chunks=("Hello ", "from Narada"), delay=0.0):
+                 handover=None, chunks=("Hello ", "from Narada"), delay=0.0):
         self.mcp_servers = mcp_servers
         self.disallowed_tools = list(disallowed_tools or [])
+        self.handover = handover
         self.model = model
         self.resume = resume
         self.chunks = list(chunks)
@@ -649,4 +650,5 @@ def test_models_endpoint_lists_the_allowlist(brain):
     client, _ = brain
     r = client.get("/v1/models", headers={"Authorization": "Bearer tok-prana"})
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == ["sonnet", "opus", "haiku"]
+    assert ids[:3] == ["sonnet", "opus", "haiku"]  # Claude first; Codex models follow (registry)
+    assert all(m["backend"] in ("claude", "codex") for m in r.json()["data"])
