@@ -259,6 +259,7 @@ def test_push_payload_carries_the_row_identity(monkeypatch):
 
 
 def test_episode_revision_is_monotonic_even_within_one_second(monkeypatch):
+    real_push_all = push._push_all
     monkeypatch.setattr(push, "_push_all", lambda *a, **k: {"sent": 0, "failed": 0, "dropped": 0})
     monkeypatch.setattr(push, "_telegram", lambda *a, **k: True)
     a = push.notify(body="disk 90%", level="warn", source="host", category="disk", event_id="d-1")
@@ -268,7 +269,7 @@ def test_episode_revision_is_monotonic_even_within_one_second(monkeypatch):
     seen = []
     monkeypatch.setattr(push, "_load_subs", lambda: {"ep": {"endpoint": "ep"}})
     monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
-    monkeypatch.setattr(push, "_push_all", push.__dict__["_push_all"])  # restore the real one
+    monkeypatch.setattr(push, "_push_all", real_push_all)  # the real one, capturing the payload
     push.notify(body="disk on fire", level="emergency", source="host", category="disk", event_id="d-3",
                 webpush_fn=lambda **kw: seen.append(json.loads(kw["data"])))
     assert seen[-1]["rev"] == 3
