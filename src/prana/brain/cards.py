@@ -84,18 +84,31 @@ class ToolTracker:
                 p.get("text", "") for p in content
                 if isinstance(p, dict) and p.get("type") == "text")
         text = content if isinstance(content, str) else ""
+        # akhada and the notes tools report a refused write as ordinary
+        # text — {"ok": false, ...} / {"error": ...} — not as a
+        # transport error (review): that chip closes failed too.
+        failed = is_error or _refused(text)
         events: list[CardEvent | ActivityEvent] = []
-        card = None if is_error else card_for(use[0], use[1], text)
+        card = None if failed else card_for(use[0], use[1], text)
         if card is not None:
             card["activity_id"] = tool_id
             events.append(CardEvent(card))
         if tool_id in self._chipped:
             self._chipped.discard(tool_id)
-            closing = {"id": tool_id, "state": "failed" if is_error else "done"}
+            closing = {"id": tool_id, "state": "failed" if failed else "done"}
             if card is not None:
                 closing["card_id"] = card["card_id"]
             events.append(ActivityEvent(closing))
         return events
+
+
+def _refused(result_text: str) -> bool:
+    """The known producers' failure envelopes, in the result's text."""
+    try:
+        res = json.loads(result_text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(res, dict) and (res.get("ok") is False or bool(res.get("error")))
 
 
 def bare_tool_name(name: str) -> str:
@@ -226,16 +239,20 @@ def _day_link(day: Any) -> dict[str, str]:
 
 
 def _exercise_link(exercise: Any) -> dict[str, str]:
+    """ONE route segment (review): quote() keeps '/' by default, so
+    'clean/jerk' would have become two segments and missed the app's
+    /data/fitness/exercise/:name route."""
     from urllib.parse import quote
 
-    return {"to": f"/data/fitness/exercise/{quote(str(exercise or '').strip())}",
+    return {"to": f"/data/fitness/exercise/{quote(str(exercise or '').strip(), safe='')}",
             "label": "Progress over time"}
 
 
 def _note_link(note_id: Any) -> dict[str, str]:
     from urllib.parse import quote
 
-    return {"to": f"/data/notes?note={quote(str(note_id or ''))}", "label": "Open the note"}
+    return {"to": f"/data/notes?note={quote(str(note_id or ''), safe='')}",
+            "label": "Open the note"}
 
 
 def _fmt_kg(value: Any) -> str:

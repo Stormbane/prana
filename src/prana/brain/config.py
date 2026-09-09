@@ -129,7 +129,13 @@ class BrainConfig:
 
     @property
     def disallowed_tools(self) -> list[str]:
-        return [] if self.code_edits else ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+        # Editing tools, the shells (a shell edits files just as well —
+        # review), and coding delegation. The chat's real work goes
+        # through its MCP tools and the web tools.
+        if self.code_edits:
+            return []
+        return ["Edit", "Write", "MultiEdit", "NotebookEdit",
+                "Bash", "PowerShell", "Task", "Agent"]
 
     def deadline_for(self, model: str) -> float:
         return MODEL_DEADLINES_S.get(model, self.turn_deadline_s)

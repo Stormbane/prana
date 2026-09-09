@@ -93,5 +93,42 @@ def test_the_charter_rides_the_system_prompt_and_editing_tools_are_off(tmp_path,
     assert appended.startswith("I am Narada.")
     assert PHONE_CHARTER.strip() in appended
     assert "smriti_write" in PHONE_CHARTER and "cannot change code" in PHONE_CHARTER
-    assert cfg.disallowed_tools == ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+    assert cfg.disallowed_tools[:4] == ["Edit", "Write", "MultiEdit", "NotebookEdit"]
     assert BrainConfig(wake_context=wake, code_edits=True).disallowed_tools == []
+
+
+def test_a_refused_write_closes_failed_even_without_the_transport_flag():
+    # akhada reports "no open workout" as ordinary text, not an error
+    # result (review): the chip must not say done.
+    tr = ToolTracker()
+    _, ended = _events(tr, "toolu_4", "mcp__akhada__log_set", {"exercise": "x"},
+                       {"ok": False, "error": "no open workout today"})
+    assert ended == [ActivityEvent({"id": "toolu_4", "state": "failed"})]
+    tr = ToolTracker()
+    _, ended = _events(tr, "toolu_5", "mcp__narada-notes__notes_update", {"note_id": "n"},
+                       {"error": "no such note"})
+    assert ended == [ActivityEvent({"id": "toolu_5", "state": "failed"})]
+    # plain-text results (most builtins) are not failures
+    tr = ToolTracker()
+    tr.on_use("toolu_6", "WebSearch", {"query": "x"})
+    assert tr.on_result("toolu_6", "some prose") == [
+        ActivityEvent({"id": "toolu_6", "state": "done"})]
+
+
+def test_exercise_names_stay_one_route_segment():
+    for name in ("clean/jerk", "../../settings", "a b?c#d"):
+        spec = card_for("mcp__akhada__log_set", {"exercise": name, "reps": 5},
+                        json.dumps({"ok": True, "weight_kg": 20}))
+        to = spec["link"]["to"]
+        assert to.startswith("/data/fitness/exercise/")
+        assert "/" not in to[len("/data/fitness/exercise/"):]
+        assert "?" not in to and "#" not in to
+    spec = card_for("mcp__narada-notes__notes_create", {"title": "t"},
+                    json.dumps({"id": "a/b&c", "title": "t", "items": []}))
+    assert spec["link"]["to"] == "/data/notes?note=a%2Fb%26c"
+
+
+def test_the_phone_chat_has_no_shell_and_no_delegation():
+    cfg = BrainConfig(code_edits=False)
+    for tool in ("Bash", "PowerShell", "Edit", "Write", "Task", "Agent"):
+        assert tool in cfg.disallowed_tools
