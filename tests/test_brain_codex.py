@@ -91,7 +91,7 @@ def test_command_puts_flags_before_resume_and_the_prompt_on_stdin(monkeypatch):
     assert "--json" in cmd and "--approve-for-me" in cmd and "--skip-git-repo-check" in cmd
     assert cmd[cmd.index("-m") + 1] == "gpt-6-astra"
     assert 'model_reasoning_effort="medium"' in cmd
-    assert "mcp_servers.supabase.enabled=false" in cmd and "mcp_servers.playwright.enabled=false" in cmd
+    assert not any(c.endswith(".enabled=false") for c in cmd)
     assert cmd[cmd.index("-i") + 1] == "C:/s/inbox/a.png"
     assert cmd[-2:] == ["resume", "thread-1"]  # the subcommand last, parent flags before it
     assert not any("\n" in c for c in cmd)
@@ -288,7 +288,6 @@ def test_the_brain_s_mcp_wiring_rides_as_overrides(monkeypatch):
     monkeypatch.setenv("NARADA_CODEX_BIN", "codex.exe")
     cmd = build_command(model="m", reasoning="low", disabled_servers=("supabase",), images=[],
                         resume="t1", mcp_servers=servers)
-    assert cmd.index("mcp_servers.supabase.enabled=false") < cmd.index("resume")
     assert cmd.index("mcp_servers.akhada.enabled=true") < cmd.index("resume")
 
 

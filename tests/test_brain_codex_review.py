@@ -33,7 +33,7 @@ def test_a_controlled_configuration_every_launch(monkeypatch):
         assert cmd[cmd.index(feature) - 1] == "--disable"
     assert "mcp_servers.smriti.enabled=true" in cmd
     assert "mcp_servers.narada-notes.enabled=true" in cmd
-    assert "mcp_servers.playwright.enabled=false" in cmd
+    assert not any(c.endswith(".enabled=false") for c in cmd)  # a half-entry Codex refuses
     assert all(cmd.index(c) < cmd.index("resume") for c in ("--ignore-user-config", "--disable"))
 
 

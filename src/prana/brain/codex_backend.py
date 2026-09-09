@@ -143,9 +143,10 @@ def build_command(*, model: str, reasoning: str, disabled_servers: tuple[str, ..
     ]
     for feature in DISABLED_FEATURES:
         cmd += ["--disable", feature]
-    tier = set((mcp_servers or {}).keys())
-    for server in sorted(set(disabled_servers) - tier):
-        cmd += ["-c", f"mcp_servers.{server}.enabled=false"]
+    # No enabled=false overrides: with the user config ignored there is
+    # nothing to disable, and an override on an undeclared server is a
+    # half-entry Codex refuses ("invalid transport" — live turn, 2026-09-10).
+    del disabled_servers
     cmd += mcp_overrides(mcp_servers or {})
     for path in images:
         cmd += ["-i", path]
