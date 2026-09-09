@@ -22,9 +22,10 @@ class FakeBackend:
     instances: list["FakeBackend"] = []
 
     def __init__(self, *, model, system_append, mcp_servers,
-                 max_tool_iterations, cwd, resume=None,
+                 max_tool_iterations, cwd, resume=None, disallowed_tools=None,
                  chunks=("Hello ", "from Narada"), delay=0.0):
         self.mcp_servers = mcp_servers
+        self.disallowed_tools = list(disallowed_tools or [])
         self.model = model
         self.resume = resume
         self.chunks = list(chunks)

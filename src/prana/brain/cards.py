@@ -23,8 +23,9 @@ CARD_V = 1
 # MCP tool names arrive prefixed (mcp__akhada__log_meal); match on the
 # bare name so a server rename doesn't silence cards.
 _INTERESTING = {
-    "log_meal", "add_meal_items", "log_workout", "log_vital", "log_weight",
-    "get_today_summary", "get_recent",
+    "log_meal", "add_meal_items", "log_workout", "log_set", "log_vital", "log_weight",
+    "get_today_summary", "get_recent", "get_exercise_history",
+    "notes_create", "notes_update", "notes_check_item",
 }
 
 
@@ -42,9 +43,59 @@ class ActivityEvent:
     (Suti 2026-09-08: "when a web search happens a little chip comes
     up… music playing… bundle into a section"). ``activity`` is
     {"text": short label, "kind": search|read|memory|fitness|notes|
-    music|files|tool} — the app picks glyph and color by kind."""
+    music|files|tool, "id": tool-use id, "state": "running"} — the app
+    picks glyph and color by kind. When the call ends a second event
+    with the same id carries "state": "done" | "failed" and, if a card
+    was minted from the result, its "card_id" (Suti 2026-09-09: chips
+    stay in the transcript; tapping one opens the card)."""
 
     activity: dict[str, str] = field(default_factory=dict)
+
+
+class ToolTracker:
+    """Pairs a turn's tool uses with their results and turns them into
+    events — pure, so the pairing is testable without the SDK.
+
+    ``on_use`` yields the chip the moment a call starts; ``on_result``
+    yields the card (if the result mints one) and the chip's closing
+    state. Calls that got no chip get no closing event either. A
+    malformed input never aborts the turn just to label a chip."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[str, dict]] = {}
+        self._chipped: set[str] = set()
+
+    def on_use(self, tool_id: str, name: str, raw_input: Any) -> list[ActivityEvent]:
+        tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
+        self._pending[tool_id] = (name, tool_input)
+        activity = activity_for(name, tool_input)
+        if activity is None:
+            return []
+        self._chipped.add(tool_id)
+        return [ActivityEvent({**activity, "id": tool_id, "state": "running"})]
+
+    def on_result(self, tool_id: str, content: Any,
+                  is_error: bool = False) -> list[CardEvent | ActivityEvent]:
+        use = self._pending.pop(tool_id, None)
+        if use is None:
+            return []
+        if isinstance(content, list):
+            content = "".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text")
+        text = content if isinstance(content, str) else ""
+        events: list[CardEvent | ActivityEvent] = []
+        card = None if is_error else card_for(use[0], use[1], text)
+        if card is not None:
+            card["activity_id"] = tool_id
+            events.append(CardEvent(card))
+        if tool_id in self._chipped:
+            self._chipped.discard(tool_id)
+            closing = {"id": tool_id, "state": "failed" if is_error else "done"}
+            if card is not None:
+                closing["card_id"] = card["card_id"]
+            events.append(ActivityEvent(closing))
+        return events
 
 
 def bare_tool_name(name: str) -> str:
@@ -166,20 +217,92 @@ def _result_json(result_text: str) -> Any:
         return None
 
 
+def _day_link(day: Any) -> dict[str, str]:
+    """The Fitness screen, on a day (Suti 2026-09-09: tapping a card
+    takes you to the data behind it)."""
+    d = str(day or "").strip()
+    to = f"/data/fitness?day={d}" if len(d) == 10 and d[4] == "-" else "/data/fitness"
+    return {"to": to, "label": "Open the day"}
+
+
+def _exercise_link(exercise: Any) -> dict[str, str]:
+    from urllib.parse import quote
+
+    return {"to": f"/data/fitness/exercise/{quote(str(exercise or '').strip())}",
+            "label": "Progress over time"}
+
+
+def _note_link(note_id: Any) -> dict[str, str]:
+    from urllib.parse import quote
+
+    return {"to": f"/data/notes?note={quote(str(note_id or ''))}", "label": "Open the note"}
+
+
+def _fmt_kg(value: Any) -> str:
+    try:
+        return f"{float(value):g} kg"
+    except (TypeError, ValueError):
+        return ""
+
+
 def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict | None:
     """Return a card spec for an interesting tool call, else None.
-    Never raises — a card is candy, the turn is the meal."""
+    Never raises — a card is candy, the turn is the meal.
+
+    A card may carry ``link`` {to, label}: an in-app route the card
+    opens when tapped — the set's exercise history, the meal's day,
+    the note itself."""
     name = bare_tool_name(tool_name)
     if name not in _INTERESTING:
         return None
     res = _result_json(result_text)
-    if not isinstance(res, dict) or res.get("ok") is False:
+    if not isinstance(res, dict) or res.get("ok") is False or res.get("error"):
         return None
     tool_input = tool_input or {}
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     base = {"card_id": f"auto-{uuid.uuid4().hex[:10]}", "kind": "kv",
             "v": CARD_V, "as_of": now}
     try:
+        if name == "log_set":
+            exercise = str(tool_input.get("exercise") or "set").strip()
+            weight = _fmt_kg(res.get("weight_kg", tool_input.get("weight_kg")))
+            reps = tool_input.get("reps")
+            bits = [b for b in (weight, f"× {reps}" if reps is not None else "") if b]
+            caption = f"{exercise} — {' '.join(bits)}" if bits else exercise
+            data = {}
+            if tool_input.get("notes"):
+                data["notes"] = _short(tool_input.get("notes"), 60)
+            if res.get("bar_kg") is not None:
+                data["bar"] = _fmt_kg(res.get("bar_kg"))
+            return {**base, "caption": caption, "data": data,
+                    "link": _exercise_link(exercise)}
+        if name == "get_exercise_history":
+            ex = res.get("exercise") or {}
+            exercise = str((ex.get("name") if isinstance(ex, dict) else None)
+                           or tool_input.get("exercise") or "exercise")
+            best = res.get("best") or {}
+            data = {"sets": str(len(res.get("sets") or [])),
+                    "sessions": str(len(res.get("session_days") or []))}
+            if isinstance(best, dict) and best.get("weight_kg") is not None:
+                data["best"] = f"{_fmt_kg(best.get('weight_kg'))} × {best.get('reps', '—')} on {best.get('day', '')}".strip()
+            return {**base, "caption": f"{exercise} — history", "data": data,
+                    "link": _exercise_link(exercise)}
+        if name in ("notes_create", "notes_update", "notes_check_item"):
+            title = str(res.get("title") or tool_input.get("title") or "note")
+            items = [i for i in (res.get("items") or []) if isinstance(i, dict)]
+            verb = {"notes_create": "New note", "notes_update": "Updated",
+                    "notes_check_item": "Checked off"}[name]
+            data = {}
+            if items:
+                open_items = [i for i in items if not i.get("done")]
+                data["items"] = f"{len(open_items)} open of {len(items)}"
+                added = tool_input.get("add_items") or tool_input.get("items") or []
+                if isinstance(added, list) and added:
+                    data["added"] = _short(", ".join(str(a) for a in added), 60)
+            elif res.get("text"):
+                data["text"] = _short(res.get("text"), 80)
+            return {**base, "caption": f"{verb}: {title}", "data": data,
+                    "link": _note_link(res.get("id"))}
         if name in ("log_meal", "add_meal_items"):
             items = res.get("items") or tool_input.get("items") or []
             data: dict[str, Any] = {}
@@ -191,7 +314,8 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
                          _totals_kv(res.get("meal_totals") or res.get("totals")).items()})
             data.update({f"day {k}": v for k, v in _totals_kv(res.get("day_totals")).items()})
             label = res.get("label") or tool_input.get("label") or "meal"
-            return {**base, "caption": f"Logged {label}", "data": data}
+            return {**base, "caption": f"Logged {label}", "data": data,
+                    "link": _day_link(res.get("day"))}
         if name == "get_today_summary":
             data = dict(_totals_kv(res.get("totals")))
             meals = [m for m in (res.get("meals") or []) if not m.get("voided_at")]
@@ -199,7 +323,8 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
             rem = res.get("remaining") or {}
             if isinstance(rem, dict) and rem.get("protein_g") is not None:
                 data["protein to go"] = _rng(None, None, rem.get("protein_g"), " g")
-            return {**base, "caption": f"{res.get('day', 'Today')} so far", "data": data}
+            return {**base, "caption": f"{res.get('day', 'Today')} so far", "data": data,
+                    "link": _day_link(res.get("day"))}
         if name == "get_recent":
             # akhada nests averages: {all_days, logged_days_only}. The
             # logged-days figure is the honest one on a fast/refeed
@@ -212,12 +337,13 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
                 "days logged": str(sum(1 for d in (res.get("days") or []) if d.get("logged"))),
             }
             return {**base, "caption": f"{res.get('start', '')} → {res.get('end', '')}".strip(" →"),
-                    "data": data}
+                    "data": data, "link": {"to": "/data/fitness", "label": "Open Fitness"}}
         if name == "log_workout":
             w = res if res.get("title") else tool_input
             data = {k: str(v) for k, v in (("kind", w.get("kind")), ("duration", w.get("duration_min")))
                     if v is not None}
-            return {**base, "caption": f"Logged {w.get('title') or 'workout'}", "data": data}
+            return {**base, "caption": f"Logged {w.get('title') or 'workout'}", "data": data,
+                    "link": _day_link(res.get("day") or w.get("day"))}
         if name in ("log_vital", "log_weight"):
             v = res if res.get("kind") or res.get("value") is not None else tool_input
             kind = str(v.get("kind") or ("weight" if name == "log_weight" else "vital"))

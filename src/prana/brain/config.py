@@ -117,8 +117,19 @@ class BrainConfig:
         default_factory=lambda: Path.home() / ".narada" / ".smriti" / "wake-context.md"
     )
 
+    # Code-editing tools stay off for the phone chat (charter.py); the
+    # env knob exists for a future coding mode, not for daily use.
+    code_edits: bool = os.environ.get("NARADA_BRAIN_CODE_EDITS", "0") == "1"
+
     def system_append(self) -> str:
-        return self.wake_context.read_text(encoding="utf-8", errors="replace")
+        from prana.brain.charter import PHONE_CHARTER
+
+        wake = self.wake_context.read_text(encoding="utf-8", errors="replace")
+        return wake.rstrip() + "\n" + PHONE_CHARTER
+
+    @property
+    def disallowed_tools(self) -> list[str]:
+        return [] if self.code_edits else ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 
     def deadline_for(self, model: str) -> float:
         return MODEL_DEADLINES_S.get(model, self.turn_deadline_s)

@@ -174,9 +174,19 @@ def prefs_client(tmp_path, monkeypatch):
 def test_prefs_defaults_and_roundtrip(prefs_client):
     client, home = prefs_client
     headers = {"Authorization": "Bearer tok-app"}
-    assert client.get("/api/voice/prefs", headers=headers).json() == {
+    got = client.get("/api/voice/prefs", headers=headers).json()
+    assert {k: got[k] for k in ("vad_threshold", "noise_reduction", "language", "brevity")} == {
         "vad_threshold": 0.7, "noise_reduction": "near_field",
         "language": "en", "brevity": "normal"}
+    # The call's model (Suti 2026-09-09): the worker's default first,
+    # the choices alongside, and a pick round-trips to the same file.
+    assert got["model"] == got["models"][0]
+    assert "gpt-realtime" in got["models"]
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"model": "gpt-realtime"}).status_code == 200
+    assert client.get("/api/voice/prefs", headers=headers).json()["model"] == "gpt-realtime"
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"model": "gpt-5-omniscient"}).status_code == 400
     res = client.post("/api/voice/prefs", headers=headers,
                       json={"vad_threshold": 0.55,
                             "noise_reduction": "far_field"})

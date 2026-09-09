@@ -277,9 +277,12 @@ async def entrypoint(ctx: JobContext) -> None:
         noise_pref = str(prefs.get("noise_reduction") or "near_field")
         language = str(prefs.get("language") or os.environ.get(
             "NARADA_PHONE_LANGUAGE", "en"))
+        # The model too, from Settings (Suti 2026-09-09); env/default
+        # otherwise. Read at job start like the rest: next call.
+        realtime_model = str(prefs.get("model") or box.REALTIME_MODEL)
         session = AgentSession(
             llm=lk_openai.realtime.RealtimeModel(
-                model=box.REALTIME_MODEL, voice=box.REALTIME_VOICE,
+                model=realtime_model, voice=box.REALTIME_VOICE,
                 turn_detection=_rt_mod.TurnDetection(
                     type="server_vad",
                     threshold=vad_threshold,
@@ -292,8 +295,8 @@ async def entrypoint(ctx: JobContext) -> None:
                     language=language)),
             user_away_timeout=None,
         )
-        logger.info("voice prefs: vad=%.2f noise=%s lang=%s",
-                    vad_threshold, noise_pref, language)
+        logger.info("voice prefs: vad=%.2f noise=%s lang=%s model=%s",
+                    vad_threshold, noise_pref, language, realtime_model)
 
         @session.on("metrics_collected")
         def _on_metrics(ev) -> None:
@@ -364,7 +367,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 music=None, publish=_publish_activity, end_session=bye.set,
                 speak=_session_speak,
                 voice_info={
-                    "model": box.REALTIME_MODEL,
+                    "model": realtime_model,
                     "voice": box.REALTIME_VOICE,
                     "backend": "realtime",
                     "surface": "phone",
@@ -372,7 +375,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
         await session.start(agent=agent, room=ctx.room)
         logger.info("phone session open (model=%s, room=%s)",
-                    box.REALTIME_MODEL, ctx.room.name)
+                    realtime_model, ctx.room.name)
 
         # Silence timeout, with the Adyostotram lesson kept: HIS words
         # are activity even when agent state never transitions.

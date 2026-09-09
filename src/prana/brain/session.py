@@ -235,6 +235,7 @@ class SessionPool:
             max_tool_iterations=self._config.max_tool_iterations,
             cwd=str(session_dir),
             resume=resume,
+            disallowed_tools=self._config.disallowed_tools,
         )
         await backend.start()
         store = TurnStore(

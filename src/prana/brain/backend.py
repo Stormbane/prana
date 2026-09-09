@@ -44,6 +44,7 @@ class SdkBackend:
         max_tool_iterations: int,
         cwd: str,
         resume: str | None = None,
+        disallowed_tools: list[str] | None = None,
     ):
         # Import here so the API layer stays importable (and testable
         # with FakeBackend) on machines without the SDK.
@@ -58,6 +59,10 @@ class SdkBackend:
             max_turns=max_tool_iterations,
             cwd=cwd,
             resume=resume,
+            # The phone chat records code changes rather than making
+            # them (charter.py); the editing tools are off at the SDK
+            # too, so the rule has teeth.
+            disallowed_tools=list(disallowed_tools or []),
         )
         self._client = ClaudeSDKClient(options=self._options)
         self._native_session_id: str | None = resume
@@ -83,48 +88,31 @@ class SdkBackend:
             await self._client.query(_one_message())
         from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage
 
-        from prana.brain.cards import (
-            ActivityEvent, CardEvent, activity_for, card_for, interesting,
-        )
+        from prana.brain.cards import ToolTracker
 
-        # Auto-cards (plan §T4): the SDK streams every tool use and its
-        # result; an interesting akhada call becomes a card yielded in
-        # place, between the text it accompanies. EVERY tool use also
-        # yields an activity chip the moment it starts (Suti 2026-09-08:
-        # "when a web search happens a little chip comes up").
-        pending_tools: dict[str, tuple[str, dict]] = {}
+        # Auto-cards (plan §T4) and activity chips (Suti 2026-09-08/09):
+        # the SDK streams every tool use and its result; the tracker
+        # pairs them — a chip the moment a call starts, then the card
+        # (if the result mints one) and the chip's closing state, in
+        # place between the text they accompany.
+        tracker = ToolTracker()
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         yield block.text
                     elif isinstance(block, ToolUseBlock):
-                        # The SDK forwards `input` unvalidated; a string
-                        # or list here must not abort the turn just to
-                        # label a chip (review).
-                        raw_input = block.input
-                        tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
-                        activity = activity_for(block.name, tool_input)
-                        if activity is not None:
-                            yield ActivityEvent(activity)
-                        if interesting(block.name):
-                            pending_tools[block.id] = (block.name, tool_input)
+                        for ev in tracker.on_use(block.id, block.name, block.input):
+                            yield ev
             elif isinstance(msg, UserMessage):
                 content = msg.content if isinstance(msg.content, list) else []
                 for block in content:
                     if not isinstance(block, ToolResultBlock):
                         continue
-                    use = pending_tools.pop(block.tool_use_id, None)
-                    if use is None:
-                        continue
-                    raw = block.content
-                    if isinstance(raw, list):
-                        raw = "".join(
-                            p.get("text", "") for p in raw
-                            if isinstance(p, dict) and p.get("type") == "text")
-                    spec = card_for(use[0], use[1], raw if isinstance(raw, str) else "")
-                    if spec is not None:
-                        yield CardEvent(spec)
+                    for ev in tracker.on_result(
+                            block.tool_use_id, block.content,
+                            bool(getattr(block, "is_error", False))):
+                        yield ev
             elif isinstance(msg, ResultMessage):
                 sid = getattr(msg, "session_id", None)
                 if sid:

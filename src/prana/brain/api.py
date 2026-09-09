@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -401,6 +402,11 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
     _VOICE_PREFS = Path.home() / ".narada" / "brain" / "voice-prefs.json"
     _NOISE_MODES = ("near_field", "far_field", "off")
     _BREVITY_MODES = ("normal", "brief")
+    # The realtime model for calls (Suti 2026-09-09: "let me choose the
+    # voice model from settings"). First is the worker's default.
+    _VOICE_MODELS = ("gpt-realtime-2.1-mini", "gpt-realtime-2.1",
+                     "gpt-realtime", "gpt-realtime-mini")
+    _VOICE_MODEL_DEFAULT = os.environ.get("NARADA_VOICE_MODEL", _VOICE_MODELS[0])
 
     @app.get("/api/voice/prefs")
     async def voice_prefs_get(tier: str = Depends(require_tier)) -> dict:
@@ -414,6 +420,8 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
             # Brief mode (Suti on the phone 2026-09-08: "like TV mode —
             # toggle it from the phone"): short replies on calls.
             "brevity": saved.get("brevity", "normal"),
+            "model": saved.get("model") or _VOICE_MODEL_DEFAULT,
+            "models": list(dict.fromkeys((_VOICE_MODEL_DEFAULT, *_VOICE_MODELS))),
         }
 
     @app.post("/api/voice/prefs")
@@ -449,6 +457,11 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
                 raise HTTPException(
                     400, f"brevity must be one of {_BREVITY_MODES}")
             prefs["brevity"] = body["brevity"]
+        if "model" in body:
+            allowed = (_VOICE_MODEL_DEFAULT, *_VOICE_MODELS)
+            if body["model"] not in allowed:
+                raise HTTPException(400, f"model must be one of {allowed}")
+            prefs["model"] = body["model"]
         # One writer for the file, shared with the voice tool (review:
         # two independent read-modify-writes lost updates).
         from prana.voice.prefs import PrefsError, update_prefs
@@ -503,6 +516,30 @@ def create_app(config: BrainConfig, backend_factory) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.warning("fitness recent failed: %s", exc)
             raise HTTPException(502, f"recent failed: {exc}")
+
+    @app.get("/api/fitness/exercise")
+    async def fitness_exercise(name: str, days: int = 365,
+                               tier: str = Depends(require_tier)) -> dict:
+        """One exercise's sets over time (Suti 2026-09-09: tap the set
+        card → that exercise, its weight/reps progression, the days it
+        was logged) — akhada's get_exercise_history, in-process."""
+        name = name.strip()
+        if not name or len(name) > 80:
+            raise HTTPException(400, "name must be 1–80 characters")
+        if not 1 <= days <= 730:
+            raise HTTPException(400, "days must be 1–730")
+        try:
+            from akhada.store.db import Store
+            from akhada.tools.catalog import dispatch
+        except ImportError:
+            raise HTTPException(503, "akhada not installed on this host")
+        try:
+            return await asyncio.to_thread(
+                dispatch, "get_exercise_history", {"exercise": name, "days": days},
+                store=Store(), session_id="brain-data-tab", source="app")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("exercise history failed: %s", exc)
+            raise HTTPException(502, f"exercise history failed: {exc}")
 
     # Mutations the Data tab may perform directly. A deliberate,
     # narrow allowlist: corrections to what exists (amend, void,
