@@ -43,12 +43,17 @@ logger = logging.getLogger("brain.push")
 
 _LOCK = threading.Lock()
 
-LEVELS: tuple[str, ...] = ("log", "warn", "error", "emergency")
+# "message" (Suti 2026-09-09): regular conversation from Narada — always
+# shown in the app with an unread mark, pushed and Telegrammed like an
+# error, but it is not a fault. Ranked between warn and error so the
+# old "warn+" filters keep meaning "worth a look".
+LEVELS: tuple[str, ...] = ("log", "warn", "message", "error", "emergency")
 DEFAULT_LEVEL = "error"  # migration-safe: unlabelled callers keep paging
 
 ROUTING: dict[str, tuple[str, ...]] = {
     "log": (),
     "warn": ("badge",),
+    "message": ("badge", "push", "telegram"),
     "error": ("badge", "push", "telegram"),
     "emergency": ("badge", "push", "telegram", "escalate"),
 }
