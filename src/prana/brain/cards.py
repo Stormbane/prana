@@ -197,6 +197,8 @@ def activity_for(tool_name: str, tool_input: Any) -> dict[str, str] | None:
         return {"text": "Speaking through the house", "kind": "music"}
     if tool_name in ("TodoWrite", "ToolSearch", "Task", "Agent", "AskUserQuestion"):
         return None
+    if bare.startswith("list_mcp_"):  # Codex's own MCP housekeeping
+        return None
     return {"text": bare.replace("_", " "), "kind": "tool"}
 
 

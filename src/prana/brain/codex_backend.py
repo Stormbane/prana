@@ -69,8 +69,35 @@ def codex_binary() -> list[str]:
     return [found]
 
 
+def _toml_str(value: str) -> str:
+    """A TOML basic string (json's escaping is TOML-compatible for the
+    paths and tokens we pass)."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def mcp_overrides(mcp_servers: dict) -> list[str]:
+    """``-c`` overrides that give Codex the brain's own MCP wiring —
+    the tier's servers, each with the brain's interpreter and args.
+    The user's config launches akhada with bare "python", which under
+    the supervisor is a venv without it: the first live turn (2026-09-09)
+    reported "akhada's tools aren't available". Same lesson as
+    config._mcp_servers, applied to Codex."""
+    out: list[str] = []
+    for name, spec in sorted(mcp_servers.items()):
+        if not isinstance(spec, dict) or not spec.get("command"):
+            continue
+        out += ["-c", f"mcp_servers.{name}.enabled=true"]
+        out += ["-c", f"mcp_servers.{name}.command={_toml_str(spec['command'])}"]
+        args = spec.get("args") or []
+        out += ["-c", f"mcp_servers.{name}.args=[{', '.join(_toml_str(a) for a in args)}]"]
+        for key, value in (spec.get("env") or {}).items():
+            out += ["-c", f"mcp_servers.{name}.env.{key}={_toml_str(value)}"]
+    return out
+
+
 def build_command(*, model: str, reasoning: str, disabled_servers: tuple[str, ...],
-                  images: list[str], resume: str | None) -> list[str]:
+                  images: list[str], resume: str | None,
+                  mcp_servers: dict | None = None) -> list[str]:
     """The argv for one turn. The prompt travels on stdin, never argv
     (a .cmd shim truncates an argument at its first newline — the
     morning-message lesson, 2026-09-08). Flags sit BEFORE ``resume``:
@@ -82,6 +109,7 @@ def build_command(*, model: str, reasoning: str, disabled_servers: tuple[str, ..
     ]
     for server in disabled_servers:
         cmd += ["-c", f"mcp_servers.{server}.enabled=false"]
+    cmd += mcp_overrides(mcp_servers or {})
     for path in images:
         cmd += ["-i", path]
     if resume:
@@ -221,7 +249,8 @@ class CodexBackend:
         reasoning: str = "medium",
         disabled_servers: tuple[str, ...] = (),
     ):
-        del mcp_servers, max_tool_iterations, disallowed_tools  # Codex's own config rules these
+        del max_tool_iterations, disallowed_tools  # Codex's own config rules these
+        self._mcp_servers = dict(mcp_servers or {})
         self._model = model
         self._system_append = system_append
         self._cwd = Path(cwd)
@@ -274,7 +303,7 @@ class CodexBackend:
             self._handover = None
         cmd = build_command(model=self._model, reasoning=self._reasoning,
                             disabled_servers=self._disabled, images=images,
-                            resume=self._native_session_id)
+                            resume=self._native_session_id, mcp_servers=self._mcp_servers)
         started = time.time()
         reader = TurnReader()
         self._proc = await asyncio.create_subprocess_exec(

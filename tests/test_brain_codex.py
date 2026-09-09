@@ -265,3 +265,32 @@ def test_models_endpoint_names_backends_and_images_are_served(tmp_path, monkeypa
         assert c.get("/api/images/nope.png", headers=h).status_code == 404
         assert c.get("/api/images/..%2Fwake.md", headers=h).status_code in (400, 404)
         assert c.get("/api/images/Abc.PNG", headers=h).status_code == 400
+
+
+def test_the_brain_s_mcp_wiring_rides_as_overrides(monkeypatch):
+    from prana.brain.codex_backend import mcp_overrides
+
+    servers = {
+        "akhada": {"command": r"C:\ProgramData\anaconda3\python.exe",
+                   "args": ["-m", "akhada.adapters.mcp_server"]},
+        "narada-sessions": {"command": "py", "args": ["-m", "x"], "env": {"PRANA_SESSIONS_TOKEN": "t\"q"}},
+        "broken": "not a spec",
+    }
+    ov = mcp_overrides(servers)
+    assert "mcp_servers.akhada.enabled=true" in ov
+    assert f"mcp_servers.akhada.command={json.dumps(servers['akhada']['command'])}" in ov
+    assert 'mcp_servers.akhada.args=["-m", "akhada.adapters.mcp_server"]' in ov
+    assert f"mcp_servers.narada-sessions.env.PRANA_SESSIONS_TOKEN={json.dumps('t' + chr(34) + 'q')}" in ov
+    assert not any("broken" in o for o in ov)
+    monkeypatch.setenv("NARADA_CODEX_BIN", "codex.exe")
+    cmd = build_command(model="m", reasoning="low", disabled_servers=("supabase",), images=[],
+                        resume="t1", mcp_servers=servers)
+    assert cmd.index("mcp_servers.supabase.enabled=false") < cmd.index("resume")
+    assert cmd.index("mcp_servers.akhada.enabled=true") < cmd.index("resume")
+
+
+def test_codex_housekeeping_calls_get_no_chip():
+    from prana.brain.cards import activity_for
+
+    assert activity_for("mcp__x__list_mcp_resources", {}) is None
+    assert activity_for("mcp__x__list_mcp_resource_templates", {}) is None
