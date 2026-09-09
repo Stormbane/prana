@@ -131,7 +131,7 @@ def test_agents_md_carries_the_instructions_and_images_go_to_files(tmp_path):
                      mcp_servers={}, max_tool_iterations=20, cwd=str(tmp_path / "s"),
                      codex_home=tmp_path, images_dir=tmp_path / "img")
     asyncio.run(b.start())
-    text = (tmp_path / "s" / "AGENTS.md").read_text(encoding="utf-8")
+    text = (tmp_path / "s" / "codex" / "AGENTS.md").read_text(encoding="utf-8")
     assert text.startswith("I am Narada.") and "no code" in text and "imagegen" in text
     import base64
     prompt = [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
@@ -201,9 +201,10 @@ def test_switching_backends_drops_the_resume_and_hands_over_the_transcript(pool)
         assert _Fake.made[-1].name == "claude" and _Fake.made[-1].kw["handover"] is None
         s.append_transcript("user", "remember the milk")
         s.append_transcript("assistant", "Noted: milk.")
-        async for _ in s.backend.run_turn("x"):
+        s.reserve()
+        async for _ in s.run_turn("x", deadline_s=5):
             pass
-        s._persist_native_id()
+        s.release()
         s2 = await pool.switch_model("chat", "app", codex_model)
         made = _Fake.made[-1]
         assert made.name == "codex"
@@ -213,18 +214,20 @@ def test_switching_backends_drops_the_resume_and_hands_over_the_transcript(pool)
         assert s2.model == codex_model
         assert (pool._config.sessions_root / "app" / "chat" / "backend").read_text() == "codex"
         # and back again: the Codex id is not handed to Claude either
-        async for _ in s2.backend.run_turn("y"):
+        s2.reserve()
+        async for _ in s2.run_turn("y", deadline_s=5):
             pass
-        s2._persist_native_id()
+        s2.release()
         s3 = await pool.switch_model("chat", "app", "haiku")
         back = _Fake.made[-1]
         assert back.name == "claude" and back.kw["resume"] is None and back.kw["handover"]
         # the Codex id is gone from disk too, not merely skipped once
         assert (pool._config.sessions_root / "app" / "chat" / "native-session-id").read_text() == ""
         # same backend: resume as before, no handover
-        async for _ in s3.backend.run_turn("z"):
+        s3.reserve()
+        async for _ in s3.run_turn("z", deadline_s=5):
             pass
-        s3._persist_native_id()
+        s3.release()
         await pool.switch_model("chat", "app", "sonnet")
         same = _Fake.made[-1]
         assert same.kw["resume"] == "claude-native" and same.kw["handover"] is None

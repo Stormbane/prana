@@ -82,7 +82,6 @@ class SdkBackend:
 
         if self._handover:
             preamble = self._handover.rstrip() + "\n\n"
-            self._handover = None
             if isinstance(prompt, str):
                 prompt = preamble + prompt
             elif isinstance(prompt, list):
@@ -139,6 +138,7 @@ class SdkBackend:
                     raise RuntimeError(
                         f"agent turn ended in error (subtype={subtype})"
                     )
+                self._handover = None  # delivered (review: not before)
                 break
 
     async def cancel(self) -> None:

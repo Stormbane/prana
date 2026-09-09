@@ -145,6 +145,7 @@ class BrainSession:
                 await on_start()
             started = time.monotonic()
             agen = self.backend.run_turn(prompt)
+            completed = False
             try:
                 while True:
                     remaining = deadline_s - (time.monotonic() - started)
@@ -165,10 +166,14 @@ class BrainSession:
                             f"turn exceeded {deadline_s:.0f}s wall-clock bound"
                         ) from None
                     yield chunk
+                completed = True
             finally:
                 await agen.aclose()
                 self.last_used = time.monotonic()
                 self._persist_native_id()
+                if completed:
+                    # The handover, if any, is in the native conversation now.
+                    (self.session_dir / "pending-handover.md").unlink(missing_ok=True)
 
     async def cancel(self) -> bool:
         """Explicit cancel: stops at the next tool boundary. Returns
@@ -276,6 +281,11 @@ class SessionPool:
         backend_file = session_dir / "backend"
         prior = (backend_file.read_text(encoding="utf-8").strip() or None
                  if backend_file.exists() else None)
+        if prior is None and resume is not None:
+            # A session from before backends were recorded: its native
+            # id is Claude's (review: a cold switch handed it to Codex).
+            prior = "claude"
+        pending = session_dir / "pending-handover.md"
         handover = None
         if prior is not None and prior != backend_name:
             resume = None
@@ -283,8 +293,16 @@ class SessionPool:
             # The other backend's id must not linger: a later same-backend
             # recreation would resume a foreign session (test caught it).
             native_file.write_text("", encoding="utf-8")
+            # Persisted until a turn on the new backend completes (review:
+            # a restart before that first turn lost it).
+            if handover:
+                pending.write_text(handover, encoding="utf-8")
+            else:
+                pending.unlink(missing_ok=True)
             logger.info("session %s crosses %s → %s: handover of %d chars",
                         key, prior, backend_name, len(handover or ""))
+        elif pending.exists():
+            handover = pending.read_text(encoding="utf-8") or None
         if prior != backend_name:
             backend_file.write_text(backend_name, encoding="utf-8")
 

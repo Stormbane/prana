@@ -30,6 +30,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -57,6 +59,24 @@ open or link the file yourself.
 # Turn-level noise Codex reports as error items.
 _IGNORED_ERRORS = ("clamping SessionEnd hook timeout",)
 
+# One JSONL event can carry a whole MCP result or command output; the
+# asyncio default (64 KiB) aborted legitimate turns (review).
+LINE_LIMIT = 16 * 1024 * 1024
+
+
+async def kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate ``proc`` and its descendants."""
+    if sys.platform == "win32":
+        def _taskkill() -> None:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, check=False)
+        await asyncio.to_thread(_taskkill)
+    else:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
 
 def codex_binary() -> list[str]:
     """The command prefix for Codex: an explicit path from the
@@ -73,6 +93,23 @@ def _toml_str(value: str) -> str:
     """A TOML basic string (json's escaping is TOML-compatible for the
     paths and tokens we pass)."""
     return json.dumps(str(value), ensure_ascii=False)
+
+
+def host_mcp_servers(codex_home: Path) -> set[str]:
+    """The MCP servers the user's own Codex config declares. Every one
+    of them is switched OFF for a brain session unless the tier wires
+    it (review: the host's servers leaked into app and voice tiers;
+    TIER_SERVERS, not the host config, decides). Plugin-provided servers
+    are not in the file and cannot be disabled by override."""
+    path = codex_home / "config.toml"
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    servers = data.get("mcp_servers")
+    return set(servers) if isinstance(servers, dict) else set()
 
 
 def mcp_overrides(mcp_servers: dict) -> list[str]:
@@ -97,17 +134,24 @@ def mcp_overrides(mcp_servers: dict) -> list[str]:
 
 def build_command(*, model: str, reasoning: str, disabled_servers: tuple[str, ...],
                   images: list[str], resume: str | None,
-                  mcp_servers: dict | None = None) -> list[str]:
+                  mcp_servers: dict | None = None,
+                  host_servers: set[str] | None = None) -> list[str]:
     """The argv for one turn. The prompt travels on stdin, never argv
     (a .cmd shim truncates an argument at its first newline — the
     morning-message lesson, 2026-09-08). Flags sit BEFORE ``resume``:
-    the subcommand accepts only a subset and the parent's carry through."""
+    the subcommand accepts only a subset and the parent's carry through.
+
+    Servers: everything the host config declares is disabled unless the
+    tier wires it; the tier's servers are (re)declared with the brain's
+    command, args and env."""
     cmd = codex_binary() + [
         "exec", "--json", "--skip-git-repo-check", "--approve-for-me",
         "-m", model,
         "-c", f'model_reasoning_effort="{reasoning}"',
     ]
-    for server in disabled_servers:
+    tier = set((mcp_servers or {}).keys())
+    off = sorted((set(host_servers or ()) | set(disabled_servers)) - tier)
+    for server in off:
         cmd += ["-c", f"mcp_servers.{server}.enabled=false"]
     cmd += mcp_overrides(mcp_servers or {})
     for path in images:
@@ -253,13 +297,17 @@ class CodexBackend:
         self._mcp_servers = dict(mcp_servers or {})
         self._model = model
         self._system_append = system_append
-        self._cwd = Path(cwd)
+        # Codex's writable workspace is a scratch subdirectory, NOT the
+        # session directory: turns.json, transcript.jsonl and the pins
+        # live one level up, outside workspace-write's reach (review).
+        self._cwd = Path(cwd) / "codex"
         self._native_session_id: str | None = resume
         self._handover = handover
         self._codex_home = codex_home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
         self._images_dir = images_dir or (Path.home() / ".narada" / "brain" / "images")
         self._reasoning = reasoning
         self._disabled = tuple(disabled_servers)
+        self._host_servers = host_mcp_servers(self._codex_home)
         self._proc: asyncio.subprocess.Process | None = None
 
     async def start(self) -> None:
@@ -298,27 +346,46 @@ class CodexBackend:
 
     async def run_turn(self, prompt) -> AsyncIterator[Any]:
         text, images = self._materialize(prompt)
+        # The handover rides the first turn and is forgotten only once
+        # that turn COMPLETES (review: a failed first turn dropped it).
         if self._handover:
             text = self._handover.rstrip() + "\n\n" + text
-            self._handover = None
         cmd = build_command(model=self._model, reasoning=self._reasoning,
                             disabled_servers=self._disabled, images=images,
-                            resume=self._native_session_id, mcp_servers=self._mcp_servers)
+                            resume=self._native_session_id, mcp_servers=self._mcp_servers,
+                            host_servers=self._host_servers)
         started = time.time()
         reader = TurnReader()
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(self._cwd),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(self._cwd),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, limit=LINE_LIMIT)
+        except OSError as exc:
+            raise RuntimeError(f"codex could not be started: {exc}") from exc
         proc = self._proc
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
-        proc.stdin.write(text.encode("utf-8"))
-        await proc.stdin.drain()
-        proc.stdin.close()
+
+        async def feed_stdin() -> None:
+            # Concurrent with reading: a prompt larger than the pipe
+            # would otherwise deadlock against unread stdout.
+            try:
+                proc.stdin.write(text.encode("utf-8"))
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                proc.stdin.close()
+
+        stdin_task = asyncio.create_task(feed_stdin())
         stderr_task = asyncio.create_task(proc.stderr.read())
+        stderr = ""
         try:
             while True:
-                raw = await proc.stdout.readline()
+                try:
+                    raw = await proc.stdout.readline()
+                except ValueError as exc:  # a line past LINE_LIMIT
+                    raise RuntimeError(f"codex event too large: {exc}") from exc
                 if not raw:
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -335,21 +402,36 @@ class CodexBackend:
             await proc.wait()
             stderr = (await stderr_task).decode("utf-8", errors="replace")
         finally:
-            if proc.returncode is None:
-                proc.kill()
+            await self._end(proc)
+            for task in (stdin_task, stderr_task):
+                if not task.done():
+                    task.cancel()
             self._proc = None
         if reader.failed:
             raise RuntimeError(f"codex turn failed: {reader.failed}")
         if not reader.completed:
             tail = "; ".join(reader.errors[-2:]) or stderr.strip().splitlines()[-1:] or ["no turn.completed"]
             raise RuntimeError(f"codex exited {proc.returncode} before completing the turn: {tail}")
+        self._handover = None
         for card in harvest_images(self._codex_home, reader.thread_id, started, self._images_dir):
             yield card
+
+    async def _end(self, proc: asyncio.subprocess.Process) -> None:
+        """Make sure the whole process tree is gone and reaped. On
+        Windows the shim (cmd.exe) is what we hold; killing it alone
+        leaves codex.exe running with our pipes (review) — taskkill /T
+        takes the tree."""
+        if proc.returncode is None:
+            await kill_tree(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("codex process %s did not exit after kill", proc.pid)
 
     async def cancel(self) -> None:
         proc = self._proc
         if proc is not None and proc.returncode is None:
-            proc.kill()
+            await self._end(proc)
 
     async def close(self) -> None:
         await self.cancel()
