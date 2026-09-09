@@ -221,3 +221,38 @@ def test_interrupted_delivery_is_retryable(monkeypatch):
                     telegram_fn=lambda _t: True)
     assert r["new"] is False and sorted(r["channels"]) == ["push", "telegram"]
     assert push.read_notifications()[-1]["delivered"] == {"push": True, "telegram": True}
+
+
+def test_messages_never_fold_into_an_episode(monkeypatch):
+    """Review: two messages six minutes apart in one category are two
+    things Narada said, not a fault repeating."""
+    monkeypatch.setattr(push, "_push_all", lambda *a, **k: {"sent": 0, "failed": 0, "dropped": 0})
+    monkeypatch.setattr(push, "_telegram", lambda *a, **k: True)
+    first = push.notify(body="Good morning", level="message", source="notify-suti",
+                        category="morning", event_id="m-1")
+    second = push.notify(body="One more thing", level="message", source="notify-suti",
+                         category="morning", event_id="m-2")
+    rows = push.read_notifications()
+    assert [r["body"] for r in rows] == ["Good morning", "One more thing"]
+    assert all(r["count"] == 1 and r["open"] is False for r in rows)
+    assert "push" in second["channels"] and "telegram" in second["channels"]
+    assert first["row"]["id"] != second["row"]["id"]
+    # A message during an open error episode in the same category stays a message.
+    push.notify(body="disk failing", level="error", source="host", category="disk", event_id="e-1")
+    push.notify(body="I'm on it", level="message", source="host", category="disk", event_id="m-3")
+    rows = push.read_notifications()
+    assert [r["level"] for r in rows[-2:]] == ["error", "message"]
+    assert rows[-2]["open"] is True and rows[-2]["count"] == 1
+
+
+def test_push_payload_carries_the_row_identity(monkeypatch):
+    seen = []
+    monkeypatch.setattr(push, "_load_subs", lambda: {"ep": {"endpoint": "ep"}})
+    monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
+
+    def fake_webpush(**kw):
+        seen.append(json.loads(kw["data"]))
+
+    r = push.notify(body="Water!", level="emergency", source="narada", webpush_fn=fake_webpush)
+    assert seen and seen[0]["id"] == r["row"]["id"] and seen[0]["at"] == r["row"]["at"]
+    assert seen[0]["level"] == "emergency"

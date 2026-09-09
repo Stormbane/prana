@@ -283,7 +283,11 @@ def record(*, level: str, source: str, title: str, body: str,
         now_iso, now_ts = _now_iso(), _now_ts()
         row: dict | None = None
         escalated = False
-        if category:
+        # A conversation message is never an "episode" (review): two
+        # messages six minutes apart are two things Narada said, not one
+        # fault repeating — each gets its own row; an open fault episode
+        # in the same category is left alone.
+        if category and level != "message":
             open_row = next(
                 (r for r in reversed(rows)
                  if r.get("open") and r.get("source") == source
@@ -315,7 +319,8 @@ def record(*, level: str, source: str, title: str, body: str,
                 "at": now_iso, "first_at": now_iso,
                 "level": level, "source": source, "category": category,
                 "title": title, "body": body, "url": url,
-                "count": 1, "open": bool(category) and level != "log",
+                "count": 1,
+                "open": bool(category) and level not in ("log", "message"),
                 **({"event_id": event_id} if event_id else {}),
             }
             rows.append(row)
@@ -329,13 +334,17 @@ def record(*, level: str, source: str, title: str, body: str,
 # ── delivery ──────────────────────────────────────────────────────────
 
 
-def _push_all(title: str, body: str, url: str, level: str, webpush_fn=None) -> dict:
+def _push_all(title: str, body: str, url: str, level: str, webpush_fn=None,
+              row: dict | None = None) -> dict:
     if webpush_fn is None:
         from pywebpush import webpush as webpush_fn  # type: ignore[no-redef]
     from pywebpush import WebPushException
 
     vapid_key_path = str(_vapid_pem_path())
-    payload = json.dumps({"title": title, "body": body, "url": url, "level": level})
+    # id + at: the row's identity AND revision, so the app can dedupe the
+    # alarm between the push door and the feed door (review).
+    payload = json.dumps({"title": title, "body": body, "url": url, "level": level,
+                          "id": (row or {}).get("id"), "at": (row or {}).get("at")})
     with _LOCK:
         subs = _load_subs()
     sent, failed, dropped = 0, 0, []
@@ -431,7 +440,8 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
     # even initialise must never take Telegram down with it.
     if "push" in channels:
         try:
-            result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn)
+            result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn,
+                                       row=row)
             outcomes["push"] = int(result["push"].get("failed", 0)) == 0
         except Exception as exc:  # noqa: BLE001
             logger.warning("push subsystem failed: %s", exc)
