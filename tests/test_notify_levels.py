@@ -270,6 +270,10 @@ def test_episode_revision_is_monotonic_even_within_one_second(monkeypatch):
     monkeypatch.setattr(push, "_load_subs", lambda: {"ep": {"endpoint": "ep"}})
     monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
     monkeypatch.setattr(push, "_push_all", real_push_all)  # the real one, capturing the payload
-    push.notify(body="disk on fire", level="emergency", source="host", category="disk", event_id="d-3",
+    # A third event on the same (already-emergency) episode only badges;
+    # a NEW episode pushes, and its payload carries rev 1.
+    c = push.notify(body="disk on fire", level="emergency", source="host", category="disk", event_id="d-3")
+    assert c["row"]["rev"] == 3 and "push" not in c["channels"]
+    push.notify(body="smoke in the rack", level="emergency", source="host", category="fire", event_id="f-1",
                 webpush_fn=lambda **kw: seen.append(json.loads(kw["data"])))
-    assert seen[-1]["rev"] == 3
+    assert seen[-1]["rev"] == 1 and seen[-1]["level"] == "emergency"
