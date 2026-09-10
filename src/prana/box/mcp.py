@@ -24,8 +24,10 @@ mcp = FastMCP("narada-box")
 async def box_show_image(name: str = "", ttl_s: int = 20) -> str:
     """Show a picture on the box's screen for ttl_s seconds (3–300).
     `name` is an image from the brain's store (the name in its
-    /api/images/<name> url) or an absolute path; leave it empty to show
-    the picture you generated most recently."""
+    /api/images/<name> url); leave it empty to show the picture you
+    generated most recently. The result says "published": the box does
+    not report back what it displayed — say "sent to the box", not
+    "showing on the box", unless Suti confirms."""
     # async: FastMCP calls tools on its own event loop, where
     # asyncio.run() is refused (first live turn: "box connection error").
     try:

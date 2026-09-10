@@ -370,12 +370,14 @@ def create_app(config: BrainConfig, backend_factory,
         except Exception:
             raise HTTPException(400, "body must be JSON")
         url = body.get("url") if isinstance(body, dict) else None
-        if not isinstance(url, str) or "/api/images/" not in url:
+        # The GET route's strict name rule, resolved beneath the store
+        # (review: "/api/images/C:\\x.png" split to an absolute path).
+        name = url.rsplit("/", 1)[-1] if isinstance(url, str) and url.startswith("/api/images/") else ""
+        if not box_images.STORE_NAME.fullmatch(name):
             raise HTTPException(400, "url must name an image in the store")
         ttl = body.get("ttl_s", 20)
         try:
-            return await box_images.show_image(url.rsplit("/", 1)[-1],
-                                               int(ttl) if isinstance(ttl, (int, float)) else 20)
+            return await box_images.show_image(name, int(ttl) if isinstance(ttl, (int, float)) else 20)
         except FileNotFoundError:
             raise HTTPException(404, "no such image")
         except Exception as exc:  # noqa: BLE001

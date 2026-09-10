@@ -15,10 +15,13 @@ API — presentation only, never the honest indicators):
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
 import os
+import re
+import secrets
 import struct
 import time
 from pathlib import Path
@@ -32,6 +35,9 @@ TOPIC_IMAGE = "narada.image"
 TOPIC_CHUNK = "narada.image.chunk"
 DEVICE_ROOM = os.environ.get("NARADA_VOICE_ROOM", "narada-body")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+# The store's own names (codex_backend.harvest_images mints them) — the
+# same rule the GET route enforces. Nothing else names a picture.
+STORE_NAME = re.compile(r"[a-z0-9-]{1,64}\.(png|jpg|jpeg|webp)")
 
 
 def images_dir() -> Path:
@@ -88,40 +94,83 @@ def _livekit_api():
     return lkapi, lkapi.LiveKitAPI(url, key, secret)
 
 
+class _TransferLock:
+    """One transfer at a time per host, across processes (the brain's
+    endpoint and every chat's MCP server send through here): the box
+    has ONE assembly buffer, and two interleaved transfers mixed their
+    chunks (review). A lock FILE beside the store, stale after 30 s."""
+
+    def __init__(self, timeout_s: float = 20.0, stale_s: float = 30.0):
+        self.path = images_dir() / ".box-send.lock"
+        self.timeout_s = timeout_s
+        self.stale_s = stale_s
+        self._fd: int | None = None
+
+    async def __aenter__(self) -> "_TransferLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            try:
+                self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > self.stale_s:
+                        self.path.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("another picture is still on its way to the box") from None
+                await asyncio.sleep(0.1)
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def new_image_id() -> int:
+    """Random, not the clock: two transfers in one second collided (review)."""
+    return secrets.randbelow(0xFFFF) + 1
+
+
 async def send_to_box(jpeg: bytes, ttl_ms: int = 20_000, room: str = DEVICE_ROOM) -> int:
-    """Publish the picture to the device room through the server API.
-    Returns the image id used."""
-    image_id = int(time.time()) & 0xFFFF
-    lkapi, lk = _livekit_api()
-    try:
-        for topic, payload in chunk_image(jpeg, image_id, ttl_ms):
-            await lk.room.send_data(lkapi.SendDataRequest(
-                room=room, data=payload, topic=topic,
-                kind=lkapi.DataPacket.Kind.RELIABLE))
-    finally:
-        await lk.aclose()
+    """Publish the picture to the device room through the server API,
+    one whole transfer at a time. Returns the image id used.
+
+    Publication, not display: the server API confirms it accepted the
+    packets, not that the box received or decoded them (reliable
+    delivery is best-effort for a receiver that is off). Callers say so."""
+    image_id = new_image_id()
+    async with _TransferLock():
+        lkapi, lk = _livekit_api()
+        try:
+            for topic, payload in chunk_image(jpeg, image_id, ttl_ms):
+                await lk.room.send_data(lkapi.SendDataRequest(
+                    room=room, data=payload, topic=topic,
+                    kind=lkapi.DataPacket.Kind.RELIABLE))
+        finally:
+            await lk.aclose()
     return image_id
 
 
 def resolve_image(name: str) -> Path:
-    """A name in the brain's store (as in /api/images/<name>) or an
-    absolute path to a picture file. Anything else is refused."""
+    """A picture in the brain's store, by its name or its url form
+    (/api/images/<name>). Nothing else: an absolute path here would
+    have let any chat tier or API caller put any readable image on the
+    box (review), so paths are refused outright."""
     name = name.strip()
-    if not name:
-        raise FileNotFoundError("no image named")
-    candidate = Path(name)
-    if candidate.is_absolute():
-        if candidate.suffix.lower() not in IMAGE_EXTS or not candidate.is_file():
-            raise FileNotFoundError(name)
-        return candidate
-    # A bare name, or the store's own url form (/api/images/<name>);
-    # any other path shape is refused rather than guessed at.
     if name.startswith("/api/images/"):
         name = name[len("/api/images/"):]
-    if "/" in name or "\\" in name or ".." in name:
-        raise FileNotFoundError(name)
+    if not STORE_NAME.fullmatch(name):
+        raise FileNotFoundError(name or "no image named")
     path = images_dir() / name
-    if path.suffix.lower() not in IMAGE_EXTS or not path.is_file():
+    if not path.is_file():
         raise FileNotFoundError(name)
     return path
 
@@ -165,4 +214,5 @@ async def show_image(name: str = "", ttl_s: int = 20) -> dict:
     image_id = await send_to_box(jpeg, ttl_ms)
     logger.info("box image %s: %s → %d bytes, ttl %ds", image_id, source.name, len(jpeg), ttl_s)
     return {"ok": True, "image": source.name, "bytes": len(jpeg), "ttl_s": ttl_ms // 1000,
-            "room": DEVICE_ROOM}
+            "room": DEVICE_ROOM, "delivery": "published",
+            "note": "sent to the box's room; the box does not confirm what it shows"}

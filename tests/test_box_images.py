@@ -51,20 +51,18 @@ def test_chunks_carry_a_header_and_ordered_parts():
     assert body == jpeg
 
 
-def test_resolve_image_only_from_the_store_or_an_absolute_picture(tmp_path, monkeypatch):
+def test_resolve_image_only_from_the_store(tmp_path, monkeypatch):
     monkeypatch.setenv("NARADA_IMAGES_DIR", str(tmp_path / "store"))
     (tmp_path / "store").mkdir()
     _png(tmp_path / "store" / "abc.png", (8, 8))
     assert images.resolve_image("abc.png") == tmp_path / "store" / "abc.png"
     assert images.resolve_image("/api/images/abc.png") == tmp_path / "store" / "abc.png"
-    for bad in ("", "nope.png", "../wake.md", "..\\x.png", "sub/abc.png"):
-        with pytest.raises(FileNotFoundError):
-            images.resolve_image(bad)
     _png(tmp_path / "elsewhere.png", (8, 8))
-    assert images.resolve_image(str(tmp_path / "elsewhere.png")) == tmp_path / "elsewhere.png"
-    (tmp_path / "secret.txt").write_text("x")
-    with pytest.raises(FileNotFoundError):
-        images.resolve_image(str(tmp_path / "secret.txt"))
+    for bad in ("", "nope.png", "../wake.md", "..\\x.png", "sub/abc.png", "Abc.PNG",
+                str(tmp_path / "elsewhere.png"), "/api/images/C:\\private\\photo.png",
+                "C:/private/photo.png"):
+        with pytest.raises(FileNotFoundError):
+            images.resolve_image(bad)  # no paths, ever (review)
 
 
 def test_latest_generated_is_the_newest_recent_picture(tmp_path, monkeypatch):
@@ -130,3 +128,97 @@ def test_the_mcp_tool_works_on_a_running_loop(tmp_path, monkeypatch):
     async def go2():
         return json.loads(await box_mcp.box_show_image("", 12))
     assert asyncio.run(go2())["ok"] is False
+
+
+def test_transfers_are_serialised_and_ids_do_not_repeat(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("NARADA_IMAGES_DIR", str(tmp_path))
+    log: list[tuple[str, int]] = []
+
+    class _Room:
+        async def send_data(self, req):
+            log.append((req.topic, req.data[:2].hex() if req.topic == images.TOPIC_CHUNK else "hdr"))
+            await asyncio.sleep(0.01)  # let the other transfer try to interleave
+
+    class _LK:
+        room = _Room()
+
+        async def aclose(self):
+            pass
+
+    class _Req:
+        def __init__(self, room, data, topic, kind):
+            self.topic, self.data = topic, data
+
+    class _API:
+        SendDataRequest = _Req
+
+        class DataPacket:
+            class Kind:
+                RELIABLE = 1
+
+    monkeypatch.setattr(images, "_livekit_api", lambda: (_API, _LK()))
+    a = b"\xff\xd8" + bytes(30_000)
+    b = b"\xff\xd8" + bytes(30_000)
+
+    async def go():
+        return await asyncio.gather(images.send_to_box(a, 1000), images.send_to_box(b, 1000))
+    ids = asyncio.run(go())
+    assert ids[0] != ids[1]
+    # every packet of one transfer lands before any packet of the other
+    topics = [t for t, _ in log]
+    first_header = topics.index(images.TOPIC_IMAGE)
+    second_header = topics.index(images.TOPIC_IMAGE, first_header + 1)
+    assert topics[first_header + 1:second_header] == [images.TOPIC_CHUNK] * 3
+    assert not (tmp_path / ".box-send.lock").exists()
+
+
+def test_the_endpoint_refuses_paths_dressed_as_store_urls(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from prana.brain.api import create_app
+    from prana.brain.config import BrainConfig
+
+    wake = tmp_path / "wake.md"
+    wake.write_text("ctx", encoding="utf-8")
+    config = BrainConfig(sessions_root=tmp_path / "sessions", wake_context=wake,
+                         images_dir=tmp_path / "images")
+    monkeypatch.setattr("prana.brain.api.load_brain_tokens", lambda: {"app": "tok-app"})
+    shown = []
+
+    async def fake_show(name, ttl_s):
+        shown.append((name, ttl_s))
+        return {"ok": True}
+
+    monkeypatch.setattr(images, "show_image", fake_show)
+
+    class _NoBackend:
+        def __init__(self, **kw):  # pragma: no cover
+            raise AssertionError("no session here")
+
+    with TestClient(create_app(config, _NoBackend)) as c:
+        h = {"Authorization": "Bearer tok-app"}
+        for bad in ("/api/images/C:\\private\\photo.png", "/api/images/../wake.md",
+                    "https://x/api/images/abc.png", "/api/images/Abc.PNG", "abc.png", 7):
+            assert c.post("/api/box/show", headers=h, json={"url": bad}).status_code == 400, bad
+        assert c.post("/api/box/show", headers=h, json={"url": "/api/images/abc12.png", "ttl_s": 9}
+                      ).status_code == 200
+        assert shown == [("abc12.png", 9)]
+
+
+def test_the_registered_tool_runs_through_fastmcp(monkeypatch):
+    import asyncio
+
+    from prana.box import mcp as box_mcp
+
+    async def fake_show(name, ttl_s):
+        return {"ok": True, "image": name or "latest", "ttl_s": ttl_s, "delivery": "published"}
+
+    monkeypatch.setattr(images, "show_image", fake_show)
+
+    async def go():
+        return await box_mcp.mcp.call_tool("box_show_image", {"name": "", "ttl_s": 7})
+    result = asyncio.run(go())
+    text = result[0].text if isinstance(result, list) else str(result)
+    assert '"delivery": "published"' in text and '"latest"' in text
