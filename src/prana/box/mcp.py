@@ -11,7 +11,6 @@ and ``box_show_image`` with no name picks the newest one.
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 from mcp.server.fastmcp import FastMCP
@@ -22,13 +21,15 @@ mcp = FastMCP("narada-box")
 
 
 @mcp.tool()
-def box_show_image(name: str = "", ttl_s: int = 20) -> str:
+async def box_show_image(name: str = "", ttl_s: int = 20) -> str:
     """Show a picture on the box's screen for ttl_s seconds (3–300).
     `name` is an image from the brain's store (the name in its
     /api/images/<name> url) or an absolute path; leave it empty to show
     the picture you generated most recently."""
+    # async: FastMCP calls tools on its own event loop, where
+    # asyncio.run() is refused (first live turn: "box connection error").
     try:
-        return json.dumps(asyncio.run(images.show_image(name, ttl_s)))
+        return json.dumps(await images.show_image(name, ttl_s))
     except FileNotFoundError as exc:
         return json.dumps({"ok": False, "error": f"no such image: {exc}"})
     except Exception as exc:  # noqa: BLE001 — the tool reports, never raises

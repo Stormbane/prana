@@ -104,3 +104,29 @@ def test_show_image_sends_the_prepared_picture(tmp_path, monkeypatch):
     assert sent["jpeg"][:2] == b"\xff\xd8" and sent["ttl_ms"] == 300_000
     with pytest.raises(FileNotFoundError):
         asyncio.run(images.show_image("", 5))  # nothing generated recently
+
+
+def test_the_mcp_tool_works_on_a_running_loop(tmp_path, monkeypatch):
+    """FastMCP runs tools on its own loop; the tool must await, not
+    asyncio.run (the first live turn failed exactly there)."""
+    import asyncio
+
+    from prana.box import mcp as box_mcp
+
+    async def fake_show(name, ttl_s):
+        return {"ok": True, "image": name or "latest", "ttl_s": ttl_s}
+
+    monkeypatch.setattr(images, "show_image", fake_show)
+
+    async def go():
+        return json.loads(await box_mcp.box_show_image("", 12))
+    assert asyncio.run(go()) == {"ok": True, "image": "latest", "ttl_s": 12}
+
+    async def boom(name, ttl_s):
+        raise FileNotFoundError("nothing recent")
+
+    monkeypatch.setattr(images, "show_image", boom)
+
+    async def go2():
+        return json.loads(await box_mcp.box_show_image("", 12))
+    assert asyncio.run(go2())["ok"] is False
