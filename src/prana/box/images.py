@@ -9,7 +9,7 @@ esp_new_jpeg and shows the picture above the scene for a while.
 
 Wire (topics; the firmware trusts them from an agent OR the server
 API — presentation only, never the honest indicators):
-  narada.image        JSON  {"type":"image","id":N,"size":B,"chunks":K,"ttl_ms":T}
+  narada.image        JSON  {"type":"image","id":N,"size":B,"chunks":K,"chunk":C,"ttl_ms":T}
   narada.image.chunk  bytes u16 id, u16 seq, u16 total (little-endian) + data
 """
 
@@ -66,9 +66,11 @@ def chunk_image(jpeg: bytes, image_id: int, ttl_ms: int,
     """(topic, payload) packets: the header, then the chunks in order."""
     image_id &= 0xFFFF
     parts = [jpeg[i:i + chunk] for i in range(0, len(jpeg), chunk)] or [b""]
+    # "chunk" is the sender's chunk size: the receiver places each part
+    # by seq × chunk, so it must never guess it from size ÷ chunks.
     packets: list[tuple[str, bytes]] = [(TOPIC_IMAGE, json.dumps({
         "type": "image", "id": image_id, "size": len(jpeg),
-        "chunks": len(parts), "ttl_ms": int(ttl_ms)}).encode("utf-8"))]
+        "chunks": len(parts), "chunk": int(chunk), "ttl_ms": int(ttl_ms)}).encode("utf-8"))]
     for seq, part in enumerate(parts):
         packets.append((TOPIC_CHUNK, struct.pack("<HHH", image_id, seq, len(parts)) + part))
     return packets

@@ -39,7 +39,8 @@ def test_chunks_carry_a_header_and_ordered_parts():
     topic, header = packets[0]
     assert topic == images.TOPIC_IMAGE
     h = json.loads(header)
-    assert h == {"type": "image", "id": 70000 & 0xFFFF, "size": 25600, "chunks": 3, "ttl_ms": 15000}
+    assert h == {"type": "image", "id": 70000 & 0xFFFF, "size": 25600, "chunks": 3,
+                 "chunk": 12_000, "ttl_ms": 15000}
     body = b""
     for seq, (t, payload) in enumerate(packets[1:]):
         assert t == images.TOPIC_CHUNK
