@@ -358,6 +358,30 @@ def create_app(config: BrainConfig, backend_factory,
                       "default": m == config.model} for m in MODELS],
         }
 
+    # ── The box's screen: show a stored picture there ─────────────────
+    @app.post("/api/box/show")
+    async def box_show(request: Request, tier: str = Depends(require_tier)) -> dict:
+        """The app's "On the box" button: the picture behind an image
+        card, sent to the device room (prana.box.images)."""
+        from prana.box import images as box_images
+
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        url = body.get("url") if isinstance(body, dict) else None
+        if not isinstance(url, str) or "/api/images/" not in url:
+            raise HTTPException(400, "url must name an image in the store")
+        ttl = body.get("ttl_s", 20)
+        try:
+            return await box_images.show_image(url.rsplit("/", 1)[-1],
+                                               int(ttl) if isinstance(ttl, (int, float)) else 20)
+        except FileNotFoundError:
+            raise HTTPException(404, "no such image")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("box show failed: %s", exc)
+            raise HTTPException(502, f"could not reach the box: {exc}")
+
     # ── Images Narada generated (codex_backend.harvest_images) ───────
     @app.get("/api/images/{name}")
     async def image(name: str, tier: str = Depends(require_tier)):

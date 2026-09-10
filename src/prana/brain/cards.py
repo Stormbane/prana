@@ -182,6 +182,10 @@ def activity_for(tool_name: str, tool_input: Any) -> dict[str, str] | None:
     if server == "akhada" or bare in _FITNESS_VERBS:
         return {"text": _FITNESS_VERBS.get(bare, f"Akhada: {bare.replace('_', ' ')}"),
                 "kind": "fitness"}
+    if server == "narada-box" or bare.startswith("box_"):
+        if bare == "box_show_image":
+            return {"text": "Showing it on the box", "kind": "tool"}
+        return {"text": f"Box: {bare.removeprefix('box_').replace('_', ' ')}", "kind": "tool"}
     if server in ("narada-notes", "notes") or bare.startswith("note"):
         return {"text": f"Notes: {bare.replace('_', ' ')}", "kind": "notes"}
     if bare in ("play", "cast_play", "play_music", "play_station"):
