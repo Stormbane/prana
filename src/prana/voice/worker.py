@@ -739,11 +739,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 fault = faults.note(getattr(ev, "error", ev))
                 logger.error("voice fault (%s): %s", fault.code, fault.text)
 
-            try:
-                await session.start(agent=agent, room=ctx.room)
-            except Exception as exc:
-                faults.note(exc)  # the finally reports it
-                raise
+            await session.start(agent=agent, room=ctx.room)
             linked = getattr(getattr(session, "_room_io", None),
                              "linked_participant", None)
             logger.info("realtime session open (model=%s, tier=%s, "
@@ -1026,6 +1022,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     time.monotonic() - started)
             except Exception as exc:
                 logger.debug("cost accounting failed: %s", exc)
+        except Exception as exc:
+            # Any setup failure — model, pipeline, start — is a fault
+            # the finally must report (review recheck).
+            faults.note(exc)
+            raise
         finally:
             state["in_session"] = False
             if faults.current is not None and not spoke_once["v"]:

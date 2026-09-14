@@ -87,3 +87,91 @@ def test_context_pack_reads_the_named_session_only(tmp_path, monkeypatch):
     assert context_pack(json.dumps({"session_id": "nope", "tier": "app"})) == ""
     assert context_pack("not json") == "" and context_pack(None) == ""
     assert context_pack(json.dumps({"session_id": "../phone-1", "tier": "app"})) == ""
+
+
+# ── setup failures still report (Codex recheck, 2026-09-14) ───────────
+
+class _Human:
+    identity = "suti-phone"
+    kind = None  # not an agent
+
+
+class _LocalParticipant:
+    def __init__(self):
+        self.published = []
+
+    async def publish_data(self, data, topic="", reliable=True, **_kw):
+        import json
+
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode("utf-8")
+        self.published.append((topic, json.loads(data)))
+
+
+class _Room:
+    name = "phone-test-room"
+
+    def __init__(self):
+        self.remote_participants = {"suti-phone": _Human()}
+        self.local_participant = _LocalParticipant()
+
+    def on(self, *_a, **_kw):
+        return None
+
+
+class _Job:
+    id = "job-test"
+    metadata = None
+
+
+class _Ctx:
+    def __init__(self):
+        self.room = _Room()
+        self.job = _Job()
+        self.shutdown_reason = None
+
+    async def connect(self):
+        return None
+
+    def shutdown(self, reason=""):
+        self.shutdown_reason = reason
+
+
+class _Budget:
+    def reserve(self):
+        return object()
+
+    def settle(self, *_a):
+        return None
+
+
+def test_a_setup_failure_before_start_still_reports_a_fault(tmp_path, monkeypatch):
+    # The session never starts: a tool-builder crash mid-setup. The app
+    # must still get a fault message and the feed an entry — the finally
+    # reports whatever the outer except noted.
+    import asyncio
+    from pathlib import Path
+
+    import pytest
+
+    from prana.voice import phone_worker as pw
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(pw, "VoiceBudget", _Budget)
+
+    def boom(**_kw):
+        raise ValueError("could not convert string to float: 'x'")
+
+    monkeypatch.setattr(pw, "build_voice_tools", boom)
+    notified = []
+    monkeypatch.setattr(pw, "notify_brain", lambda fault, surface: notified.append((fault.code, surface)))
+
+    ctx = _Ctx()
+    with pytest.raises(ValueError):
+        asyncio.run(pw.entrypoint(ctx))
+
+    faults = [m for t, m in ctx.room.local_participant.published
+              if t == "narada.activity" and m.get("type") == "fault"]
+    assert faults and faults[-1]["code"] == "unknown" and faults[-1]["sticky"] is True
+    assert notified == [("unknown", "phone")]

@@ -387,11 +387,7 @@ async def entrypoint(ctx: JobContext) -> None:
             fault = faults.note(getattr(ev, "error", ev))
             logger.error("voice fault (%s): %s", fault.code, fault.text)
 
-        try:
-            await session.start(agent=agent, room=ctx.room)
-        except Exception as exc:
-            faults.note(exc)  # the finally reports it
-            raise
+        await session.start(agent=agent, room=ctx.room)
         logger.info("phone session open (model=%s, room=%s)",
                     realtime_model, ctx.room.name)
 
@@ -528,6 +524,11 @@ async def entrypoint(ctx: JobContext) -> None:
                         time.monotonic() - started)
         except Exception as exc:
             logger.debug("cost accounting failed: %s", exc)
+    except Exception as exc:
+        # Any setup failure — prefs, model, session, start — is a fault
+        # the finally must report (review recheck).
+        faults.note(exc)
+        raise
     finally:
         if faults.current is not None and not spoke["v"]:
             # In the finally so a call that never started still reports
