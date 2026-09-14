@@ -103,11 +103,52 @@ def test_the_providers_own_words_in_the_plugin_log_outrank_a_generic_exception()
     tr.note(_APIError("OpenAI Live API connection closed unexpectedly"))
     assert tr.current.code == "credits"
     # and the memory is short: an old provider error does not colour a new session
-    faults._recent.clear()
-    faults._recent.append((faults._time.monotonic() - 999, json.dumps({"code": "credit_balance_exhausted"})))
+    faults._forget_recent()
+    faults._recent().append((faults._time.monotonic() - 999, 0, json.dumps({"code": "credit_balance_exhausted"})))
     fresh = faults.FaultTracker()
     fresh.note(_APIError("connection failed"))
     assert fresh.current.code == "connect"
+
+
+def test_provider_errors_are_scoped_to_the_session_that_saw_them():
+    # Review: a fresh tracker after a credit error must not report credits
+    # for its own model_not_found; and a tracker consumes what it reads.
+    import logging
+    import threading
+
+    faults._forget_recent()
+    plugin = logging.getLogger("livekit.plugins.openai")
+    plugin.error("gpt-live returned an error",
+                 extra={"lk.pii.error": {"code": "credit_balance_exhausted"}})
+    later = faults.FaultTracker()  # created after the error: not its fault
+    later.note(_APIError("model_not_found: gpt-live-9"))
+    assert later.current.code == "model"
+
+    first = faults.FaultTracker()
+    plugin.error("gpt-live returned an error",
+                 extra={"lk.pii.error": {"code": "credit_balance_exhausted"}})
+    first.note(_APIError("GPT-Live returned an error"))
+    assert first.current.code == "credits"
+    second = faults.FaultTracker()  # sequential session: the buffer was drained
+    second.note(_APIError("GPT-Live returned an error"))
+    assert second.current.code == "unknown"
+
+    # a concurrent job in another thread has its own buffer
+    seen = {}
+
+    def other_job():
+        tr = faults.FaultTracker()
+        plugin.error("gpt-live returned an error",
+                     extra={"lk.pii.error": {"code": "invalid_api_key"}})
+        seen["other"] = tr.note(_APIError("GPT-Live returned an error")).code
+
+    t = threading.Thread(target=other_job)
+    t.start()
+    t.join()
+    assert seen["other"] == "auth"
+    mine = faults.FaultTracker()
+    mine.note(_APIError("GPT-Live returned an error"))
+    assert mine.current.code == "unknown"  # the other thread's error stayed there
 
 
 def test_the_fault_outlives_the_job_until_a_session_speaks(tmp_path, monkeypatch):

@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import re
+import threading
 import time as _time
 import urllib.request
 from dataclasses import dataclass
@@ -87,8 +88,33 @@ def classify(error: object) -> Fault:
 # an error") with no body — so the exception alone classifies as a
 # connection fault (field, 2026-09-14). A handler on the plugin's logger
 # keeps the last few provider errors; note() consults them.
+# Scope (review): the buffer is per thread (LiveKit runs each job in
+# its own thread on Windows, and the plugin logs from the job's
+# thread), a tracker only consumes errors logged after it was created,
+# and what it consumes is removed — so neither the previous session
+# nor a concurrent one can colour this session's diagnosis.
 RECENT_S = 30.0
-_recent: collections.deque[tuple[float, str]] = collections.deque(maxlen=8)
+_local = threading.local()
+
+
+def _recent() -> collections.deque[tuple[float, int, str]]:
+    """This thread's (time, seq, text) provider errors."""
+    q = getattr(_local, "recent", None)
+    if q is None:
+        q = _local.recent = collections.deque(maxlen=8)
+        _local.seq = 0
+    return q
+
+
+def _seq() -> int:
+    _recent()
+    return _local.seq
+
+
+def _buffer(text: str) -> None:
+    q = _recent()
+    _local.seq += 1
+    q.append((_time.monotonic(), _local.seq, text))
 
 
 class _ProviderErrorTap(logging.Handler):
@@ -96,11 +122,11 @@ class _ProviderErrorTap(logging.Handler):
         detail = record.__dict__.get("lk.pii.error")
         if isinstance(detail, dict):
             try:
-                _recent.append((_time.monotonic(), json.dumps(detail)))
+                _buffer(json.dumps(detail))
             except (TypeError, ValueError):
-                _recent.append((_time.monotonic(), str(detail)))
+                _buffer(str(detail))
         elif record.levelno >= logging.ERROR and "error" in record.getMessage().lower():
-            _recent.append((_time.monotonic(), record.getMessage()))
+            _buffer(record.getMessage())
 
 
 _tap_installed = False
@@ -116,26 +142,35 @@ def install_provider_tap() -> None:
         logging.getLogger(name).addHandler(_ProviderErrorTap())
 
 
-def recent_provider_errors(now: float | None = None) -> list[str]:
+def take_provider_errors(after: int, now: float | None = None) -> list[str]:
+    """This thread's provider errors buffered after sequence `after`
+    (a counter, not the clock — Windows' monotonic tick is coarse) and
+    within RECENT_S of now — removed from the buffer as they are taken."""
     now = _time.monotonic() if now is None else now
-    return [text for at, text in _recent if now - at <= RECENT_S]
+    q = _recent()
+    taken = [text for at, seq, text in q if seq > after and now - at <= RECENT_S]
+    q.clear()
+    return taken
 
 
 def _forget_recent() -> None:
-    _recent.clear()
+    _recent().clear()
 
 
 class FaultTracker:
-    """The worst fault a session has seen; None until one arrives."""
+    """The worst fault a session has seen; None until one arrives.
+    Create it before the session starts: it only sees provider errors
+    logged after its creation."""
 
     def __init__(self) -> None:
         self.current: Fault | None = None
+        self._after = _seq()
         install_provider_tap()
 
     def note(self, error: object) -> Fault:
         fault = classify(error)
         # The provider's words outrank a generic exception.
-        for text in recent_provider_errors():
+        for text in take_provider_errors(self._after):
             other = classify(text)
             if other.rank < fault.rank:
                 fault = other

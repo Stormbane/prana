@@ -292,6 +292,13 @@ async def entrypoint(ctx: JobContext) -> None:
             TOPIC_SESSION,
             {"type": "session", "open": bool(state["in_session"])}))
         nonce = current_nonce["value"]
+        if not state["in_session"]:
+            # The box wipes chips on disconnect; the remembered fault
+            # must come back with the state (review: a rejoin during
+            # music stays in this job, so the cycle republish never
+            # runs).
+            asyncio.ensure_future(_publish(
+                TOPIC_SESSION, box_chip(faultlog.remembered())))
         if nonce is not None and not state["in_session"]:
             asyncio.ensure_future(_publish(
                 TOPIC_ADMISSION,
@@ -379,6 +386,14 @@ async def entrypoint(ctx: JobContext) -> None:
         session = None
         transcript = None
         reason = "unknown"
+        # Faults said plainly (Suti 2026-09-14): the worst provider
+        # error this session sees becomes a sticky red chip on the
+        # box and an entry in the feed when the session ends unspoken;
+        # the chip clears the moment a later session actually speaks.
+        # Created before anything can fail (review: a startup error
+        # must reach the chip too).
+        faults = FaultTracker()
+        spoke_once = {"v": False}
         usage = {"in": 0, "out": 0, "cached": 0}
         state["in_session"] = True
         sleep_tap.clear()
@@ -719,7 +734,16 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception as exc:
                 logger.warning("caption sink unavailable: %s", exc)
 
-            await session.start(agent=agent, room=ctx.room)
+            @session.on("error")
+            def _note_fault(ev) -> None:
+                fault = faults.note(getattr(ev, "error", ev))
+                logger.error("voice fault (%s): %s", fault.code, fault.text)
+
+            try:
+                await session.start(agent=agent, room=ctx.room)
+            except Exception as exc:
+                faults.note(exc)  # the finally reports it
+                raise
             linked = getattr(getattr(session, "_room_io", None),
                              "linked_participant", None)
             logger.info("realtime session open (model=%s, tier=%s, "
@@ -730,13 +754,6 @@ async def entrypoint(ctx: JobContext) -> None:
             # stays on") — a session nobody is talking in ends itself.
             last_state_change = {"t": time.monotonic(), "state": ""}
             SILENCE_END_S = 75.0
-
-            spoke_once = {"v": False}
-            # Faults said plainly (Suti 2026-09-14): the worst provider
-            # error this session sees becomes a sticky red chip on the
-            # box and an entry in the feed when the session ends unspoken;
-            # the chip clears the moment a later session actually speaks.
-            faults = FaultTracker()
 
             @session.on("agent_state_changed")
             def _on_agent_state(ev) -> None:
@@ -902,8 +919,6 @@ async def entrypoint(ctx: JobContext) -> None:
             @session.on("error")
             def _on_session_error(ev) -> None:
                 logger.error("session error: %s", getattr(ev, "error", ev))
-                fault = faults.note(getattr(ev, "error", ev))
-                logger.error("voice fault (%s): %s", fault.code, fault.text)
 
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check.
@@ -995,13 +1010,6 @@ async def entrypoint(ctx: JobContext) -> None:
             else:
                 reason = next(k for k, v in waiters.items() if v in done)
             logger.info("session ending: %s", reason)
-            if faults.current is not None and not spoke_once["v"]:
-                # Nothing was ever said: tell the box and the feed why,
-                # awaited (a fire-and-forget hint can die with the job).
-                state["fault_shown"] = True
-                faultlog.remember(faults.current)
-                await _publish(TOPIC_SESSION, box_chip(faults.current))
-                await asyncio.to_thread(notify_brain, faults.current, "box")
             # Price the session (gpt-realtime-2.1 audio-dominant rates,
             # 2026-09: $32/1M uncached in, $0.40/1M cached in, $64/1M
             # out). Env-tunable if the model or pricing changes.
@@ -1020,6 +1028,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.debug("cost accounting failed: %s", exc)
         finally:
             state["in_session"] = False
+            if faults.current is not None and not spoke_once["v"]:
+                # Nothing was ever said: tell the box and the feed why,
+                # awaited (a fire-and-forget hint can die with the job).
+                # In the finally so a session that never started still
+                # reports (review).
+                state["fault_shown"] = True
+                faultlog.remember(faults.current)
+                await _publish(TOPIC_SESSION, box_chip(faults.current))
+                await asyncio.to_thread(notify_brain, faults.current, "box")
             try:
                 hb_task.cancel()
             except Exception:

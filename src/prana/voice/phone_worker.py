@@ -18,6 +18,7 @@ session per job. The voice-minutes ledger is shared with the box.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -261,6 +262,13 @@ async def entrypoint(ctx: JobContext) -> None:
     usage = {"in": 0, "out": 0, "cached": 0}
     bye = asyncio.Event()
     tier = "personal"  # the token is the admission; there is no other caller
+    # Faults said plainly (Suti 2026-09-14): the worst provider error
+    # of the call becomes a sticky fault on the app and an entry in
+    # the feed when the call ends unspoken; the app clears it when a
+    # later call speaks. Created before anything can fail (review: a
+    # startup error must reach the app too).
+    faults = FaultTracker()
+    spoke = {"v": False}
     try:
         from livekit.plugins.openai.realtime import realtime_model as _rt_mod
 
@@ -374,7 +382,16 @@ async def entrypoint(ctx: JobContext) -> None:
                     "surface": "phone",
                 }))
 
-        await session.start(agent=agent, room=ctx.room)
+        @session.on("error")
+        def _note_fault(ev) -> None:
+            fault = faults.note(getattr(ev, "error", ev))
+            logger.error("voice fault (%s): %s", fault.code, fault.text)
+
+        try:
+            await session.start(agent=agent, room=ctx.room)
+        except Exception as exc:
+            faults.note(exc)  # the finally reports it
+            raise
         logger.info("phone session open (model=%s, room=%s)",
                     realtime_model, ctx.room.name)
 
@@ -385,13 +402,6 @@ async def entrypoint(ctx: JobContext) -> None:
         # Reply-nudge state: set when a FINAL user transcript lands,
         # cleared the moment the agent starts thinking/speaking.
         awaiting_reply = {"since": 0.0}
-
-        # Faults said plainly (Suti 2026-09-14): the worst provider error
-        # of the call becomes a sticky fault on the app and an entry in
-        # the feed when the call ends unspoken; the app clears it when a
-        # later call speaks.
-        faults = FaultTracker()
-        spoke = {"v": False}
 
         @session.on("agent_state_changed")
         def _on_agent_state(ev) -> None:
@@ -456,8 +466,6 @@ async def entrypoint(ctx: JobContext) -> None:
         @session.on("error")
         def _on_session_error(ev) -> None:
             logger.error("session error: %s", getattr(ev, "error", ev))
-            fault = faults.note(getattr(ev, "error", ev))
-            logger.error("voice fault (%s): %s", fault.code, fault.text)
             # A zombie call is worse than a dropped one: when the audio
             # track fails to publish (LiveKit signal timeout, 2026-09-07
             # — the agent replied four times into silence), end the
@@ -508,13 +516,6 @@ async def entrypoint(ctx: JobContext) -> None:
         reason = ("session-cap" if not done
                   else next(k for k, v in waiters.items() if v in done))
         logger.info("phone session ending: %s", reason)
-        if faults.current is not None and not spoke["v"]:
-            try:
-                await asyncio.wait_for(
-                    _publish_activity("narada.activity", phone_message(faults.current)), timeout=5.0)
-            except Exception as exc:  # noqa: BLE001 - the feed still gets it
-                logger.warning("fault not published to the app: %s", exc)
-            await asyncio.to_thread(notify_brain, faults.current, "phone")
         try:
             p_in = float(os.environ.get("NARADA_PRICE_IN", "32"))
             p_cached = float(os.environ.get("NARADA_PRICE_CACHED", "0.40"))
@@ -528,6 +529,18 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception as exc:
             logger.debug("cost accounting failed: %s", exc)
     finally:
+        if faults.current is not None and not spoke["v"]:
+            # In the finally so a call that never started still reports
+            # (review). Best-effort: the app may already be gone.
+            try:
+                await asyncio.wait_for(
+                    ctx.room.local_participant.publish_data(
+                        json.dumps(phone_message(faults.current)),
+                        topic="narada.activity"),
+                    timeout=5.0)
+            except Exception as exc:  # noqa: BLE001 - the feed still gets it
+                logger.warning("fault not published to the app: %s", exc)
+            await asyncio.to_thread(notify_brain, faults.current, "phone")
         if transcript is not None:
             transcript.close(reason)
             try:
