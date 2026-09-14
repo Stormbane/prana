@@ -30,6 +30,7 @@ from prana.voice.admission import (
     is_sleep_tap,
 )
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
+from prana.voice.faults import FaultTracker, box_chip, notify_brain
 from prana.voice.tools import build_voice_tools
 from prana.voice.transcripts import attach
 from prana.voice.wakegate import WakeGate
@@ -714,6 +715,11 @@ async def entrypoint(ctx: JobContext) -> None:
             SILENCE_END_S = 75.0
 
             spoke_once = {"v": False}
+            # Faults said plainly (Suti 2026-09-14): the worst provider
+            # error this session sees becomes a sticky red chip on the
+            # box and an entry in the feed when the session ends unspoken;
+            # the chip clears the moment a later session actually speaks.
+            faults = FaultTracker()
 
             @session.on("agent_state_changed")
             def _on_agent_state(ev) -> None:
@@ -727,6 +733,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 elif st == "speaking":
                     spoke_once["v"] = True
                     _hint({"type": "speaking"})
+                    if state.get("fault_shown"):
+                        state["fault_shown"] = False
+                        _hint(box_chip(None))  # voice works again: the chip goes
                     if caption_sink is not None:
                         caption_sink.start_reveal()
                 elif st in ("listening", "idle"):
@@ -873,6 +882,8 @@ async def entrypoint(ctx: JobContext) -> None:
             @session.on("error")
             def _on_session_error(ev) -> None:
                 logger.error("session error: %s", getattr(ev, "error", ev))
+                fault = faults.note(getattr(ev, "error", ev))
+                logger.error("voice fault (%s): %s", fault.code, fault.text)
 
             # Speak first (Suti, 2026-08-31): a tap deserves a greeting,
             # and the greeting doubles as the end-to-end audio check.
@@ -964,6 +975,12 @@ async def entrypoint(ctx: JobContext) -> None:
             else:
                 reason = next(k for k, v in waiters.items() if v in done)
             logger.info("session ending: %s", reason)
+            if faults.current is not None and not spoke_once["v"]:
+                # Nothing was ever said: tell the box and the feed why,
+                # awaited (a fire-and-forget hint can die with the job).
+                state["fault_shown"] = True
+                await _publish(TOPIC_SESSION, box_chip(faults.current))
+                await asyncio.to_thread(notify_brain, faults.current, "box")
             # Price the session (gpt-realtime-2.1 audio-dominant rates,
             # 2026-09: $32/1M uncached in, $0.40/1M cached in, $64/1M
             # out). Env-tunable if the model or pricing changes.
