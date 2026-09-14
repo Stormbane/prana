@@ -85,3 +85,42 @@ def test_notify_posts_a_deduplicated_error_entry(monkeypatch):
     # a missing token or a dead brain never raises
     monkeypatch.setattr("prana.brain.tokens.load_brain_tokens", lambda: {})
     assert faults.notify_brain(f, "box", brain_url="http://brain.test/") is False
+
+
+def test_the_providers_own_words_in_the_plugin_log_outrank_a_generic_exception():
+    # The field case: the plugin logs the real error as a record extra and
+    # raises APIError("GPT-Live returned an error") with no body.
+    import logging
+
+    faults._forget_recent()
+    tr = faults.FaultTracker()  # installs the tap
+    logging.getLogger("livekit.plugins.openai").error(
+        "gpt-live returned an error",
+        extra={"lk.pii.error": {"type": "invalid_request_error", "code": "credit_balance_exhausted",
+                                "message": "You have no credits remaining."}})
+    tr.note(_APIError("GPT-Live returned an error"))
+    assert tr.current.code == "credits"
+    tr.note(_APIError("OpenAI Live API connection closed unexpectedly"))
+    assert tr.current.code == "credits"
+    # and the memory is short: an old provider error does not colour a new session
+    faults._recent.clear()
+    faults._recent.append((faults._time.monotonic() - 999, json.dumps({"code": "credit_balance_exhausted"})))
+    fresh = faults.FaultTracker()
+    fresh.note(_APIError("connection failed"))
+    assert fresh.current.code == "connect"
+
+
+def test_the_fault_outlives_the_job_until_a_session_speaks(tmp_path, monkeypatch):
+    monkeypatch.setenv("NARADA_STATE_DIR", str(tmp_path))
+    assert faults.remembered() is None
+    f = faults.Fault("credits", faults.TEXT["credits"])
+    faults.remember(f)
+    assert faults.remembered() == f
+    assert faults.box_chip(faults.remembered())["text"] == f.text
+    (tmp_path / "voice-fault.json").write_text("{not json", encoding="utf-8")
+    assert faults.remembered() is None  # a torn file is no fault
+    faults.remember(f)
+    faults.forget()
+    assert faults.remembered() is None
+    faults.forget()  # idempotent
+    assert faults.box_chip(faults.remembered())["text"] == ""

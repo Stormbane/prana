@@ -30,6 +30,7 @@ from prana.voice.admission import (
     is_sleep_tap,
 )
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
+from prana.voice import faults as faultlog
 from prana.voice.faults import FaultTracker, box_chip, notify_brain
 from prana.voice.tools import build_voice_tools
 from prana.voice.transcripts import attach
@@ -240,6 +241,22 @@ async def entrypoint(ctx: JobContext) -> None:
             if state["in_session"]:
                 if is_sleep_tap(ident, data):
                     sleep_tap.set()
+                return
+            if is_sleep_tap(ident, data):
+                # A stop-tap while the worker is idle: the box still
+                # believes a session is open (field 2026-09-14 16:02:59 —
+                # the close message lost to the room recycle, the REC
+                # glyph stuck, taps dead as "nonce mismatch"). Tell it
+                # the truth again rather than ignoring it.
+                logger.warning("stop-tap while idle — resyncing box state")
+                asyncio.ensure_future(_publish(
+                    TOPIC_SESSION, {"type": "session", "open": False,
+                                    "reason": "resync"}))
+                nonce = current_nonce["value"]
+                if nonce is not None:
+                    asyncio.ensure_future(_publish(
+                        TOPIC_ADMISSION,
+                        {"type": "admission_nonce", "nonce": nonce}))
                 return
             assertion = admission.verify(ident, data)
             if assertion is not None:
@@ -733,6 +750,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 elif st == "speaking":
                     spoke_once["v"] = True
                     _hint({"type": "speaking"})
+                    if faultlog.remembered() is not None:
+                        faultlog.forget()
+                        state["fault_shown"] = True  # clear the chip below
                     if state.get("fault_shown"):
                         state["fault_shown"] = False
                         _hint(box_chip(None))  # voice works again: the chip goes
@@ -979,6 +999,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 # Nothing was ever said: tell the box and the feed why,
                 # awaited (a fire-and-forget hint can die with the job).
                 state["fault_shown"] = True
+                faultlog.remember(faults.current)
                 await _publish(TOPIC_SESSION, box_chip(faults.current))
                 await asyncio.to_thread(notify_brain, faults.current, "box")
             # Price the session (gpt-realtime-2.1 audio-dominant rates,
@@ -1077,6 +1098,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 "text": "TV mode" if tv_mode_on() else ""})
         except Exception as exc:
             logger.debug("chip republish failed: %s", exc)
+        # The last unspoken fault too (Suti: "an error in a chip that
+        # persists") — the box wiped it on the recycle's disconnect.
+        await _publish(TOPIC_SESSION, box_chip(faultlog.remembered()))
 
         # B5 fail-safe gate: while music plays, wake-word admission is
         # OFF (lyrics must not open billed sessions — the numeric
@@ -1155,6 +1179,11 @@ async def entrypoint(ctx: JobContext) -> None:
         if end_reason not in ("budget-refused", "device-absent-at-admission"):
             logger.info("session done — retiring job for fresh dispatch")
             await _publish(TOPIC_SESSION, {"type": "recycling"})
+            # publish_data resolves when the SFU has the packet, not
+            # when the box has it; deleting the room right behind it
+            # dropped the close message (2026-09-14 16:02:55). A beat
+            # for reliable delivery to drain.
+            await asyncio.sleep(0.5)
             try:
                 from livekit import api as lkapi
                 lk = lkapi.LiveKitAPI()

@@ -13,11 +13,14 @@ persistent, deduplicated error entry, pushed to the phone).
 
 from __future__ import annotations
 
+import collections
 import datetime as _dt
 import json
 import logging
 import os
+import pathlib
 import re
+import time as _time
 import urllib.request
 from dataclasses import dataclass
 
@@ -78,20 +81,113 @@ def classify(error: object) -> Fault:
     return Fault("unknown", TEXT["unknown"])
 
 
+# The provider's own words. The LiveKit OpenAI plugin logs the real
+# error ({"code": "credit_balance_exhausted", …}) as a log record extra
+# ("lk.pii.error") and then raises a generic APIError("GPT-Live returned
+# an error") with no body — so the exception alone classifies as a
+# connection fault (field, 2026-09-14). A handler on the plugin's logger
+# keeps the last few provider errors; note() consults them.
+RECENT_S = 30.0
+_recent: collections.deque[tuple[float, str]] = collections.deque(maxlen=8)
+
+
+class _ProviderErrorTap(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        detail = record.__dict__.get("lk.pii.error")
+        if isinstance(detail, dict):
+            try:
+                _recent.append((_time.monotonic(), json.dumps(detail)))
+            except (TypeError, ValueError):
+                _recent.append((_time.monotonic(), str(detail)))
+        elif record.levelno >= logging.ERROR and "error" in record.getMessage().lower():
+            _recent.append((_time.monotonic(), record.getMessage()))
+
+
+_tap_installed = False
+
+
+def install_provider_tap() -> None:
+    """Once per process: listen to the plugin loggers."""
+    global _tap_installed
+    if _tap_installed:
+        return
+    _tap_installed = True
+    for name in ("livekit.plugins.openai", "livekit.agents"):
+        logging.getLogger(name).addHandler(_ProviderErrorTap())
+
+
+def recent_provider_errors(now: float | None = None) -> list[str]:
+    now = _time.monotonic() if now is None else now
+    return [text for at, text in _recent if now - at <= RECENT_S]
+
+
+def _forget_recent() -> None:
+    _recent.clear()
+
+
 class FaultTracker:
     """The worst fault a session has seen; None until one arrives."""
 
     def __init__(self) -> None:
         self.current: Fault | None = None
+        install_provider_tap()
 
     def note(self, error: object) -> Fault:
         fault = classify(error)
+        # The provider's words outrank a generic exception.
+        for text in recent_provider_errors():
+            other = classify(text)
+            if other.rank < fault.rank:
+                fault = other
         if self.current is None or fault.rank < self.current.rank:
             self.current = fault
         return self.current
 
     def clear(self) -> None:
         self.current = None
+
+
+# ── the fault outlives the job ─────────────────────────────────────────
+# The box worker retires its job after every session (the room is
+# deleted, the box rejoins, a fresh job is dispatched) and the box
+# wipes its chips on disconnect. A chip published once is therefore
+# gone within seconds unless every fresh job re-asserts it — as the TV
+# chip is. The last unspoken fault lives in a small file until a later
+# session speaks.
+
+def _fault_file() -> pathlib.Path:
+    base = os.environ.get("NARADA_STATE_DIR") or os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "narada")
+    return pathlib.Path(base) / "voice-fault.json"
+
+
+def remember(fault: Fault) -> None:
+    try:
+        f = _fault_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"code": fault.code, "text": fault.text,
+                                 "at": _dt.datetime.now().isoformat(timespec="seconds")}),
+                     encoding="utf-8")
+    except OSError as exc:
+        logger.warning("voice fault not remembered: %s", exc)
+
+
+def forget() -> None:
+    try:
+        _fault_file().unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("voice fault file not removed: %s", exc)
+
+
+def remembered() -> Fault | None:
+    try:
+        raw = json.loads(_fault_file().read_text(encoding="utf-8"))
+        code, text = raw.get("code"), raw.get("text")
+        if isinstance(code, str) and code in TEXT and isinstance(text, str) and text:
+            return Fault(code, text)
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 # ── wire shapes ────────────────────────────────────────────────────────
