@@ -53,7 +53,7 @@ def main() -> None:
     config.sessions_root.mkdir(parents=True, exist_ok=True)
     logger.info("brain server starting on %s:%s (model=%s)",
                 config.host, config.port, config.model)
-    app = create_app(config, SdkBackend, codex_backends(config))
+    app = create_app(config, SdkBackend, codex_backends(config), probe_tools=True)
     uvicorn.run(app, host=config.host, port=config.port, log_level="info")
 
 

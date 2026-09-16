@@ -269,11 +269,14 @@ async def _execute_turn(run: TurnRun, session: BrainSession, pool: SessionPool,
 
 
 def create_app(config: BrainConfig, backend_factory,
-               backends: dict | None = None) -> FastAPI:
+               backends: dict | None = None, *,
+               probe_tools: bool = False) -> FastAPI:
     """``backend_factory`` builds the default (Claude) backend;
     ``backends`` maps other backend names from the model registry to
     their factories — the server passes Codex, tests pass nothing and
-    every model gets the fake."""
+    every model gets the fake. ``probe_tools``: handshake every tool
+    server once at startup, in the background (the real server says
+    yes; tests spawn nothing)."""
     from contextlib import asynccontextmanager
 
     pool = SessionPool(config, backend_factory, backends)
@@ -281,7 +284,18 @@ def create_app(config: BrainConfig, backend_factory,
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         pool.start_reaper()
+        probe_task = None
+        if probe_tools:
+            # Suti 2026-09-16: "why didn't we know it was down already?"
+            # — a dead tool server is in the feed minutes after the
+            # brain starts, not when the next weight goes unlogged.
+            from prana.brain import mcp_probe
+
+            probe_task = asyncio.get_running_loop().create_task(
+                asyncio.to_thread(mcp_probe.check, pool.configured_mcp(), "brain startup"))
         yield
+        if probe_task is not None:
+            probe_task.cancel()
         await pool.close()
 
     app = FastAPI(title="narada-brain", docs_url=None, redoc_url=None,

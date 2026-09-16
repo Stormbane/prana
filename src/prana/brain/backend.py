@@ -60,6 +60,13 @@ class SdkBackend:
                            "append": system_append},
             model=model,
             mcp_servers=mcp_servers,
+            # ONLY the servers the tier wires. Without this the CLI also
+            # loads the user's own MCP config — where an "akhada" entry
+            # with a bare "python" died under the supervisor's PATH and
+            # took the name with it ("failed to connect", 2026-09-16),
+            # plus every connector and plugin server the phone never
+            # needs, each one a slower session start.
+            strict_mcp_config=True,
             permission_mode="bypassPermissions",
             max_turns=max_tool_iterations,
             cwd=cwd,
@@ -147,6 +154,24 @@ class SdkBackend:
             # turn (recheck): ending normally here would have retired a
             # pending handover and persisted partial text as complete.
             raise RuntimeError("agent stream ended without a result")
+
+    async def failed_mcp_servers(self) -> dict[str, str]:
+        """{name: why} for the tool servers the CLI reports failed —
+        the check the session pool runs right after start (Suti
+        2026-09-16: "why didn't we know it was down?"). Empty when the
+        status itself cannot be read: unknown is not failed."""
+        import asyncio
+
+        try:
+            status = await asyncio.wait_for(self._client.get_mcp_status(), timeout=15.0)
+        except Exception as exc:  # noqa: BLE001 — a status hiccup must not fail the session
+            logger.warning("tool-server status unavailable: %s", exc)
+            return {}
+        return {
+            str(s.get("name")): str(s.get("error") or "failed")
+            for s in status.get("mcpServers", [])
+            if s.get("status") == "failed"
+        }
 
     async def cancel(self) -> None:
         await self._client.interrupt()

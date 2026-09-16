@@ -307,7 +307,7 @@ class SessionPool:
             backend_file.write_text(backend_name, encoding="utf-8")
 
         factory = self._backends.get(backend_name, self._factory)
-        backend = factory(
+        kwargs = dict(
             model=resolved,
             system_append=self._config.system_append(),
             mcp_servers=self._tier_mcp(tier),
@@ -317,7 +317,9 @@ class SessionPool:
             disallowed_tools=self._config.disallowed_tools,
             handover=handover,
         )
+        backend = factory(**kwargs)
         await backend.start()
+        backend = await self._with_tool_servers(backend, factory, kwargs, key)
         store = TurnStore(
             session_dir / "turns.json", window=self._config.idempotency_window
         )
@@ -329,6 +331,39 @@ class SessionPool:
             key, tier, resolved, bool(resume),
         )
         return session
+
+    async def _with_tool_servers(self, backend, factory, kwargs: dict, key: str):
+        """A tool server that died at spawn gets ONE fresh spawn of the
+        whole backend before the session is handed over; if it dies
+        again, the feed and the log say which and why (Suti 2026-09-16:
+        "why didn't we know it was down already and spin it back up?").
+        Backends without a status check (fakes, Codex) pass through."""
+        check = getattr(backend, "failed_mcp_servers", None)
+        if check is None:
+            return backend
+        failed = await check()
+        if not failed:
+            return backend
+        logger.warning("session %s: tool servers failed at spawn (%s) — respawning once",
+                       key, ", ".join(f"{n}: {why}" for n, why in failed.items()))
+        try:
+            await backend.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("session %s: close of the failed backend raised", key, exc_info=True)
+        backend = factory(**kwargs)
+        await backend.start()
+        failed = await backend.failed_mcp_servers()
+        if failed:
+            from prana.brain import mcp_probe
+
+            await asyncio.to_thread(mcp_probe.report, failed, f"session {key}")
+        else:
+            logger.info("session %s: tool servers came up on the second spawn", key)
+        return backend
+
+    def configured_mcp(self) -> dict:
+        """Every tool server the brain can wire (the prana tier's set)."""
+        return dict(self._tier_mcp("prana"))
 
     async def switch_model(self, session_id: str, tier: str, model: str,
                            guard: Callable[[BrainSession | None], bool] | None = None,
