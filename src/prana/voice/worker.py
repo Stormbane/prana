@@ -394,6 +394,10 @@ async def entrypoint(ctx: JobContext) -> None:
         # must reach the chip too).
         faults = FaultTracker()
         spoke_once = {"v": False}
+        # A fault retrying cannot mend ends the session at once (Suti
+        # 2026-09-16: "hangs and then gives me an error after ages" —
+        # the model's retry loop ran ~18 s before the chip).
+        fatal_fault = asyncio.Event()
         usage = {"in": 0, "out": 0, "cached": 0}
         state["in_session"] = True
         sleep_tap.clear()
@@ -738,6 +742,8 @@ async def entrypoint(ctx: JobContext) -> None:
             def _note_fault(ev) -> None:
                 fault = faults.note(getattr(ev, "error", ev))
                 logger.error("voice fault (%s): %s", fault.code, fault.text)
+                if fault.fatal:
+                    fatal_fault.set()
 
             await session.start(agent=agent, room=ctx.room)
             linked = getattr(getattr(session, "_room_io", None),
@@ -992,6 +998,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 "device-dropped": asyncio.ensure_future(drop["ev"].wait()),
                 "silence-timeout": asyncio.ensure_future(_silence_watch()),
                 "no-audio": asyncio.ensure_future(_no_audio_watch()),
+                "fault": asyncio.ensure_future(fatal_fault.wait()),
             }
             done, pending = await asyncio.wait(
                 waiters.values(),
@@ -1160,6 +1167,29 @@ async def entrypoint(ctx: JobContext) -> None:
             # next cycle re-arms (the room-grace handles true departure)
             await asyncio.sleep(1.0)
             continue
+
+        # Credit already known to be empty: one small REST call decides
+        # before any session opens (Suti 2026-09-16: "could this show up
+        # straight away, before it even tries to start listening?").
+        # Refused again -> the chip refreshes, the box hears open:false,
+        # no REC, no session. Accepted -> the fault is forgotten and the
+        # tap proceeds. Undecided -> the session tries, as before.
+        remembered = faultlog.remembered()
+        if remembered is not None and remembered.code == "credits":
+            outcome, verdict = await asyncio.to_thread(faultlog.preflight)
+            if outcome == "refused" and verdict is not None:
+                logger.error("preflight refused (%s): %s", verdict.code, verdict.text)
+                faultlog.remember(verdict)
+                await _publish(TOPIC_SESSION, box_chip(verdict))
+                await _publish(TOPIC_SESSION, {"type": "session", "open": False,
+                                               "reason": "preflight-" + verdict.code})
+                asyncio.ensure_future(asyncio.to_thread(notify_brain, verdict, "box"))
+                await asyncio.sleep(1.0)
+                continue
+            if outcome == "ok":
+                logger.info("preflight passed: credit is back, fault forgotten")
+                faultlog.forget()
+                await _publish(TOPIC_SESSION, box_chip(None))
 
         # The session owns the audio: full music stop before, resume
         # after (B5 audio-owner state machine — never two tracks, never

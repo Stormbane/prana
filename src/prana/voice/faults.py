@@ -33,14 +33,35 @@ BILLING_URL = "platform.openai.com/settings/organization/billing"
 # that would otherwise win by arriving last.
 _RANK = ("credits", "auth", "rate", "model", "connect", "unknown")
 
+# Plain ASCII sentences: the box draws chips in the UNSCII pixel font,
+# which has no glyph for an em dash (field 2026-09-16: a square in the
+# middle of "credit is empty").
 TEXT: dict[str, str] = {
-    "credits": f"OpenAI credit is empty — no voice until it is topped up at {BILLING_URL}.",
-    "auth": "The OpenAI key was rejected — voice is off until the key is fixed.",
-    "rate": "OpenAI is rate-limiting voice right now — give it a minute and try again.",
-    "model": "The voice model refused to start — try another model in Settings.",
-    "connect": "Couldn't reach OpenAI for voice — check the network and try again.",
-    "unknown": "Voice failed — see the worker log.",
+    "credits": f"OpenAI credit is empty. No voice until it is topped up at {BILLING_URL}.",
+    "auth": "The OpenAI key was rejected. Voice is off until the key is fixed.",
+    "rate": "OpenAI is rate-limiting voice right now. Give it a minute and try again.",
+    "model": "The voice model refused to start. Try another model in Settings.",
+    "connect": "Couldn't reach OpenAI for voice. Check the network and try again.",
+    "unknown": "Voice failed. See the worker log.",
 }
+
+# Faults retrying cannot mend. The session ends on the first one instead
+# of sitting through the model's retry loop (field 2026-09-16: the
+# refusal was classified 3 s after the tap; the chip came 18 s later,
+# after eight retries).
+FATAL = frozenset({"credits", "auth", "model"})
+
+_ASCII_MAP = {
+    0x2014: "-", 0x2013: "-", 0x2012: "-",   # dashes
+    0x2018: "'", 0x2019: "'", 0x201c: '"', 0x201d: '"',
+    0x2026: "...", 0x00A0: " ",
+}
+
+
+def ascii_text(text: str) -> str:
+    """The pixel font's alphabet: punctuation transliterated, anything
+    else non-ASCII a question mark rather than a tofu square."""
+    return "".join(ch if ord(ch) < 128 else "?" for ch in text.translate(_ASCII_MAP))
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("credits", re.compile(r"credit_balance_exhausted|no credits remaining|insufficient_quota|exceeded your current quota", re.I)),
@@ -59,6 +80,10 @@ class Fault:
     @property
     def rank(self) -> int:
         return _RANK.index(self.code) if self.code in _RANK else len(_RANK)
+
+    @property
+    def fatal(self) -> bool:
+        return self.code in FATAL
 
 
 def classify(error: object) -> Fault:
@@ -215,14 +240,56 @@ def forget() -> None:
 
 
 def remembered() -> Fault | None:
+    """The remembered fault in THIS build's words: the file carries the
+    sentence an earlier build wrote (one had an em dash the box cannot
+    draw); only its code is trusted."""
     try:
         raw = json.loads(_fault_file().read_text(encoding="utf-8"))
-        code, text = raw.get("code"), raw.get("text")
-        if isinstance(code, str) and code in TEXT and isinstance(text, str) and text:
-            return Fault(code, text)
-    except (OSError, ValueError):
+        code = raw.get("code")
+        if isinstance(code, str) and code in TEXT:
+            return Fault(code, TEXT[code])
+    except (OSError, ValueError, AttributeError):
         pass
     return None
+
+
+# ── pre-flight while a credit fault is remembered ──────────────────────
+# Once credit has run out, every tap opens a session that lights REC
+# for seconds before the same refusal. While a credits fault is
+# remembered, one small REST call decides BEFORE any session opens
+# (Suti 2026-09-16: "could this show up straight away, before it even
+# tries to start listening?"): refused again -> the chip refreshes and
+# no session; accepted -> the fault is forgotten and the tap proceeds.
+# Fail-open: any other outcome (network, model, timeout) is "undecided"
+# and the session tries, as before.
+
+PREFLIGHT_MODEL_ENV = "NARADA_PREFLIGHT_MODEL"
+
+
+def _default_probe(model: str, timeout: float) -> None:
+    import openai
+
+    client = openai.OpenAI(timeout=timeout, max_retries=0)
+    client.responses.create(model=model, input="Reply with the single word: ok.",
+                            max_output_tokens=16)
+
+
+def preflight(probe=None, model: str | None = None,
+              timeout: float = 8.0) -> tuple[str, Fault | None]:
+    """("ok", None) when the key is good for a call; ("refused", fault)
+    when the provider said credits or auth; ("undecided", None) when the
+    probe could not tell (never blocks a session)."""
+    model = (model or os.environ.get(PREFLIGHT_MODEL_ENV)
+             or os.environ.get("NARADA_LIVE_BACKEND_MODEL", "gpt-5.6-luna"))
+    try:
+        (probe or _default_probe)(model, timeout)
+    except Exception as exc:  # noqa: BLE001 — every outcome is a verdict
+        fault = classify(exc)
+        if fault.code in ("credits", "auth"):
+            return "refused", fault
+        logger.warning("voice preflight undecided (%s): %r", fault.code, exc)
+        return "undecided", None
+    return "ok", None
 
 
 # ── wire shapes ────────────────────────────────────────────────────────
@@ -231,7 +298,7 @@ def box_chip(fault: Fault | None) -> dict:
     """The box's keyed persistent chip (overlay_chip): text sets it,
     empty text clears it. Key "fault" wears the red style in firmware."""
     return {"type": "chip", "key": "fault", "icon": "tool",
-            "text": fault.text if fault is not None else ""}
+            "text": ascii_text(fault.text) if fault is not None else ""}
 
 
 def phone_message(fault: Fault | None) -> dict:

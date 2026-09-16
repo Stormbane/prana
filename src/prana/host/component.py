@@ -68,6 +68,11 @@ class Component:
     def spawn_env(self) -> dict[str, str]:
         """Merge component env into os.environ for subprocess spawn."""
         env = dict(os.environ)
+        # Children write their logs through a pipe, where Python falls
+        # back to the ANSI code page: every non-ASCII character reached
+        # host.log as a replacement mark (field 2026-09-16). UTF-8 unless
+        # the component says otherwise.
+        env.setdefault("PYTHONUTF8", "1")
         env.update(self.env)
         return env
 

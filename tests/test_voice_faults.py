@@ -165,3 +165,60 @@ def test_the_fault_outlives_the_job_until_a_session_speaks(tmp_path, monkeypatch
     assert faults.remembered() is None
     faults.forget()  # idempotent
     assert faults.box_chip(faults.remembered())["text"] == ""
+
+
+def test_chip_text_is_the_pixel_fonts_alphabet():
+    # The box draws chips in UNSCII, which has no em dash (field
+    # 2026-09-16: a square in the middle of "credit is empty").
+    for code, text in faults.TEXT.items():
+        assert text.isascii(), code
+    legacy = faults.Fault("credits", "credit is empty — top up ‘now’… é")
+    assert faults.box_chip(legacy)["text"] == "credit is empty - top up 'now'... ?"
+    assert faults.box_chip(faults.Fault("credits", faults.TEXT["credits"]))["text"] == faults.TEXT["credits"]
+
+
+def test_a_remembered_fault_wears_this_builds_words(tmp_path, monkeypatch):
+    monkeypatch.setenv("NARADA_STATE_DIR", str(tmp_path))
+    (tmp_path / "voice-fault.json").write_text(
+        json.dumps({"code": "credits", "text": "old — words", "at": "2026-09-16T09:48:37"}),
+        encoding="utf-8")
+    assert faults.remembered() == faults.Fault("credits", faults.TEXT["credits"])
+    (tmp_path / "voice-fault.json").write_text(json.dumps({"code": "nonsense"}), encoding="utf-8")
+    assert faults.remembered() is None
+    (tmp_path / "voice-fault.json").write_text("[]", encoding="utf-8")
+    assert faults.remembered() is None
+
+
+def test_fatal_faults_are_the_ones_retrying_cannot_mend():
+    assert all(faults.Fault(c, "").fatal for c in ("credits", "auth", "model"))
+    assert not any(faults.Fault(c, "").fatal for c in ("rate", "connect", "unknown"))
+
+
+def test_preflight_decides_on_a_refusal_and_fails_open_on_anything_else(monkeypatch):
+    seen = {}
+
+    def refuse(model, timeout):
+        seen["model"] = model
+        raise _APIError("Error code: 429", body={"code": "insufficient_quota",
+                                                  "message": "You exceeded your current quota"})
+
+    monkeypatch.setenv(faults.PREFLIGHT_MODEL_ENV, "probe-model")
+    assert faults.preflight(probe=refuse) == ("refused", faults.Fault("credits", faults.TEXT["credits"]))
+    assert seen["model"] == "probe-model"
+
+    def bad_key(model, timeout):
+        raise _APIError("Error code: 401 - Incorrect API key provided")
+
+    outcome, fault = faults.preflight(probe=bad_key)
+    assert (outcome, fault.code) == ("refused", "auth")
+
+    def flaky(model, timeout):
+        raise _APIError("Connection timed out")
+
+    assert faults.preflight(probe=flaky) == ("undecided", None)
+
+    def gone(model, timeout):
+        raise _APIError("Error code: 404", body={"code": "model_not_found"})
+
+    assert faults.preflight(probe=gone) == ("undecided", None)  # never blocks a session
+    assert faults.preflight(probe=lambda model, timeout: None) == ("ok", None)
