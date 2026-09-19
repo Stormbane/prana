@@ -8,12 +8,16 @@ Two doors, both surfaces:
   the stamp ``(as_of, rules_rev)`` it was built from.
 - ``refresh_block(stamp, surface)`` — a replacement when the stamp has
   gone stale: midnight rolled, or a rule / day kind changed from any
-  surface. The chat brain prepends it to the next turn's prompt; the
-  voice workers rewrite the agent's instructions.
+  surface. A missing stamp (the opening failed) is treated as "needs
+  its first briefing", so one bad open never silences a session
+  (diff review). The chat brain prepends the block to the next turn's
+  prompt; the voice workers rewrite the agent's instructions. Callers
+  advance their stamp only once the block was DELIVERED.
 
-Akhada is imported lazily and every failure yields nothing: a session
-without a briefing is a session, a failed session is not. Tests
-inject a provider through ``set_provider``.
+Everything akhada-related — import, call, the shape of the result —
+sits inside one guard, and every failure yields nothing: a session
+without a briefing is a session, a failed session is not. Tests inject
+a provider through ``set_provider``.
 """
 
 from __future__ import annotations
@@ -47,44 +51,61 @@ def set_provider(briefing: Callable[..., Any] | None, is_current: Callable[..., 
 def _load() -> tuple[Callable[..., Any], Callable[..., bool]] | None:
     if _provider is not None:
         return _provider
-    try:
-        from akhada.context import briefing, is_current
-    except ImportError:
-        return None
+    from akhada.context import briefing, is_current  # may raise: caught by the callers
+
     return briefing, is_current
+
+
+def _fetch(surface: str) -> tuple[str, Stamp] | None:
+    """One guarded trip: load, call, validate. None on any failure."""
+    try:
+        mods = _load()
+        if mods is None:
+            return None
+        b = mods[0](surface=surface)
+        text = str(b.text)
+        stamp = (str(b.as_of), int(b.rules_rev))
+        if not text.strip() or not stamp[0]:
+            raise ValueError("empty briefing")
+        return text, stamp
+    except Exception as exc:  # noqa: BLE001 — never a failed session
+        logger.warning("akhada briefing unavailable: %s", exc)
+        return None
+
+
+def _current(stamp: Stamp) -> bool:
+    """Whether the stamp still describes today and the rules. A failed
+    check reads as current: better a stale line than a dead turn."""
+    try:
+        mods = _load()
+        return True if mods is None else bool(mods[1](None, stamp[0], stamp[1]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("akhada briefing check failed: %s", exc)
+        return True
 
 
 def briefing_block(surface: str = "chat") -> tuple[str, Stamp | None]:
     """The opening block (with a leading blank line) and its stamp;
     ("", None) when akhada is absent or broken."""
-    mods = _load()
-    if mods is None:
+    got = _fetch(surface)
+    if got is None:
         return "", None
-    try:
-        b = mods[0](surface=surface)
-    except Exception as exc:  # noqa: BLE001 — never a failed session
-        logger.warning("akhada briefing failed: %s", exc)
-        return "", None
-    return f"\n\n{HEADERS.get(surface, HEADERS['chat'])}\n{b.text}", (str(b.as_of), int(b.rules_rev))
+    text, stamp = got
+    return f"\n\n{HEADERS.get(surface, HEADERS['chat'])}\n{text}", stamp
 
 
 def refresh_block(stamp: Stamp | None, surface: str = "chat") -> tuple[str | None, Stamp | None]:
-    """(block, new stamp) when the stamp is stale; (None, stamp) when it
-    still describes today and the rules. Never raises."""
-    if stamp is None:
-        return None, None
-    mods = _load()
-    if mods is None:
+    """(block, new stamp) when a briefing is due — the stamp is stale,
+    or there never was one; (None, stamp) when it still holds. Never
+    raises. The caller keeps its old stamp until the block is delivered."""
+    if stamp is not None and _current(stamp):
         return None, stamp
-    try:
-        if mods[1](None, stamp[0], stamp[1]):
-            return None, stamp
-        b = mods[0](surface=surface)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("akhada briefing refresh failed: %s", exc)
+    got = _fetch(surface)
+    if got is None:
         return None, stamp
-    header = REFRESH_HEADERS.get(surface, REFRESH_HEADERS["chat"])
-    return f"{header}\n{b.text}", (str(b.as_of), int(b.rules_rev))
+    text, new_stamp = got
+    header = (REFRESH_HEADERS if stamp is not None else HEADERS).get(surface, HEADERS["chat"])
+    return f"{header}\n{text}", new_stamp
 
 
 def with_preamble(prompt: Any, block: str) -> Any:

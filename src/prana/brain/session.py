@@ -150,7 +150,10 @@ class BrainSession:
             self.last_used = time.monotonic()
             if on_start is not None:
                 await on_start()
-            block, self.brief_stamp = await asyncio.to_thread(
+            # A due briefing rides this turn's prompt; the stamp moves
+            # only once the turn completed (diff review: advancing it
+            # first lost the refresh when the backend failed to send).
+            block, pending_stamp = await asyncio.to_thread(
                 fitness.refresh_block, self.brief_stamp, "chat")
             if block:
                 prompt = fitness.with_preamble(prompt, block)
@@ -185,6 +188,7 @@ class BrainSession:
                 if completed:
                     # The handover, if any, is in the native conversation now.
                     (self.session_dir / "pending-handover.md").unlink(missing_ok=True)
+                    self.brief_stamp = pending_stamp
 
     async def cancel(self) -> bool:
         """Explicit cancel: stops at the next tool boundary. Returns

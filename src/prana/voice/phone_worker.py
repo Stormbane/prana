@@ -25,6 +25,8 @@ import time
 
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions
+
+from prana.voice.hooked import HookedAgent
 from livekit.plugins import openai as lk_openai
 
 from prana.voice import worker as box
@@ -350,7 +352,10 @@ async def entrypoint(ctx: JobContext) -> None:
         instructions += fit_block
 
         async def _refresh_fitness() -> None:
-            if fit_state["busy"] or fit_state["stamp"] is None:
+            """Before each reply (HookedAgent); the stamp moves only
+            after update_instructions() succeeded; a missing stamp
+            means the opening failed and the briefing is still due."""
+            if fit_state["busy"]:
                 return
             fit_state["busy"] = True
             try:
@@ -358,8 +363,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 block, stamp = await asyncio.to_thread(
                     refresh_block, fit_state["stamp"], "voice")
                 if block:
-                    fit_state["stamp"] = stamp
                     await agent.update_instructions(fit_state["base"] + "\n\n" + block)
+                    fit_state["stamp"] = stamp
                     logger.info("fitness briefing refreshed %s", stamp)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("fitness refresh failed: %s", exc)
@@ -385,7 +390,8 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-        agent = Agent(
+        agent = HookedAgent(
+            before_reply=_refresh_fitness,
             instructions=instructions,
             tools=build_voice_tools(
                 tier=tier, session_id=ctx.job.id,
@@ -431,7 +437,6 @@ async def entrypoint(ctx: JobContext) -> None:
             last_activity["t"] = time.monotonic()
             if getattr(ev, "is_final", False):
                 awaiting_reply["since"] = time.monotonic()
-                asyncio.ensure_future(_refresh_fitness())
 
         async def _reply_nudge() -> None:
             """Force a response when the model goes quiet on him: his
