@@ -551,14 +551,16 @@ async def entrypoint(ctx: JobContext) -> None:
             # goals, and the logging rules — built from the store, no
             # model in the loop. Absent package or broken store = no
             # fitness context, never a failed session.
+            # The briefing (plan-exercise-corpus §C2): today's shape by
+            # rule or pattern, open loops, protocols — computed, capped
+            # for voice, and refreshed when it goes stale (below).
+            fit_state: dict = {"base": None, "stamp": None, "busy": False}
             if tier == "personal":
-                try:
-                    from akhada.adapters.livekit_tools import wake_context
-                    instructions += "\n\nFITNESS (Akhada):\n" + wake_context()
-                except ImportError:
-                    pass
-                except Exception as exc:
-                    logger.warning("akhada context failed: %s", exc)
+                from prana.brain.fitness import briefing_block
+                fit_block, fit_stamp = briefing_block("voice")
+                fit_state["base"] = instructions
+                fit_state["stamp"] = fit_stamp
+                instructions += fit_block
             async def _session_speak(inst: str) -> None:
                 # The rest timer's ring (akhada gym-session G4): a
                 # proactive spoken line in THIS session, same mechanism
@@ -846,9 +848,32 @@ async def entrypoint(ctx: JobContext) -> None:
                                    "latest": "", "final": True})
                     asyncio.ensure_future(_fade_if_untranscribed())
 
+            async def _refresh_fitness() -> None:
+                """A call that runs past midnight, or a day kind / rule
+                changed from the phone, gets the new briefing on the
+                next turn (review round 2: voice freshness)."""
+                if fit_state["busy"] or fit_state["stamp"] is None:
+                    return
+                fit_state["busy"] = True
+                try:
+                    from prana.brain.fitness import refresh_block
+                    block, stamp = await asyncio.to_thread(
+                        refresh_block, fit_state["stamp"], "voice")
+                    if block:
+                        fit_state["stamp"] = stamp
+                        await agent.update_instructions(
+                            fit_state["base"] + "\n\n" + block)
+                        logger.info("fitness briefing refreshed %s", stamp)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("fitness refresh failed: %s", exc)
+                finally:
+                    fit_state["busy"] = False
+
             @session.on("user_input_transcribed")
             def _on_user_words(ev) -> None:
                 user_words_seen["v"] = True
+                if getattr(ev, "is_final", True) and fit_state["stamp"] is not None:
+                    asyncio.ensure_future(_refresh_fitness())
                 # Suti's speech IS activity (round 9: the silence
                 # timeout hung up mid-Adyostotram — a long recitation
                 # never transitions agent state, but it is the

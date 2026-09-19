@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
+from prana.brain import fitness
 from prana.brain.config import TIER_SERVERS, BrainConfig, backend_for
 from prana.brain.turns import TurnStore
 
@@ -99,11 +100,17 @@ class TurnOutcome:
 
 class BrainSession:
     def __init__(self, session_id: str, tier: str, backend, store: TurnStore,
-                 session_dir: Path, model: str = ""):
+                 session_dir: Path, model: str = "",
+                 brief_stamp: fitness.Stamp | None = None):
         self.session_id = session_id
         self.tier = tier
         self.model = model
         self.backend = backend
+        # The akhada briefing this session opened with, as (as_of,
+        # rules_rev); a turn that finds it stale prepends a fresh one
+        # (plan-exercise-corpus §C2: midnight, a rule or day kind
+        # changed from any surface).
+        self.brief_stamp = brief_stamp
         self.turns = store
         self.session_dir = session_dir
         self.last_used = time.monotonic()
@@ -143,6 +150,10 @@ class BrainSession:
             self.last_used = time.monotonic()
             if on_start is not None:
                 await on_start()
+            block, self.brief_stamp = await asyncio.to_thread(
+                fitness.refresh_block, self.brief_stamp, "chat")
+            if block:
+                prompt = fitness.with_preamble(prompt, block)
             started = time.monotonic()
             agen = self.backend.run_turn(prompt)
             completed = False
@@ -307,9 +318,12 @@ class SessionPool:
             backend_file.write_text(backend_name, encoding="utf-8")
 
         factory = self._backends.get(backend_name, self._factory)
+        # Akhada's briefing rides the system prompt from the first turn
+        # (plan-exercise-corpus §C2); computed by code, capped, stamped.
+        brief_block, brief_stamp = await asyncio.to_thread(fitness.briefing_block, "chat")
         kwargs = dict(
             model=resolved,
-            system_append=self._config.system_append(),
+            system_append=self._config.system_append() + brief_block,
             mcp_servers=self._tier_mcp(tier),
             max_tool_iterations=self._config.max_tool_iterations,
             cwd=str(session_dir),
@@ -324,7 +338,7 @@ class SessionPool:
             session_dir / "turns.json", window=self._config.idempotency_window
         )
         session = BrainSession(key, tier, backend, store, session_dir,
-                               model=resolved)
+                               model=resolved, brief_stamp=brief_stamp)
         self._sessions[key] = session
         logger.info(
             "session %s created (tier=%s, model=%s, resume=%s)",

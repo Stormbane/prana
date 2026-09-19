@@ -332,13 +332,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 f"\n\nACCENT: speak with a {accent} accent — unforced "
                 "and consistent, the way someone who grew up speaking "
                 "it sounds, never a caricature.")
-        try:
-            from akhada.adapters.livekit_tools import wake_context
-            instructions += "\n\nFITNESS (Akhada):\n" + wake_context()
-        except ImportError:
-            pass
-        except Exception as exc:
-            logger.warning("akhada context failed: %s", exc)
         pack_text = context_pack(getattr(ctx.job, "metadata", None))
         if pack_text:
             instructions += "\n\n" + pack_text
@@ -349,6 +342,29 @@ async def entrypoint(ctx: JobContext) -> None:
         if str(prefs.get("brevity") or "normal") == "brief":
             instructions += "\n\n" + BRIEF_NOTE
             logger.info("brief mode on")
+        # The briefing last, so everything before it is the base the
+        # refresh rebuilds on (plan-exercise-corpus §C2).
+        from prana.brain.fitness import briefing_block
+        fit_state: dict = {"base": instructions, "stamp": None, "busy": False}
+        fit_block, fit_state["stamp"] = briefing_block("voice")
+        instructions += fit_block
+
+        async def _refresh_fitness() -> None:
+            if fit_state["busy"] or fit_state["stamp"] is None:
+                return
+            fit_state["busy"] = True
+            try:
+                from prana.brain.fitness import refresh_block
+                block, stamp = await asyncio.to_thread(
+                    refresh_block, fit_state["stamp"], "voice")
+                if block:
+                    fit_state["stamp"] = stamp
+                    await agent.update_instructions(fit_state["base"] + "\n\n" + block)
+                    logger.info("fitness briefing refreshed %s", stamp)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("fitness refresh failed: %s", exc)
+            finally:
+                fit_state["busy"] = False
 
         async def _session_speak(inst: str) -> None:
             # The rest timer's ring (akhada gym-session G4): a proactive
@@ -415,6 +431,7 @@ async def entrypoint(ctx: JobContext) -> None:
             last_activity["t"] = time.monotonic()
             if getattr(ev, "is_final", False):
                 awaiting_reply["since"] = time.monotonic()
+                asyncio.ensure_future(_refresh_fitness())
 
         async def _reply_nudge() -> None:
             """Force a response when the model goes quiet on him: his
