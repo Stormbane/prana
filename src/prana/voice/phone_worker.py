@@ -432,6 +432,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 spoke["v"] = True
                 asyncio.ensure_future(_publish_activity("narada.activity", phone_message(None)))
 
+        from prana.voice.hooked import attach_refresh
+        attach_refresh(session, _refresh_fitness)
+
         @session.on("user_input_transcribed")
         def _on_user_words(ev) -> None:
             last_activity["t"] = time.monotonic()

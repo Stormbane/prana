@@ -206,3 +206,36 @@ def test_the_hooked_agent_runs_the_refresh_before_the_reply_and_survives_it():
             assert seen == expect
 
     asyncio.run(run())
+
+
+def test_the_transcript_trigger_schedules_the_refresh_on_final_only():
+    pytest.importorskip("livekit.agents")
+    from prana.voice.hooked import attach_refresh
+
+    class FakeSession:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, name):
+            def deco(fn):
+                self.handlers[name] = fn
+                return fn
+            return deco
+
+    runs = []
+
+    async def refresh():
+        runs.append(1)
+
+    async def run():
+        s = FakeSession()
+        attach_refresh(s, refresh)
+        h = s.handlers["user_input_transcribed"]
+        h(SimpleNamespace(is_final=False))
+        h(SimpleNamespace(is_final=True))
+        h(SimpleNamespace(is_final=True))
+        await asyncio.sleep(0)
+        assert runs == [1, 1]
+
+    asyncio.run(run())
+

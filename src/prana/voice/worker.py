@@ -872,6 +872,9 @@ async def entrypoint(ctx: JobContext) -> None:
                                    "latest": "", "final": True})
                     asyncio.ensure_future(_fade_if_untranscribed())
 
+            from prana.voice.hooked import attach_refresh
+            attach_refresh(session, _refresh_fitness)
+
             @session.on("user_input_transcribed")
             def _on_user_words(ev) -> None:
                 user_words_seen["v"] = True
