@@ -132,6 +132,12 @@ class BrainConfig:
     sessions_root: Path = field(
         default_factory=lambda: Path.home() / ".narada" / "brain" / "sessions"
     )
+    # The chat mirror (Suti 2026-09-21): the phone's own transcripts,
+    # mirrored so a chat typed while the phone could not reach the
+    # brain can still be retrieved here. One JSON file per chat, per tier.
+    chats_root: Path = field(
+        default_factory=lambda: Path.home() / ".narada" / "brain" / "chats"
+    )
     wake_context: Path = field(
         default_factory=lambda: Path.home() / ".narada" / ".smriti" / "wake-context.md"
     )

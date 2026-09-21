@@ -18,8 +18,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -638,6 +640,66 @@ def create_app(config: BrainConfig, backend_factory,
         from prana.notes import store as notes_store
 
         return notes_store.list_notes()
+
+    # ── the chat mirror ──────────────────────────────────────────────
+    # The phone mirrors each conversation's local transcript here
+    # (debounced, and again when it comes back online). The brain only
+    # records turns that reached it; this is the copy of what the phone
+    # holds, including messages that never got through. A copy, not the
+    # record: last write wins, whole document, atomic on disk.
+    _CHAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+    _CHAT_BODY_MAX = 1_000_000
+
+    def _chat_path(tier: str, chat_id: str) -> Path:
+        return config.chats_root / tier / f"{chat_id}.json"
+
+    @app.put("/api/chats/{chat_id}")
+    async def chat_mirror_put(chat_id: str, request: Request,
+                              tier: str = Depends(require_tier)) -> dict:
+        if not _CHAT_ID_RE.match(chat_id):
+            raise HTTPException(400, "bad chat id")
+        raw = await request.body()
+        if len(raw) > _CHAT_BODY_MAX:
+            raise HTTPException(413, "chat too large to mirror")
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise HTTPException(400, "body must be an object with a messages list")
+        doc = {**body, "id": chat_id, "tier": tier,
+               "mirrored_at": datetime.now().isoformat(timespec="seconds")}
+        path = _chat_path(tier, chat_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)  # atomic: never a torn chat on disk
+        return {"ok": True, "id": chat_id, "messages": len(body["messages"]),
+                "mirrored_at": doc["mirrored_at"]}
+
+    @app.get("/api/chats")
+    async def chat_mirror_list(tier: str = Depends(require_tier)) -> list:
+        root = config.chats_root / tier
+        out = []
+        for p in sorted(root.glob("*.json")) if root.is_dir() else []:
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            out.append({"id": doc.get("id", p.stem), "title": doc.get("title", ""),
+                        "updatedAt": doc.get("updatedAt"), "mirrored_at": doc.get("mirrored_at"),
+                        "messages": len(doc.get("messages") or [])})
+        out.sort(key=lambda d: d.get("updatedAt") or 0, reverse=True)
+        return out
+
+    @app.get("/api/chats/{chat_id}")
+    async def chat_mirror_get(chat_id: str, tier: str = Depends(require_tier)) -> dict:
+        if not _CHAT_ID_RE.match(chat_id):
+            raise HTTPException(400, "bad chat id")
+        path = _chat_path(tier, chat_id)
+        if not path.is_file():
+            raise HTTPException(404, "no such chat")
+        return json.loads(path.read_text(encoding="utf-8"))
 
     @app.post("/api/notes")
     async def notes_create(request: Request,
