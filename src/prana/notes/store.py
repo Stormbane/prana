@@ -62,7 +62,8 @@ def get_note(note_id: str) -> dict | None:
 
 # Note colours (Suti 2026-09-08: "let me choose note colours") — names,
 # not hex: each theme paints them in its own palette.
-COLORS = ("none", "amber", "cyan", "violet", "green", "rose", "cream")
+COLORS = ("none", "amber", "cyan", "violet", "green", "rose", "cream",
+          "night", "plum", "forest", "wine", "slate", "coffee")  # six dark (Suti 2026-09-21)
 
 
 def _color(value: str | None) -> str:

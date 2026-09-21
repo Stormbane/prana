@@ -30,6 +30,10 @@ def _mcp_servers() -> dict:
         # The box's screen (prana.box): show a picture Narada made.
         "narada-box": {"command": sys.executable,
                        "args": ["-m", "prana.box.mcp"]},
+        # The phone's mirrored chats (prana.chats): read a conversation
+        # as the phone holds it, failed turns included (Suti 2026-09-21).
+        "narada-chats": {"command": sys.executable,
+                         "args": ["-m", "prana.chats.mcp"]},
     }
     try:
         token = load_or_create_tokens()["prana"]
@@ -47,9 +51,9 @@ def _mcp_servers() -> dict:
 # Which MCP servers each caller tier gets wired with (spec §1a auth:
 # "the tier decides which MCP tools the session's agent is wired with").
 TIER_SERVERS: dict[str, tuple[str, ...]] = {
-    "prana": ("smriti", "akhada", "narada-notes", "narada-box", "narada-sessions"),
-    "app": ("smriti", "akhada", "narada-notes", "narada-box"),
-    "voice": ("smriti", "akhada", "narada-notes", "narada-box"),
+    "prana": ("smriti", "akhada", "narada-notes", "narada-box", "narada-chats", "narada-sessions"),
+    "app": ("smriti", "akhada", "narada-notes", "narada-box", "narada-chats"),
+    "voice": ("smriti", "akhada", "narada-notes", "narada-box", "narada-chats"),
 }
 
 
