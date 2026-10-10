@@ -73,12 +73,18 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     raise HTTPException(400, "followup identity is followup:<id>")
                 result = followups.answer_followup(store, followup_id=fid, choice=choice,
-                                                   text=text, via="tap", **common)
+                                                   text=text, at=payload.get("at"),
+                                                   via="tap", **common)
             else:
                 result = followups.answer_choice(store, identity=identity, choice=choice,
-                                                 text=text, via="tap", **common)
+                                                 text=text, at=payload.get("at"),
+                                                 via="tap", **common)
         else:
-            result = asks.excuse_request(store, identity=identity, how=kind, **common)
+            # The tap's frozen occurrence time decides the day it excuses,
+            # never its arrival time (app review P1).
+            from akhada import clock
+            day = asks.reporting_day(clock.parse_at(payload.get("at")))
+            result = asks.excuse_request(store, identity=identity, how=kind, day=day, **common)
     except ToolError as exc:
         result = {"ok": False, "error": str(exc), "spoken": str(exc)}
     except ValueError as exc:

@@ -94,3 +94,12 @@ def test_ask_followup_tool_result_becomes_the_chat_card():
             "data": {"ask_kind": "choice"}}
     out = card_for("mcp__akhada__ask_followup", {}, json.dumps({"ok": True, "card": spec}))
     assert out == spec
+
+
+def test_a_tap_delivered_late_reports_on_the_day_it_was_made(client):
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 5, 0, tzinfo=clock.TZ))   # delivered next morning
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "check", "kind": "check", "event_id": "late-1", "expected_revision": 0,
+        "payload": {"food": "on_track", "trained": "rest", "at": "2026-10-12T23:58:00+10:00"}}).json()
+    assert r["result"]["ok"] and r["result"]["day"] == "2026-10-12"
