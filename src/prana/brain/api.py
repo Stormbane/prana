@@ -533,6 +533,10 @@ def create_app(config: BrainConfig, backend_factory,
             raise HTTPException(503, str(exc))
         return {"saved": saved, "applies": "next call"}
 
+    # ── Questling v1: today's cards + tap answers (akhada asks) ──────
+    from prana.brain.today_api import register_today
+    register_today(app, require_tier)
+
     # ── Fitness summary (the Data tab's read-only view) ──────────────
     @app.get("/api/fitness/summary")
     async def fitness_summary(day: str = "today",
