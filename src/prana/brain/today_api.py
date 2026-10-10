@@ -22,7 +22,7 @@ from fastapi import Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
-_KINDS = ("check", "number", "skip", "stop")
+_KINDS = ("check", "number", "choice", "skip", "stop")
 
 
 def _store():
@@ -64,6 +64,19 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
                 raise HTTPException(400, "payload.value must be a number")
             result = asks.answer_number(store, identity=identity, value=float(value),
                                         at=payload.get("at"), **common)
+        elif kind == "choice":
+            from akhada import followups
+            choice, text = payload.get("choice"), payload.get("text")
+            if identity.startswith("followup:"):
+                try:
+                    fid = int(identity.split(":", 1)[1])
+                except ValueError:
+                    raise HTTPException(400, "followup identity is followup:<id>")
+                result = followups.answer_followup(store, followup_id=fid, choice=choice,
+                                                   text=text, via="tap", **common)
+            else:
+                result = followups.answer_choice(store, identity=identity, choice=choice,
+                                                 text=text, via="tap", **common)
         else:
             result = asks.excuse_request(store, identity=identity, how=kind, **common)
     except ToolError as exc:

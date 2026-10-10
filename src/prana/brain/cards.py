@@ -26,6 +26,7 @@ _INTERESTING = {
     "log_meal", "add_meal_items", "log_workout", "log_set", "log_vital", "log_weight",
     "get_today_summary", "get_recent", "get_exercise_history",
     "notes_create", "notes_update", "notes_check_item",
+    "ask_followup",
 }
 
 
@@ -285,6 +286,13 @@ def card_for(tool_name: str, tool_input: dict | None, result_text: str) -> dict 
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     base = {"card_id": f"auto-{uuid.uuid4().hex[:10]}", "kind": "kv",
             "v": CARD_V, "as_of": now}
+    # A follow-up (Questling Q3): akhada built the whole answerable card;
+    # it goes into the transcript as-is, under akhada's own card_id.
+    if name == "ask_followup":
+        card = res.get("card")
+        if isinstance(card, dict) and card.get("kind") == "ask" and card.get("card_id"):
+            return card
+        return None
     try:
         if name == "log_set":
             exercise = str(tool_input.get("exercise") or "set").strip()

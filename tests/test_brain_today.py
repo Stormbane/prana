@@ -73,3 +73,24 @@ def test_a_tap_without_event_id_is_refused(client):
     r = client.post("/api/today/answer", headers=H, json={
         "identity": "check", "kind": "check", "payload": {"food": "so_so", "trained": "no"}})
     assert r.status_code == 400
+
+
+def test_followup_and_choice_taps(client):
+    from akhada import followups
+    from akhada.store.db import Store
+    f = followups.ask_followup(Store(), question="Energy?", options=["Low", "OK", "High"], about="energy")
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": f"followup:{f['followup_id']}", "kind": "choice", "event_id": "fu-1",
+        "payload": {"choice": "High"}}).json()
+    assert r["result"]["ok"]
+    card = next(c for c in r["today"]["cards"] if c["data"]["identity"] == f"followup:{f['followup_id']}")
+    assert card["data"]["answer"] == "High"
+
+
+def test_ask_followup_tool_result_becomes_the_chat_card():
+    import json
+    from prana.brain.cards import card_for
+    spec = {"card_id": "followup-7", "kind": "ask", "v": 1, "rev": 1, "caption": "Energy?",
+            "data": {"ask_kind": "choice"}}
+    out = card_for("mcp__akhada__ask_followup", {}, json.dumps({"ok": True, "card": spec}))
+    assert out == spec
