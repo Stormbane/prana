@@ -46,6 +46,39 @@ def _talk_page_up() -> bool:
         return False
 
 
+BRAIN_URL = os.environ.get("NARADA_BRAIN_URL", "http://127.0.0.1:8811")
+BRAIN_TOKENS = Path.home() / ".narada" / ".brain-tokens.json"
+
+
+def _notify_app(text: str, event_id: str, telegram_done: bool) -> str:
+    """Mirror a delivered nudge into the brain's notify door, so it lands
+    in the app's feed and on the phone as a push (2026-10-07: nudges went
+    only to the box or Telegram and never reached the app). Best effort
+    and after delivery: the at-most-once claim above is already settled,
+    so a brain wobble here costs a push, never a duplicate Telegram (the
+    door is told Telegram is done) and never a second app row (event_id).
+    """
+    import json
+    import urllib.request
+    try:
+        token = json.loads(BRAIN_TOKENS.read_text(encoding="utf-8"))["prana"]
+        body = json.dumps({
+            "title": "Narada", "body": text, "level": "message",
+            "source": "akhada-checkin", "category": "akhada-checkin",
+            "event_id": event_id,
+            "delivered_channels": ["telegram"] if telegram_done else [],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            BRAIN_URL + "/v1/narada/notify", data=body, method="POST",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read().decode("utf-8") or "{}")
+        return f"app: channels={result.get('channels')} push={result.get('push')}"
+    except Exception as exc:  # noqa: BLE001 — the nudge already went out
+        return f"app: not mirrored ({exc})"
+
+
 def main() -> int:
     now = datetime.now()
     if QUIET_START_H <= now.hour < QUIET_END_H:
@@ -99,6 +132,8 @@ def main() -> int:
                     out["text"])
     print(f"nudge sent via {result.delivered_to} [{out['slot']}]: "
           f"{out['text']}")
+    print(_notify_app(out["text"], f"akhada-checkin:{out['day']}:{out['slot']}",
+                      telegram_done="telegram" in str(result.delivered_to)))
     return 0
 
 

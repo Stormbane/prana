@@ -447,7 +447,16 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
         try:
             result["push"] = _push_all(title, body, url, row.get("level", level), webpush_fn,
                                        row=row)
-            outcomes["push"] = int(result["push"].get("failed", 0)) == 0
+            # Zero devices is not a delivery (2026-10-07: the feed said
+            # push=True for a month while push-subs.json was empty). It is
+            # recorded distinctly — not False, so a later subscribe does
+            # not replay a month of stale alarms on retry.
+            if not (result["push"].get("sent") or result["push"].get("failed")
+                    or result["push"].get("dropped")):
+                logger.warning("push: no subscribed devices — %r went nowhere", title)
+                outcomes["push"] = "no_devices"
+            else:
+                outcomes["push"] = int(result["push"].get("failed", 0)) == 0
         except Exception as exc:  # noqa: BLE001
             logger.warning("push subsystem failed: %s", exc)
             result["push"] = {"sent": 0, "failed": 1, "dropped": 0, "error": str(exc)[:200]}

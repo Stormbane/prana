@@ -277,3 +277,18 @@ def test_episode_revision_is_monotonic_even_within_one_second(monkeypatch):
     push.notify(body="smoke in the rack", level="emergency", source="host", category="fire", event_id="f-1",
                 webpush_fn=lambda **kw: seen.append(json.loads(kw["data"])))
     assert seen[-1]["rev"] == 1 and seen[-1]["level"] == "emergency"
+
+
+def test_zero_devices_is_recorded_as_no_devices_not_delivered(monkeypatch):
+    """2026-10-07: an empty push-subs.json was logged as push=True for a
+    month. Nowhere is not delivered — and not a retryable failure either."""
+    monkeypatch.setattr(push, "_load_subs", lambda: {})
+    monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
+    r = push.notify(body="Good morning", level="message", source="notify-suti",
+                    event_id="nd-1", webpush_fn=lambda **kw: None,
+                    telegram_fn=lambda _t: True)
+    assert r["push"] == {"sent": 0, "failed": 0, "dropped": 0}
+    assert push.read_notifications()[-1]["delivered"]["push"] == "no_devices"
+    again = push.notify(body="Good morning", level="message", source="notify-suti",
+                        event_id="nd-1", telegram_fn=lambda _t: True)
+    assert "push" not in again["channels"]
