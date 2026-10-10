@@ -47,6 +47,7 @@ def test_mirror_tells_the_door_telegram_is_done(tmp_path, monkeypatch):
     assert seen["body"]["event_id"] == "akhada-checkin:2026-10-09:evening"
     assert seen["body"]["delivered_channels"] == ["telegram"]
     assert seen["body"]["level"] == "message"
+    assert seen["body"]["url"] == "./#/today"  # the push opens today's cards
     assert "push" in out
 
 

@@ -65,7 +65,7 @@ def _notify_app(text: str, event_id: str, telegram_done: bool) -> str:
         body = json.dumps({
             "title": "Narada", "body": text, "level": "message",
             "source": "akhada-checkin", "category": "akhada-checkin",
-            "event_id": event_id,
+            "event_id": event_id, "url": "./#/today",
             "delivered_channels": ["telegram"] if telegram_done else [],
         }).encode("utf-8")
         req = urllib.request.Request(
