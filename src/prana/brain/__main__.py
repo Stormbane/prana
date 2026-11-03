@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 import uvicorn
 
@@ -38,6 +39,7 @@ def codex_backends(config: BrainConfig) -> dict:
 
 def main() -> None:
     config = BrainConfig()
+    config.claude_transcripts_root = Path.home() / ".claude" / "projects"
 
     if not config.wake_context.exists():
         sys.stderr.write(f"FATAL: wake context missing: {config.wake_context}\n")

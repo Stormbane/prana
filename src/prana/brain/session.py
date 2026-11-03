@@ -61,9 +61,11 @@ HANDOVER_TURNS = 40
 HANDOVER_CHARS = 12_000
 
 
-def handover_text(session_dir: Path) -> str | None:
+def handover_text(session_dir: Path, *,
+                  source: str = "another model") -> str | None:
     """The conversation so far, from transcript.jsonl, as a context
-    block for a backend that cannot resume the other one's session.
+    block for a backend that cannot resume its native session (another
+    backend's, or one whose transcript Claude Code has deleted).
     The newest turns, bounded; None when there is nothing to carry."""
     path = session_dir / "transcript.jsonl"
     if not path.exists():
@@ -88,8 +90,8 @@ def handover_text(session_dir: Path) -> str | None:
     body = "\n".join(tail)
     if len(body) > HANDOVER_CHARS:
         body = body[-HANDOVER_CHARS:]
-    return ("[Context — this conversation so far, carried over from another "
-            "model. Continue it; do not repeat it back.]\n" + body)
+    return (f"[Context — this conversation so far, carried over from {source}. "
+            "Continue it; do not repeat it back.]\n" + body)
 
 
 @dataclass
@@ -318,6 +320,20 @@ class SessionPool:
                         key, prior, backend_name, len(handover or ""))
         elif pending.exists():
             handover = pending.read_text(encoding="utf-8") or None
+        if (resume is not None and backend_name == "claude"
+                and not self._claude_transcript_exists(resume)):
+            # Claude Code deleted the transcript (cleanupPeriodDays): a
+            # resume would fail every turn. Start fresh and carry the
+            # conversation over from the brain's own transcript, persisted
+            # until a turn completes, as for a backend crossing.
+            logger.warning("session %s: Claude transcript %s is gone; starting "
+                           "fresh with a handover", key, resume)
+            resume = None
+            native_file.write_text("", encoding="utf-8")
+            handover = handover_text(
+                session_dir, source="an earlier session whose transcript expired")
+            if handover:
+                pending.write_text(handover, encoding="utf-8")
         if prior != backend_name:
             backend_file.write_text(backend_name, encoding="utf-8")
 
@@ -349,6 +365,18 @@ class SessionPool:
             key, tier, resolved, bool(resume),
         )
         return session
+
+    def _claude_transcript_exists(self, native_id: str) -> bool:
+        """True unless Claude Code's transcript for *native_id* is known
+        to be gone. Unconfigured or unreadable: assume it exists, which
+        keeps the previous behaviour."""
+        root = self._config.claude_transcripts_root
+        if root is None:
+            return True
+        try:
+            return any(root.glob(f"*/{native_id}.jsonl"))
+        except OSError:
+            return True
 
     async def _with_tool_servers(self, backend, factory, kwargs: dict, key: str):
         """A tool server that died at spawn gets ONE fresh spawn of the

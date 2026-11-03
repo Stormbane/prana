@@ -136,6 +136,13 @@ class BrainConfig:
     sessions_root: Path = field(
         default_factory=lambda: Path.home() / ".narada" / "brain" / "sessions"
     )
+    # Where Claude Code keeps session transcripts (<root>/<project>/<id>.jsonl).
+    # Claude Code deletes them after cleanupPeriodDays (30 by default); a
+    # resume of a deleted one fails every turn with "No conversation found"
+    # (doctor, 2026-11-03). When set, the pool checks before resuming and
+    # starts fresh with a handover instead. None = no check (tests, fakes);
+    # __main__ sets the real path.
+    claude_transcripts_root: Path | None = None
     # The chat mirror (Suti 2026-09-21): the phone's own transcripts,
     # mirrored so a chat typed while the phone could not reach the
     # brain can still be retrieved here. One JSON file per chat, per tier.
