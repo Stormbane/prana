@@ -24,10 +24,8 @@ import os
 import time
 
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions
-
-from prana.voice.hooked import HookedAgent
-from livekit.plugins import openai as lk_openai
+from livekit.agents import JobContext, WorkerOptions
+from livekit.plugins import openai as _openai_plugin  # noqa: F401 — registers on the main thread
 
 from prana.voice import worker as box
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
@@ -45,11 +43,10 @@ HEALTH_PORT = int(os.environ.get("AKHADA_VOICE_HEALTH_PORT", "8796"))
 
 PHONE_NOTE = """
 
-PHONE: he opened Akhada on his phone and tapped talk — he may be at the
-gym, cooking, or out walking, so keep replies even shorter than usual
-and confirm logged entries with a quick read-back. This surface is for
-food, training, weight and how the day is going; anything deeper, note
-it and keep moving."""
+PHONE: he opened the app and tapped talk. You are the same Narada he
+talks to through the box. Use the supplied chat context when relevant.
+He may be walking, cooking or training; be concise when useful, and
+confirm any logged entries with a quick read-back."""
 
 SILENCE_END_S = 75.0
 EMPTY_GRACE_S = 30.0
@@ -261,7 +258,6 @@ async def entrypoint(ctx: JobContext) -> None:
     session = None
     transcript = None
     reason = "unknown"
-    usage = {"in": 0, "out": 0, "cached": 0}
     bye = asyncio.Event()
     tier = "personal"  # the token is the admission; there is no other caller
     # Faults said plainly (Suti 2026-09-14): the worst provider error
@@ -272,53 +268,11 @@ async def entrypoint(ctx: JobContext) -> None:
     faults = FaultTracker()
     spoke = {"v": False}
     try:
-        from livekit.plugins.openai.realtime import realtime_model as _rt_mod
-
-        # First field call (2026-09-07): stock VAD (threshold 0.5)
-        # fired on random handset noise — each false turn burned a full
-        # ~7.5k-token response against the 40k TPM ceiling, and noise
-        # bursts came back transcribed in random languages. Raised
-        # threshold (community-effective range 0.6–0.75), near-field
-        # noise reduction (handset, not speakerphone), and an explicit
-        # language pin address all three. Prefs file (set from the
-        # phone app's Settings) overrides env, env overrides defaults.
-        prefs = load_voice_prefs()
-        vad_threshold = float(prefs.get("vad_threshold") or os.environ.get(
-            "NARADA_PHONE_VAD_THRESHOLD", "0.7"))
-        noise_pref = str(prefs.get("noise_reduction") or "near_field")
-        language = str(prefs.get("language") or os.environ.get(
-            "NARADA_PHONE_LANGUAGE", "en"))
-        # The model too, from Settings (Suti 2026-09-09); env/default
-        # otherwise. Read at job start like the rest: next call.
-        realtime_model = str(prefs.get("model") or box.REALTIME_MODEL)
-        session = AgentSession(
-            llm=lk_openai.realtime.RealtimeModel(
-                model=realtime_model, voice=box.REALTIME_VOICE,
-                turn_detection=_rt_mod.TurnDetection(
-                    type="server_vad",
-                    threshold=vad_threshold,
-                    prefix_padding_ms=300,
-                    silence_duration_ms=700),
-                input_audio_noise_reduction=(
-                    None if noise_pref == "off" else noise_pref),
-                input_audio_transcription=_rt_mod.InputAudioTranscription(
-                    model="gpt-4o-mini-transcribe",
-                    language=language)),
-            user_away_timeout=None,
-        )
-        logger.info("voice prefs: vad=%.2f noise=%s lang=%s model=%s",
-                    vad_threshold, noise_pref, language, realtime_model)
-
-        @session.on("metrics_collected")
-        def _on_metrics(ev) -> None:
-            m = getattr(ev, "metrics", ev)
-            it = getattr(m, "input_tokens", None)
-            if it is None:
-                return
-            usage["in"] += it
-            usage["out"] += getattr(m, "output_tokens", 0) or 0
-            det = getattr(m, "input_token_details", None)
-            usage["cached"] += getattr(det, "cached_tokens", 0) or 0
+        from prana.voice.pipeline import VoicePipeline
+        pipeline = VoicePipeline(surface="phone", prefs=load_voice_prefs())
+        prefs = pipeline.prefs
+        realtime_model = pipeline.model_name
+        session = pipeline.session
 
         transcript = attach(session, ctx.room.name)
 
@@ -390,19 +344,14 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-        agent = HookedAgent(
-            before_reply=_refresh_fitness,
+        agent = pipeline.agent(
             instructions=instructions,
+            before_reply=_refresh_fitness,
             tools=build_voice_tools(
                 tier=tier, session_id=ctx.job.id,
                 music=None, publish=_publish_activity, end_session=bye.set,
                 speak=_session_speak,
-                voice_info={
-                    "model": realtime_model,
-                    "voice": box.REALTIME_VOICE,
-                    "backend": "realtime",
-                    "surface": "phone",
-                }))
+                voice_info=pipeline.info()))
 
         @session.on("error")
         def _note_fault(ev) -> None:
@@ -447,6 +396,8 @@ async def entrypoint(ctx: JobContext) -> None:
             the last fragment nothing regenerates (2026-09-07 call —
             47s of silence until "Hello?"). Never completes; cancelled
             with the other waiters at session end."""
+            if pipeline.is_live:
+                await asyncio.Event().wait()
             while True:
                 await asyncio.sleep(1.0)
                 since = awaiting_reply["since"]
@@ -537,18 +488,6 @@ async def entrypoint(ctx: JobContext) -> None:
         reason = ("session-cap" if not done
                   else next(k for k, v in waiters.items() if v in done))
         logger.info("phone session ending: %s", reason)
-        try:
-            p_in = float(os.environ.get("NARADA_PRICE_IN", "32"))
-            p_cached = float(os.environ.get("NARADA_PRICE_CACHED", "0.40"))
-            p_out = float(os.environ.get("NARADA_PRICE_OUT", "64"))
-            uncached = max(0, usage["in"] - usage["cached"])
-            cost = (uncached * p_in + usage["cached"] * p_cached
-                    + usage["out"] * p_out) / 1e6
-            logger.info("session cost ~$%.4f (in=%d cached=%d out=%d, %.0fs)",
-                        cost, usage["in"], usage["cached"], usage["out"],
-                        time.monotonic() - started)
-        except Exception as exc:
-            logger.debug("cost accounting failed: %s", exc)
     except Exception as exc:
         # Any setup failure — prefs, model, session, start — is a fault
         # the finally must report (review recheck).
@@ -580,7 +519,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.warning("session digest failed: %s", exc)
         if session is not None:
             try:
-                await session.aclose()
+                await pipeline.aclose()
             except Exception as exc:
                 logger.warning("session close failed: %s", exc)
         budget.settle(reservation, time.monotonic() - started)
@@ -588,6 +527,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def main() -> None:
+    from prana.voice.runtime import run_in_voice_environment
+    result = run_in_voice_environment("prana.voice.phone_worker")
+    if result is not None:
+        raise SystemExit(result)
     logging.basicConfig(level=logging.INFO)
     box._check_env()
     agent_name = os.environ.get("AKHADA_AGENT_NAME", DEFAULT_AGENT_NAME)

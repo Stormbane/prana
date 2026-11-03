@@ -55,7 +55,7 @@ dependencies = [
 voice = [
     # Voice loop (component ships enabled:false, so extras are correct
     # here — flip requires deliberate setup incl. OPENAI_API_KEY)
-    "livekit-agents[openai]>=1.6",
+    "livekit-agents[openai]~=1.8.1",
     "livekit-wakeword>=0.2",
     "pyaudio>=0.2.14",   # WakeWordListener mic capture (standalone path)
     # livekit-agents 1.6 calls aiohttp.ClientSession(proxy=...), added in

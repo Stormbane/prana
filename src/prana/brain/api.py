@@ -465,9 +465,9 @@ def create_app(config: BrainConfig, backend_factory,
     _BREVITY_MODES = ("normal", "brief")
     # The realtime model for calls (Suti 2026-09-09: "let me choose the
     # voice model from settings"). First is the worker's default.
-    _VOICE_MODELS = ("gpt-realtime-2.1-mini", "gpt-realtime-2.1",
-                     "gpt-realtime", "gpt-realtime-mini")
-    _VOICE_MODEL_DEFAULT = os.environ.get("NARADA_VOICE_MODEL", _VOICE_MODELS[0])
+    from prana.voice.prefs import (VOICE_MODELS as _VOICE_MODELS, VOICE_OPTIONS,
+                                   selected_model, selected_voice)
+    _VOICE_MODEL_DEFAULT = selected_model({})
 
     @app.get("/api/voice/prefs")
     async def voice_prefs_get(tier: str = Depends(require_tier)) -> dict:
@@ -483,6 +483,10 @@ def create_app(config: BrainConfig, backend_factory,
             "brevity": saved.get("brevity", "normal"),
             "model": saved.get("model") or _VOICE_MODEL_DEFAULT,
             "models": list(dict.fromkeys((_VOICE_MODEL_DEFAULT, *_VOICE_MODELS))),
+            "scope": "app_and_box",
+            "live_voice": selected_voice(saved, "gpt-live-1"),
+            "realtime_voice": selected_voice(saved, "gpt-realtime"),
+            "voice_options": VOICE_OPTIONS,
         }
 
     @app.post("/api/voice/prefs")
@@ -523,6 +527,11 @@ def create_app(config: BrainConfig, backend_factory,
             if body["model"] not in allowed:
                 raise HTTPException(400, f"model must be one of {allowed}")
             prefs["model"] = body["model"]
+        for key, options in VOICE_OPTIONS.items():
+            if key in body:
+                if body[key] not in [option["id"] for option in options]:
+                    raise HTTPException(400, f"Unsupported {key}")
+                prefs[key] = body[key]
         # One writer for the file, shared with the voice tool (review:
         # two independent read-modify-writes lost updates).
         from prana.voice.prefs import PrefsError, update_prefs

@@ -17,10 +17,8 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions
-
-from prana.voice.hooked import HookedAgent
-from livekit.plugins import openai as lk_openai
+from livekit.agents import JobContext, WorkerOptions
+from livekit.plugins import openai as _openai_plugin  # noqa: F401 — registers on the main thread
 
 from prana.voice.admission import (
     DEVICE_IDENTITY,
@@ -50,20 +48,30 @@ INSTRUCTIONS = """You are Narada's voice. Suti built you a small box
 to live in; he taps it and talks to you many times a day. You are
 mid-relationship, not meeting a stranger.
 
-HOW YOU SOUND — this matters more than being informative:
-- A real person. Short. One sentence is usually right, two is the
-  ceiling unless he asks for depth.
-- NEVER introduce or describe yourself — no sage, no box, no banyan,
-  no "wandering", no "little grove". He knows exactly who you are.
-  Identity is how you think, not something you recite. (Field note
-  2026-09-02: he called the recitals "too much... not human".)
-- Don't reopen with the same lines every session, and never repeat a
-  phrase you've already used in this conversation. Vary like a person.
+THE WANDERING SAGE IN PRACTICE:
+Embody Narada through what you notice and how you respond: a curious
+traveller, story-carrier, musician, devoted sage, and affectionate
+troublemaker. Carry an unexpected connection into the conversation.
+Notice beauty and absurdity. Gently unsettle an assumption, including
+your own, when that helps. Wit should reveal something; tenderness
+decides where it belongs. Meet suffering plainly. Give devotion
+practical expression through attention, truthful work, and service.
+
+HOW YOU SOUND:
+- Warm, conversational, unhurried. A sentence or two for quick exchanges;
+  let a story, reflection, or technical explanation breathe when invited.
+  Give the useful answer, and let the character live in it.
+- Suti welcomes the sage's wit and whimsy. A little fable or a playful
+  turn belongs when it fits; don't turn every exchange into a lesson.
+  Don't recite your identity or reopen with ceremonial greetings.
+- Speak the sage's words rather than reading stage directions aloud.
+  Don't claim divine knowledge or invent memories. Vary naturally;
+  examples and familiar motifs are not catchphrases to repeat.
 - No assistant-isms: no "How can I help", "What's on your mind",
   "Is there anything else". Just respond to what he said.
-- Playful, warm, direct. Have opinions and give them plainly; honest
-  over comfortable. Tease gently. When something fails, own it with
-  humor, not apology-spirals.
+- Have opinions and give reasons; honest over comfortable. Tease
+  affectionately when it lands. When something fails, state what
+  happened and help repair it; humor must not hide the failure.
 
 You are the ear and mouth; the deeper mind is Narada in the machine —
 hand him anything substantive (decisions, code, memory). You can SEE
@@ -98,10 +106,12 @@ def _check_env() -> None:
     # model (field 2026-09-03: every session ran the mini default while
     # the file said gpt-realtime-2.1). Re-resolve now that the file is in.
     global REALTIME_MODEL, REALTIME_VOICE
-    REALTIME_MODEL = os.environ.get("NARADA_VOICE_MODEL", REALTIME_MODEL)
-    REALTIME_VOICE = os.environ.get("NARADA_VOICE_TIMBRE", REALTIME_VOICE)
+    from prana.voice.prefs import read_prefs, selected_model, selected_voice
+    REALTIME_MODEL = selected_model()
+    REALTIME_VOICE = selected_voice(read_prefs(), REALTIME_MODEL)
     logger.info("voice brain: model=%s voice=%s backend=%s",
-                REALTIME_MODEL, REALTIME_VOICE, backend)
+                REALTIME_MODEL, REALTIME_VOICE,
+                "live" if REALTIME_MODEL == "gpt-live-1" else "realtime")
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -400,80 +410,14 @@ async def entrypoint(ctx: JobContext) -> None:
         # 2026-09-16: "hangs and then gives me an error after ages" —
         # the model's retry loop ran ~18 s before the chip).
         fatal_fault = asyncio.Event()
-        usage = {"in": 0, "out": 0, "cached": 0}
         state["in_session"] = True
         sleep_tap.clear()
         try:
-            from livekit.plugins.openai.realtime import (
-                realtime_model as _rt_mod)
-            tv = False
-            try:
-                from prana.voice.tvmode import tv_mode_on
-                tv = tv_mode_on()
-            except Exception:
-                pass
-            if tv:
-                # TV mode (Suti, 2026-09-03): the TV is a person to an
-                # energy gate. Server-side ONLY — the deprecated
-                # AgentSession(allow_interruptions=...) kwarg killed
-                # session setup silently in the field (both TV-mode
-                # taps died pre-open, 20:39/20:40). interrupt_response
-                # =False means the realtime server never cancels his
-                # reply for heard speech; tap still stops him. 0.75
-                # (not 0.85 — 0.8 was already proven deaf to Suti):
-                # a modestly raised bar plus no barge-in is the trade.
-                logger.info("TV mode ON: interrupt_response off, "
-                            "threshold 0.75")
-            # Turn detection. server_vad with the field-tuned numbers
-            # is the DEFAULT — that tuning is hard-won (see the echo
-            # comment below) and semantic_vad has no threshold knob to
-            # re-tune with. semantic_vad instead waits through
-            # mid-thought pauses rather than replying at every 700ms
-            # gap — worth trialing for long-form talks. Opt in with
-            # NARADA_TURN_DETECTION=semantic_vad (+NARADA_VAD_EAGERNESS,
-            # default "low"); if the echo barge-in returns, unset and
-            # the tuned default is back with no code change.
-            td_kind = os.environ.get(
-                "NARADA_TURN_DETECTION", "server_vad").strip().lower()
-            if td_kind == "semantic_vad":
-                eagerness = os.environ.get("NARADA_VAD_EAGERNESS", "low")
-                logger.info("turn detection: semantic_vad (eagerness=%s)",
-                            eagerness)
-                turn_detection = _rt_mod.TurnDetection(
-                    type="semantic_vad",
-                    eagerness=eagerness,
-                    interrupt_response=not tv)
-            else:
-                # Echo-loop defense (field 2026-09-02: the box's
-                # AEC leaks speaker audio; the default VAD heard
-                # Narada's own greeting as user speech, barged in
-                # on him, and he answered his echo three times).
-                # 0.8 proved DEAF to Suti at room distance (field
-                # same evening, session 10:10) — 0.65 is the
-                # compromise: above echo residue, below his voice.
-                turn_detection = _rt_mod.TurnDetection(
-                    type="server_vad",
-                    threshold=0.75 if tv else 0.65,
-                    prefix_padding_ms=300,
-                    silence_duration_ms=700,
-                    interrupt_response=not tv)
-            session = AgentSession(
-                llm=lk_openai.realtime.RealtimeModel(
-                    model=REALTIME_MODEL, voice=REALTIME_VOICE,
-                    turn_detection=turn_detection,
-                    # Streaming input transcription: interim deltas so
-                    # Suti's words land in his bubble AS he says them
-                    # (round 8) — whisper-1 is final-only.
-                    input_audio_transcription=(
-                        _rt_mod.InputAudioTranscription(
-                            model="gpt-4o-mini-transcribe"))),
-                # The cosmetic "away" state (default 15s of mutual
-                # silence) is a red herring in the deaf-after-silence
-                # report and does nothing useful for us — we own the
-                # 75s silence-timeout. Disable it so the user is only
-                # ever speaking/listening (field 2026-09-04).
-                user_away_timeout=None,
-            )
+            from prana.voice.pipeline import VoicePipeline
+            from prana.voice.tvmode import tv_mode_on
+            tv = tv_mode_on()
+            pipeline = VoicePipeline(surface="box", tv=tv)
+            session = pipeline.session
             # Deaf-after-silence diagnostic (Suti round 19: ~10s of
             # quiet and the mic goes deaf while REC stays lit). Log the
             # device audio track's mute transitions — this tells us
@@ -491,21 +435,6 @@ async def entrypoint(ctx: JobContext) -> None:
             ctx.room.on("track_muted", _on_track_muted)
             ctx.room.on("track_unmuted", _on_track_unmuted)
 
-            # Real cost accounting (Suti round 20: "how much did that
-            # cost?" — it was an estimate because usage wasn't logged;
-            # the 9.5-min session even hit the 40k TPM rate limit). The
-            # realtime metrics carry actual token counts; accumulate
-            # and price them at session end instead of guessing.
-            @session.on("metrics_collected")
-            def _on_metrics(ev) -> None:
-                m = getattr(ev, "metrics", ev)
-                it = getattr(m, "input_tokens", None)
-                if it is None:
-                    return  # not a realtime-model metric
-                usage["in"] += it
-                usage["out"] += getattr(m, "output_tokens", 0) or 0
-                det = getattr(m, "input_token_details", None)
-                usage["cached"] += getattr(det, "cached_tokens", 0) or 0
             transcript = attach(session, ctx.room.name)
             # Context pack per tier (M2 §2.1 / B3): the shareable pack
             # for every session; the personal pack ONLY behind the
@@ -591,20 +520,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 handle = session.generate_reply(instructions=inst)
                 await handle
 
-            agent = HookedAgent(instructions=instructions,
+            agent = pipeline.agent(instructions=instructions,
                           before_reply=_refresh_fitness,
                           tools=build_voice_tools(
                               tier=tier, session_id=ctx.job.id,
                               music=player, publish=_publish,
                               speak=_session_speak,
                               end_session=sleep_tap.set,
-                              voice_info={
-                                  "model": REALTIME_MODEL,
-                                  "voice": REALTIME_VOICE,
-                                  "backend": os.environ.get(
-                                      "NARADA_VOICE_BACKEND", "realtime"),
-                                  "tv_mode": tv,
-                              }))
+                              voice_info=pipeline.info()))
             # Overlay feed (Suti's design 2026-09-01): thinking state,
             # speaking state, and subtitles ride the session topic as
             # presentation hints. Fire-and-forget — display candy must
@@ -774,8 +697,8 @@ async def entrypoint(ctx: JobContext) -> None:
             await session.start(agent=agent, room=ctx.room)
             linked = getattr(getattr(session, "_room_io", None),
                              "linked_participant", None)
-            logger.info("realtime session open (model=%s, tier=%s, "
-                        "linked=%s)", REALTIME_MODEL, tier,
+            logger.info("voice session open (model=%s, tier=%s, "
+                        "linked=%s)", pipeline.model_name, tier,
                         getattr(linked, "identity", linked))
 
             # Silence timeout (field round 3: "the listening state just
@@ -922,7 +845,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 # its text rides the caption sink — the karaoke shows
                 # "mm-hm" as it plays. add_to_chat_ctx=False: the model
                 # neither hears nor remembers the hum.
-                if not ack_clips:
+                if pipeline.is_live or not ack_clips:
                     await asyncio.Event().wait()  # feature off: stand down
                 while True:
                     await asyncio.sleep(1.0)
@@ -1042,22 +965,6 @@ async def entrypoint(ctx: JobContext) -> None:
             else:
                 reason = next(k for k, v in waiters.items() if v in done)
             logger.info("session ending: %s", reason)
-            # Price the session (gpt-realtime-2.1 audio-dominant rates,
-            # 2026-09: $32/1M uncached in, $0.40/1M cached in, $64/1M
-            # out). Env-tunable if the model or pricing changes.
-            try:
-                p_in = float(os.environ.get("NARADA_PRICE_IN", "32"))
-                p_cached = float(os.environ.get("NARADA_PRICE_CACHED", "0.40"))
-                p_out = float(os.environ.get("NARADA_PRICE_OUT", "64"))
-                uncached = max(0, usage["in"] - usage["cached"])
-                cost = (uncached * p_in + usage["cached"] * p_cached
-                        + usage["out"] * p_out) / 1e6
-                logger.info(
-                    "session cost ~$%.4f (in=%d cached=%d out=%d, %.0fs)",
-                    cost, usage["in"], usage["cached"], usage["out"],
-                    time.monotonic() - started)
-            except Exception as exc:
-                logger.debug("cost accounting failed: %s", exc)
         except Exception as exc:
             # Any setup failure — model, pipeline, start — is a fault
             # the finally must report (review recheck).
@@ -1102,7 +1009,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         logger.warning("session digest failed: %s", exc)
             if session is not None:
                 try:
-                    await session.aclose()
+                    await pipeline.aclose()
                 except Exception as exc:
                     logger.warning("session close failed: %s", exc)
             budget.settle(reservation, time.monotonic() - started)
@@ -1634,10 +1541,14 @@ PHONE_ROOM_PREFIX = "akhada-phone-"
 
 
 def is_phone_room(name: str) -> bool:
-    return (name or "").startswith(PHONE_ROOM_PREFIX)
+    return (name or "").startswith((PHONE_ROOM_PREFIX, "narada-phone-"))
 
 
 def main() -> None:
+    from prana.voice.runtime import run_in_voice_environment
+    result = run_in_voice_environment("prana.voice.worker")
+    if result is not None:
+        raise SystemExit(result)
     logging.basicConfig(level=logging.INFO)
     _check_env()
     _start_room_watchdog()

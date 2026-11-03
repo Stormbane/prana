@@ -182,6 +182,11 @@ def test_prefs_defaults_and_roundtrip(prefs_client):
     # the choices alongside, and a pick round-trips to the same file.
     assert got["model"] == got["models"][0]
     assert "gpt-realtime" in got["models"]
+    assert "gpt-live-1" in got["models"]
+    assert got["scope"] == "app_and_box"
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"model": "gpt-live-1"}).status_code == 200
+    assert client.get("/api/voice/prefs", headers=headers).json()["model"] == "gpt-live-1"
     assert client.post("/api/voice/prefs", headers=headers,
                        json={"model": "gpt-realtime"}).status_code == 200
     assert client.get("/api/voice/prefs", headers=headers).json()["model"] == "gpt-realtime"
@@ -211,6 +216,23 @@ def test_prefs_validation(prefs_client):
     assert client.post("/api/voice/prefs", headers=headers,
                        json={"language": "english"}).status_code == 400
     assert client.post("/api/voice/prefs", json={}).status_code == 401
+
+
+def test_voice_identity_round_trip_and_family_validation(prefs_client):
+    client, _ = prefs_client
+    headers = {"Authorization": "Bearer tok-app"}
+    choices = client.get("/api/voice/prefs", headers=headers).json()["voice_options"]
+    assert "vesper" in [v["id"] for v in choices["live_voice"]]
+    assert client.post("/api/voice/prefs", headers=headers,
+                       json={"live_voice": "vesper", "realtime_voice": "cedar"}).status_code == 200
+    for model in ["gpt-realtime-2.1-mini", "gpt-live-1"]:
+        assert client.post("/api/voice/prefs", headers=headers,
+                           json={"model": model}).status_code == 200
+        got = client.get("/api/voice/prefs", headers=headers).json()
+        assert (got["live_voice"], got["realtime_voice"]) == ("vesper", "cedar")
+    for patch in [{"live_voice": "cedar"}, {"realtime_voice": "vesper"}, {"live_voice": []}]:
+        assert client.post("/api/voice/prefs", headers=headers, json=patch).status_code == 400
+    assert client.get("/api/voice/prefs", headers=headers).json()["live_voice"] == "vesper"
 
 
 # ── fitness endpoints (Data tab) ────────────────────────────────────────

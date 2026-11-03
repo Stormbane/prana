@@ -16,6 +16,48 @@ import os
 import time
 from pathlib import Path
 
+VOICE_MODELS = ("gpt-live-1", "gpt-realtime-2.1-mini", "gpt-realtime-2.1",
+                "gpt-realtime", "gpt-realtime-mini")
+
+# Provider voice identities are separate from the character/delivery prompt.
+# https://developers.openai.com/api/docs/guides/live-conversations
+VOICE_OPTIONS = {
+    "live_voice": [
+        {"id": "marin", "label": "Marin (original trial voice)"},
+        {"id": "vesper", "label": "Vesper · masculine, British"},
+        {"id": "stone", "label": "Stone · masculine, Irish"},
+        {"id": "ripple", "label": "Ripple · masculine, Australian"},
+        {"id": "meridian", "label": "Meridian · masculine, North American"},
+        {"id": "beacon", "label": "Beacon · masculine, Filipino"},
+        {"id": "cinder", "label": "Cinder · masculine, Southern U.S."},
+        {"id": "quartz", "label": "Quartz · feminine, Australian"},
+        {"id": "willow", "label": "Willow · feminine, Irish"},
+        {"id": "gleam", "label": "Gleam · feminine, North American"},
+        {"id": "delta", "label": "Delta · feminine, Southern U.S."},
+        {"id": "bossa", "label": "Bossa · feminine, Brazilian Portuguese"},
+        {"id": "tempo", "label": "Tempo · masculine, Brazilian Portuguese"},
+    ],
+    "realtime_voice": [{"id": v, "label": v.title()} for v in (
+        "cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")],
+}
+
+
+def selected_voice(prefs: dict, model: str) -> str:
+    live = model == "gpt-live-1"
+    key = "live_voice" if live else "realtime_voice"
+    # Keep deployment overrides (including approved custom voices) available.
+    return prefs.get(key) or os.environ.get(
+        "NARADA_LIVE_VOICE" if live else "NARADA_VOICE_TIMBRE",
+        "marin" if live else "cedar")
+
+
+def selected_model(prefs: dict | None = None) -> str:
+    prefs = read_prefs() if prefs is None else prefs
+    model = prefs.get("model") or os.environ.get("NARADA_VOICE_MODEL") or VOICE_MODELS[0]
+    if model not in VOICE_MODELS:
+        raise ValueError(f"Unsupported voice model: {model}")
+    return model
+
 
 def prefs_path() -> Path:
     return Path.home() / ".narada" / "brain" / "voice-prefs.json"

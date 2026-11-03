@@ -271,12 +271,15 @@ def build_voice_tools(
             "brain_model": voice_info.get("model", "unknown"),
             "voice_timbre": voice_info.get("voice", "unknown"),
             "backend": voice_info.get("backend", "realtime"),
-            "speech_is": "OpenAI Realtime (speech-to-speech) — you hear "
-                         "and speak audio directly, not text-to-speech",
+            "speech_is": ("OpenAI GPT-Live full-duplex speech-to-speech; "
+                          "listening and speaking can overlap"
+                          if voice_info.get("backend") == "live" else
+                          "OpenAI Realtime speech-to-speech"),
+            "tool_backend_model": voice_info.get("delegation_model"),
             "deeper_mind": "Narada in the machine (Claude) — reached via "
                            "the escalate tool for judgment/code/memory",
-            "body": "ESP32-S3-BOX-3 — a small screen, one speaker, a mic "
-                    "array, on Suti's desk",
+            "body": ("Narada app on the phone" if voice_info.get("surface") == "phone"
+                     else "ESP32-S3-BOX-3 — screen, speaker and microphone array"),
             "host_machine": platform.node(),
             "tier": tier,
             "tv_mode": bool(voice_info.get("tv_mode")),
@@ -400,10 +403,10 @@ def build_voice_tools(
     async def tv_mode(
         on: Annotated[bool, "true while the TV/background noise is on"],
     ) -> dict:
-        """TV mode: while on, Narada can't be interrupted by voice
-        (tap still stops him) and he ignores TV-level speech — only a
-        raised voice reaches him. Use when the TV keeps triggering or
-        interrupting him; turn off when the room is quiet again.
+        """TV mode reduces responses to background television.
+        Realtime disables voice interruption and raises its threshold;
+        GPT-Live uses an instruction to ignore TV, not a hard audio gate.
+        Tap still stops the call. Turn off when the room is quiet again.
         Takes effect from the NEXT tap — tell Suti that."""
         from prana.voice.tvmode import set_tv_mode
         set_tv_mode(bool(on))
@@ -416,6 +419,9 @@ def build_voice_tools(
                 "type": "chip", "key": "tv", "icon": "tv",
                 "text": "TV mode" if on else ""}))
         return {"tv_mode": bool(on),
+                "behavior": ("Ignore TV by instruction; interruption remains model-controlled"
+                             if voice_info.get("backend") == "live" else
+                             "Higher threshold and voice interruption disabled"),
                 "applies": "from the next tap onward"}
 
     @function_tool()
