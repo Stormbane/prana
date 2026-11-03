@@ -323,7 +323,7 @@ class Probes:
             if self._tasks is not None:
                 return self._tasks
             res = self.run(["powershell.exe", "-NoProfile", "-NonInteractive",
-                            "-Command", _PS_TASKS], timeout=30)
+                            "-Command", _PS_TASKS], timeout=12)
             tasks: dict[str, TaskInfo] = {}
             if res.rc == 0 and res.out.strip():
                 try:

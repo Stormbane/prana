@@ -165,11 +165,14 @@ def check_host(p: Probes) -> CheckResult:
     r = _result("host", "Supervisor (Narada_Host)")
     lock = _json(p.read_text(p.paths.host_lock)) or {}
     since = _parse_iso(lock.get("start_time"))
-    task = p.scheduled_tasks().get("Narada_Host")
-    details = {"task_last_result": task.last_result if task else None,
-               "task_last_run": task.last_run.isoformat() if task and task.last_run else None}
+    details: dict = {}
+    # The beacon decides; Task Scheduler (a slow PowerShell call) is only
+    # consulted when there is no beacon to explain.
     hb = _json(p.read_text(p.paths.heartbeat))
     if not isinstance(hb, dict) or "ts" not in hb:
+        task = p.scheduled_tasks().get("Narada_Host")
+        details = {"task_last_result": task.last_result if task else None,
+                   "task_last_run": task.last_run.isoformat() if task and task.last_run else None}
         return r(RED, f"no heartbeat beacon at {p.paths.heartbeat}",
                  hint="start the Narada_Host task; the deadman should do this within 5 min",
                  details=details)
@@ -194,7 +197,9 @@ def check_host(p: Probes) -> CheckResult:
 def check_components(p: Probes) -> CheckResult:
     r = _result("components", "Supervised components")
     cfg = yaml.safe_load(p.read_text(p.paths.components_yaml) or "") or {}
-    enabled = [c for c in cfg.get("components", []) if c.get("enabled")]
+    # A component without `enabled:` is enabled, as the host reads it
+    # (host/component.py).
+    enabled = [c for c in cfg.get("components", []) if c.get("enabled", True)]
     if not enabled:
         return r(RED, f"no enabled components in {p.paths.components_yaml}")
     alerts = _alert_rows(p)
@@ -252,11 +257,11 @@ def check_brain_tailnet(p: Probes) -> CheckResult:
 
 
 def check_brain_sessions(p: Probes) -> CheckResult:
-    """A Claude brain session resumes its native transcript. Claude Code
-    prunes transcripts after cleanupPeriodDays (default 30), and a
-    resume of a pruned id makes the CLI exit 1 ('No conversation found')
-    — the brain then 500s every turn on that session."""
-    r = _result("brain_sessions", "Brain sessions resumable")
+    """Information, not a fault. Claude Code prunes transcripts after
+    cleanupPeriodDays (default 30); since prana 51a3f27 the brain notices
+    a pruned resume target and starts that session fresh with a handover
+    from its own transcript, so a pruned id costs continuity, not a turn."""
+    r = _result("brain_sessions", "Brain sessions")
     stale, checked = [], 0
     for tier in p.listdir(p.paths.brain_sessions):
         for name in p.listdir(p.paths.brain_sessions / tier):
@@ -267,11 +272,9 @@ def check_brain_sessions(p: Probes) -> CheckResult:
             if not present:
                 stale.append(f"{tier}/{name}")
     if stale:
-        return r(AMBER, f"{len(stale)} of {checked} resumable session(s) point at a pruned "
-                        f"transcript and will fail on next use: {', '.join(stale[:5])}",
-                 hint="drop the stale native-session-id (or /new in Telegram); "
-                      "fix: fall back to a fresh session when the resume target is gone",
-                 details={"stale": stale, "checked": checked})
+        return r(GREEN, f"{checked} resumable session(s); {len(stale)} will start fresh with a "
+                        f"handover on next use (transcript expired): {', '.join(stale[:5])}",
+                 details={"expired": stale, "checked": checked})
     return r(GREEN, f"{checked} resumable session(s), all transcripts present",
              details={"checked": checked})
 
@@ -281,24 +284,37 @@ def check_brain_sessions(p: Probes) -> CheckResult:
 def check_telegram_bridge(p: Probes) -> CheckResult:
     r = _result("telegram_bridge", "Telegram bridge polling")
     log = p.tail_text(p.paths.host_log, HOST_LOG_TAIL) or ""
-    polls_ok, polls_bad, conflict = [], [], False
+    polls_ok, polls_bad, conflicts = [], [], []
     for line in log.splitlines():
         if "[chat-bridge]" not in line:
             continue
+        ts = _host_ts(p, line)
         if "Conflict" in line or "terminated by other getUpdates" in line:
-            conflict = True
-        if "getUpdates" in line:
-            ts = _host_ts(p, line)
-            if ts is None:
-                continue
+            if ts is not None:
+                conflicts.append(ts)
+            continue
+        if "getUpdates" in line and ts is not None:
             (polls_ok if "200 OK" in line else polls_bad).append(ts)
     since = _epoch(_alert_rows(p).get("chat-bridge", {}).get("healthy_since"))
-    details = {"polls_ok": len(polls_ok), "polls_not_ok": len(polls_bad)}
-    if conflict:
+    details = {"polls_ok": len(polls_ok), "polls_not_ok": len(polls_bad),
+               "conflicts": len(conflicts)}
+    # A restart leaves one Conflict line while the old poll drains; only a
+    # conflict with no good poll after it means a second poller now.
+    if conflicts and (not polls_ok or conflicts[-1] >= polls_ok[-1]):
         return r(RED, "getUpdates conflict: another process is polling this bot token",
+                 since=conflicts[-1],
                  hint="only one poller per token; find the second bridge", details=details)
+    if not polls_ok and not polls_bad:
+        # The poll lines come from httpx's INFO request logging, which
+        # log_hygiene asks to turn off (they carry the token). Without
+        # them this check can't see polling; it doesn't call that red.
+        return r(AMBER, "no getUpdates lines in the recent host.log (request logging off?); "
+                        "polling not visible here",
+                 hint="the components check still covers the bridge's liveness",
+                 details=details)
     if not polls_ok:
-        return r(RED, "no successful getUpdates in the recent host.log",
+        return r(RED, f"no successful getUpdates in the recent host.log "
+                      f"({len(polls_bad)} failed)",
                  hint="chat-bridge component: check host.log", details=details)
     last = polls_ok[-1]
     age = (p.now() - last).total_seconds()
@@ -352,17 +368,20 @@ def check_telegram_inbound(p: Probes) -> CheckResult:
                "brain_session": session,
                "resume_target": native[:8] if native else None,
                "resume_target_present": present}
-    problems = []
+    # A pruned resume target is no longer a fault: the brain starts fresh
+    # with a handover (prana 51a3f27). It stays in details for context.
     if last_status == "FAILED":
-        problems.append(f"last exchange {_local(p, last_ts)} FAILED {last_reply}".strip())
-    if present is False:
-        problems.append(f"brain session {session} resumes pruned transcript {native[:8]}… "
-                        "so the next message will 500 too")
-    if problems:
-        return r(RED, "; ".join(problems), since=streak_start or last_ts,
-                 hint="in Telegram send /new (fresh brain session); fix: the brain should "
-                      "start fresh when the resume target is gone",
-                 details=details)
+        failed = f"last exchange {_local(p, last_ts)} FAILED {last_reply}".strip()
+        hint = (f"read host.log [brain] around {_local(p, last_ts)}; "
+                "/new in Telegram starts a fresh brain session")
+        brain_up = _epoch(_alert_rows(p).get("brain", {}).get("healthy_since"))
+        details["brain_healthy_since"] = brain_up.isoformat() if brain_up else None
+        if brain_up and brain_up > last_ts:
+            # Restarted (perhaps fixed) since, and untested: not known red.
+            return r(AMBER, f"{failed}; the brain restarted at {_local(p, brain_up)} and no "
+                            "message has tested it since",
+                     since=streak_start or last_ts, hint=hint, details=details)
+        return r(RED, failed, since=streak_start or last_ts, hint=hint, details=details)
     return r(GREEN, f"last inbound {_local(p, last_ts)} ({_ago(p, last_ts)}) answered OK",
              since=last_ok, details=details)
 
@@ -473,14 +492,22 @@ def check_box_dispatch(p: Probes) -> CheckResult:
              details=details)
 
 
+def _last_billed_day(p: Probes) -> str | None:
+    budget = _json(p.read_text(p.paths.voice_budget)) or {}
+    days = sorted((budget.get("days") or {}).keys())
+    return days[-1] if days else None
+
+
 def _voice_backend_problems(p: Probes) -> tuple[list[str], list[str], list[datetime]]:
     red, amber, since = [], [], []
     fault = _voice_fault(p)
     if fault:
         at = _parse_local_iso(p, fault.get("at"))  # the fault file stamps local time
+        # Only a good BOX session removes the file (worker.py). A later
+        # budget entry proves nothing: the phone worker settles the budget
+        # even when the provider refuses to start (Codex review,
+        # 2026-11-04), and on 11-04 it was still reporting empty credit.
         if fault["code"] == "credits":
-            # The file is rewritten on each fault and removed by the next
-            # successful session, so `at` is the latest fault.
             red.append(f"OpenAI credit empty (fault last recorded {_local(p, at)})")
         else:
             amber.append(f"last voice fault '{fault['code']}' at {_local(p, at)}")
@@ -509,15 +536,15 @@ def check_voice_box(p: Probes) -> CheckResult:
     red += b_red
     amber += b_amber
     since += b_since
-    budget = _json(p.read_text(p.paths.voice_budget)) or {}
-    days = sorted((budget.get("days") or {}).keys())
-    details["last_billed_day"] = days[-1] if days else None
+    details["last_billed_day"] = _last_billed_day(p)
     hint = ""
     if details.get("wake_model_archive_copy"):
         hint = (f"copy {details['wake_model_archive_copy'][0]} back to {model}; "
                 "voice still needs a funded backend")
-    elif red:
-        hint = "restore the wake model (or NARADA_WAKE_GATING=off) and fund the voice backend"
+    elif not p.exists(model):
+        hint = "restore the wake model (or NARADA_WAKE_GATING=off)"
+    elif b_red:
+        hint = "fund the voice backend, or move voice off it (presence plan W5)"
     status = RED if red else AMBER if amber else GREEN
     reason = "; ".join(red + amber) or "worker up, wake model present, no voice fault"
     if details["last_billed_day"]:
@@ -630,14 +657,14 @@ def check_smriti_nightly(p: Probes) -> CheckResult:
         return r(RED, f"last night ({target}) failed at step "
                       f"{', '.join(failed) or '?'}: {err}".rstrip(": "),
                  since=streak or started, since_approx=streak is not None,
-                 hint="smriti audit 2026-11-03: the index step needs numpy<2 (user-site "
-                      "numpy 2.5.4 shadows anaconda's)", details=details)
+                 hint=f"the full error is in {p.paths.nightly_status}; rerun by hand with "
+                      "`smriti nightly` to watch the step", details=details)
     return r(GREEN, f"last night ({target}) ok: {len(steps)} steps", since=started,
              details=details)
 
 
 def check_smriti_tasks(p: Probes) -> CheckResult:
-    r = _result("smriti_tasks", "smriti logd + morning")
+    r = _result("smriti_tasks", "smriti logd")
     tasks = p.scheduled_tasks()
     red, amber = [], []
     pid_text = (p.read_text(p.paths.logd_pid) or "").strip()
@@ -650,20 +677,45 @@ def check_smriti_tasks(p: Probes) -> CheckResult:
     logd = tasks.get("smriti-logd")
     if logd and logd.last_result not in (0, None, 0x41301):
         amber.append(f"smriti-logd task last result 0x{logd.last_result:X}")
-    now_local = p.now().astimezone(p.local_tz)
-    want = now_local.date() if now_local.hour * 60 + now_local.minute >= 7 * 60 + 30 \
-        else (now_local - timedelta(days=1)).date()
-    ms = _json(p.read_text(p.paths.morning_status)) or {}
-    if ms.get("day") != want.isoformat():
-        red.append(f"morning message not sent for {want} (last {ms.get('day', 'never')})")
-    elif not ms.get("sent"):
-        red.append(f"morning for {want} composed but not sent")
-    morning = tasks.get("smriti-morning")
-    if morning and morning.last_result not in (0, None, 0x41301):
-        amber.append(f"smriti-morning task last result 0x{morning.last_result:X}")
     status = RED if red else AMBER if amber else GREEN
-    reason = "; ".join(red + amber) or f"logd alive (pid {pid}); morning sent for {want}"
-    return r(status, reason, details={"logd_pid": pid, "morning_day": ms.get("day")})
+    reason = "; ".join(red + amber) or f"logd alive (pid {pid})"
+    return r(status, reason, details={"logd_pid": pid})
+
+
+MORNING_DUE = (7, 30)  # local; smriti-morning runs at 07:00
+
+
+def check_morning(p: Probes) -> CheckResult:
+    """The morning message is the heartbeat Suti notices: if it doesn't
+    come, he knows something is wrong without any extra service. This
+    check says which day it is for and, when it failed, at which phase
+    (smriti daylog/morning.py writes `phase` and an exception type)."""
+    r = _result("morning", "Morning message (the daily heartbeat)")
+    now_local = p.now().astimezone(p.local_tz)
+    due = now_local.hour * 60 + now_local.minute >= MORNING_DUE[0] * 60 + MORNING_DUE[1]
+    want = (now_local.date() if due else (now_local - timedelta(days=1)).date()).isoformat()
+    ms = _json(p.read_text(p.paths.morning_status)) or {}
+    details = {"want": want, "day": ms.get("day"), "phase": ms.get("phase"),
+               "reason": ms.get("reason")}
+    task = p.scheduled_tasks().get("smriti-morning")
+    task_note = (f" (smriti-morning task last result 0x{task.last_result:X})"
+                 if task and task.last_result not in (0, None, 0x41301) else "")
+    if ms.get("day") != want:
+        return r(RED, f"no morning message for {want} (last {ms.get('day', 'never')})"
+                      + task_note,
+                 hint="Task Scheduler: smriti-morning; run `smriti morning` to see why",
+                 details=details)
+    if not ms.get("sent"):
+        phase = ms.get("phase")
+        what = {"compose": "composing failed", "deliver": "composed, but delivery failed"}.get(
+            phase, "not sent")
+        why = ms.get("reason") or "no reason recorded"
+        return r(RED, f"morning for {want}: {what} ({why})" + task_note,
+                 hint="delivery goes through notify_suti; check the System log's channel results"
+                 if phase == "deliver" else "run `smriti morning` to see the error",
+                 details=details)
+    return r(GREEN, f"sent for {want} ({ms.get('composed_chars', '?')} chars)" + task_note,
+             details=details)
 
 
 def check_qmd_index(p: Probes) -> CheckResult:
@@ -772,7 +824,10 @@ def check_memory_backup(p: Probes) -> CheckResult:
 
 def check_deadman(p: Probes) -> CheckResult:
     r = _result("deadman", "Dead-man watchdog (deadman.ps1)")
-    tail = (p.tail_text(p.paths.deadman_log, 16 * 1024) or "").strip().splitlines()
+    # job-watch.ps1 shares deadman.log (the same task's second action);
+    # its lines say nothing about whether deadman.ps1 itself ran.
+    tail = [ln for ln in (p.tail_text(p.paths.deadman_log, 16 * 1024) or "").strip().splitlines()
+            if " job-watch: " not in ln]
     last_line = tail[-1] if tail else ""
     last = _parse_iso(last_line.split(" ", 1)[0]) if last_line else None
     state = _json(p.read_text(p.paths.deadman_state)) or {}
@@ -883,8 +938,9 @@ def check_log_hygiene(p: Probes) -> CheckResult:
     if re.search(r"api\.telegram\.org/bot\d{6,}:", tail):
         return r(AMBER, "host.log records the Telegram bot token (the bridge's httpx "
                         "request logging at INFO)",
-                 hint="set the httpx logger to WARNING in narada_chat_bridge.py; rotate "
-                      "the token if logs were shared")
+                 hint="set the httpx logger to WARNING in narada_chat_bridge.py (the "
+                      "telegram_bridge check then reads amber, not red); rotate the token "
+                      "if logs were shared")
     return r(GREEN, "no bot token in the recent host.log")
 
 
@@ -906,6 +962,7 @@ CHECKS: list[tuple[str, Callable[[Probes], CheckResult]]] = [
     ("push_subs", check_push_subs),
     ("smriti_nightly", check_smriti_nightly),
     ("smriti_tasks", check_smriti_tasks),
+    ("morning", check_morning),
     ("qmd_index", check_qmd_index),
     ("akhada_tick", check_akhada_tick),
     ("memory_backup", check_memory_backup),
@@ -918,13 +975,14 @@ CHECKS: list[tuple[str, Callable[[Probes], CheckResult]]] = [
 TITLES = {
     "host": "Supervisor (Narada_Host)", "components": "Supervised components",
     "brain_local": "Brain :8811", "brain_tailnet": "Brain over tailnet :8443",
-    "brain_sessions": "Brain sessions resumable",
+    "brain_sessions": "Brain sessions",
     "telegram_bridge": "Telegram bridge polling",
     "telegram_inbound": "Telegram inbound → reply", "livekit": "LiveKit media server",
     "box_dispatch": "BOX voice: agent dispatch", "voice_box": "BOX voice worker",
     "voice_phone": "Phone voice worker", "box_device": "BOX device (ESP32-S3-BOX-3)",
     "push_subs": "Phone push subscriptions", "smriti_nightly": "smriti nightly",
-    "smriti_tasks": "smriti logd + morning", "qmd_index": "qmd recall index",
+    "smriti_tasks": "smriti logd", "morning": "Morning message (the daily heartbeat)",
+    "qmd_index": "qmd recall index",
     "akhada_tick": "akhada check-in tick", "memory_backup": "Memory backup pushed (GitHub)",
     "deadman": "Dead-man watchdog (deadman.ps1)", "host_alerts": "Host alerts (A3 pager)",
     "scheduled_tasks": "Narada scheduled tasks", "log_hygiene": "Secrets in host.log",

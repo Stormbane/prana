@@ -181,6 +181,75 @@ def test_cli_card_and_digest_modes(monkeypatch, capsys):
     assert "Phone push subscriptions: no devices subscribed" in capsys.readouterr().out
 
 
+def test_cli_rejects_unknown_check_ids(monkeypatch, capsys):
+    """A typo must not run zero checks and report all green."""
+    monkeypatch.setattr(cli, "Probes", lambda: healthy_world())
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--only", "push_sbus"])
+    assert exc.value.code == 2
+    assert "unknown check id(s): push_sbus" in capsys.readouterr().err
+
+
+# ── the digest sender: the one place the doctor speaks ────────────────
+
+import subprocess  # noqa: E402
+
+
+def _red_report():
+    fp = healthy_world()
+    fp.put(fp.paths.push_subs, "{}")
+    return run_checks(fp, timeout_s=10, only={"push_subs"}), fp
+
+
+def test_send_digest_sends_once_a_day_through_notify_suti(tmp_path):
+    from datetime import date
+    from prana.doctor import send
+    report, fp = _red_report()
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, "", "delivered via: telegram, app-push")
+
+    state = tmp_path / "doctor-digest.json"
+    rc, note = send.send_digest(report, TZ, state, tmp_path / "narada", date(2026, 11, 3),
+                                run=fake_run)
+    assert rc == 0 and note == "digest sent"
+    argv, kw = calls[0]
+    assert argv[-1].endswith("notify_suti.py")
+    assert kw["env"]["NOTIFY_LEVEL"] == "error" and kw["env"]["NOTIFY_SOURCE"] == "doctor"
+    assert kw["env"]["PYTHONUTF8"] == "1"  # the child decodes the digest's "→" correctly
+    assert "Phone push subscriptions" in kw["input"]
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["day"] == "2026-11-03" and saved["streak"] == 1
+    # a second run the same day sends nothing
+    rc, note = send.send_digest(report, TZ, state, tmp_path / "narada", date(2026, 11, 3),
+                                run=fake_run)
+    assert rc == 0 and len(calls) == 1
+    # the next day, the same reds are marked as a repeat
+    send.send_digest(report, TZ, state, tmp_path / "narada", date(2026, 11, 4), run=fake_run)
+    assert calls[1][1]["input"].startswith("(Unchanged, day 2.)")
+
+
+def test_send_digest_failure_leaves_state_for_a_retry(tmp_path):
+    from datetime import date
+    from prana.doctor import send
+    report, _ = _red_report()
+    state = tmp_path / "doctor-digest.json"
+    rc, note = send.send_digest(report, TZ, state, tmp_path, date(2026, 11, 3),
+                                run=lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "delivered via: NOTHING"))
+    assert rc == 1 and "exited 1" in note and not state.exists()
+
+
+def test_send_digest_nothing_red_sends_nothing(tmp_path):
+    from datetime import date
+    from prana.doctor import send
+    report = run_checks(healthy_world(), timeout_s=10)
+    rc, note = send.send_digest(report, TZ, tmp_path / "s.json", tmp_path, date(2026, 11, 3),
+                                run=lambda *a, **k: pytest.fail("must not send"))
+    assert rc == 0
+
+
 # ── the real probes: read-only, bounded, secret-blind ─────────────────
 
 def test_real_sqlite_probe_is_read_only(tmp_path):

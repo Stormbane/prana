@@ -6,7 +6,7 @@ Branch `doctor` (worktree `C:\projects\prana-wt-doctor`, from `briefing` @ `cb41
 
 - **The BOX: root cause found.** On **2026-10-22 at about 20:59**, a disk-cleanup session (`C:\Projects\gpu_tests`) moved `~/.narada/wakeword/output` to `D:\Archive\wakeword\output`. The BOX worker's wake model went with it. The worker fails closed, so every job leaves the room within about 75 ms, before it publishes an admission nonce. The BOX firmware therefore ignores every tap. The orphan sweeper deletes the empty-agent room about every 42 s, and that unexpected disconnect is the **black dog**. Behind it sits a second blocker: **the OpenAI voice credit is empty** (no billed session since 2026-09-16).
 - **Telegram inbound: the bridge is up and polling, but replies fail.** A message today would get the reply `[bridge] (brain 500: Internal Server Error)`, not Narada. Most likely cause: the brain's Telegram session tries to resume Claude transcript `1121e781…`, which Claude Code's 30-day cleanup deleted. **Workaround: send `/new` in Telegram** (untested, since nothing was sent).
-- **`narada doctor` is built:** 22 read-only checks with fakes-based tests. First live run: **7 red, 4 amber, 11 green.** The digest, the external dead-man's switch and the phone status card are designed in `docs/doctor.md`; none is enabled.
+- **`narada doctor` is built:** 22 read-only checks with fakes-based tests. First live run: **7 red, 4 amber, 11 green.** The digest, the external dead-man's switch and the phone status card are designed in `docs/doctor.md`; none is enabled. *(2026-11-04: Suti rejected the external switch, since it needs an extra account. The digest and the card are built instead; see `docs/doctor.md`.)*
 
 ## Part 1a. The BOX: taps do nothing, and the black dog appears now and then
 
@@ -119,6 +119,7 @@ It writes `~/.narada/host/doctor.json` only with `--write`. Exit code 0, 1 or 2 
 ### Designed, not enabled (`docs/doctor.md`)
 
 - **Daily digest:** red only, at most once a day at 08:30, through `NOTIFY_LEVEL=error notify_suti.py`, the script `tell_suti` wraps. It names each failing check and the nightly's failing step, with since and next action. `compose_digest`, `digest_due` and `fingerprint` are built and tested; there is no sending code. `--digest` previews the text.
+- *(Rejected by Suti on 2026-11-04: no extra accounts. Kept here as the record of what was proposed; the morning message is the heartbeat instead. See `docs/doctor.md`, "Why there is no external dead-man's switch".)*
 - **External dead-man's switch: Healthchecks.io**, free Hobbyist plan. It alerts by email and through Healthchecks' own Telegram bot.
 
   | Check | Pinged by | Schedule | Grace |

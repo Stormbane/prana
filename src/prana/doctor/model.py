@@ -42,7 +42,7 @@ _REDACTIONS = [
     (re.compile(r"([Bb]earer )[A-Za-z0-9._~+/=-]{8,}"), r"\1<redacted>"),
     (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}"),
      "<redacted-jwt>"),
-    (re.compile(r"(?i)((?:api[_-]?key|secret|token|password)[\"' ]*[:=][ \"']*)"
+    (re.compile(r"(?i)((?:[a-z0-9]+[_-])*(?:api[_-]?key|key|secret|token|password)[\"' ]*[:=][ \"']*)"
                 r"[A-Za-z0-9._/+=-]{12,}"), r"\1<redacted>"),
 ]
 

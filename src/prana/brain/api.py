@@ -545,6 +545,8 @@ def create_app(config: BrainConfig, backend_factory,
     # ── Questling v1: today's cards + tap answers (akhada asks) ──────
     from prana.brain.today_api import register_today
     register_today(app, require_tier)
+    from prana.brain.doctor_api import register_doctor
+    register_doctor(app, require_tier)
 
     # ── Fitness summary (the Data tab's read-only view) ──────────────
     @app.get("/api/fitness/summary")

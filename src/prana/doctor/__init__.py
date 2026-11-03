@@ -7,8 +7,8 @@
     python -m prana.doctor --digest   print the red digest that WOULD be sent
 
 Nothing here restarts, reconfigures or messages anything. See
-docs/doctor.md for the JSON shapes, the digest and the external
-dead-man's switch designs.
+docs/doctor.md for the JSON shapes, the brain route (GET /api/doctor),
+the daily red digest, and why there is no external dead-man's switch.
 """
 from prana.doctor.model import AMBER, GREEN, RED, CheckResult, Report
 from prana.doctor.probes import Paths, Probes

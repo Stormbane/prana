@@ -1,9 +1,7 @@
-"""DESIGN ONLY: the once-daily red digest (docs/doctor.md §Daily digest).
+"""The once-daily red digest (docs/doctor.md §Daily digest).
 
-This module composes the text and decides whether a digest is due. It
-has no sending code on purpose: nothing here talks to Telegram, the
-app or smriti. Enabling it is the documented one-line wiring through
-smriti's notify_suti.py, done deliberately by Suti, later.
+This module only composes the text and decides whether a digest is due.
+Sending lives in prana.doctor.send, the one module that speaks.
 """
 from __future__ import annotations
 

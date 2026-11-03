@@ -80,6 +80,17 @@ def test_components_down_is_red_and_names_it(fp):
     assert "agent-gateway" not in res.reason  # disabled components aren't probed
 
 
+def test_components_without_enabled_key_are_enabled(fp):
+    """host/component.py treats a missing `enabled:` as enabled."""
+    fp.put(fp.paths.components_yaml, """
+components:
+  - {name: brain, command: [python], health_url: "http://127.0.0.1:8811/health"}
+  - {name: ghost, command: [x], health_url: "http://127.0.0.1:9/"}
+""")
+    res = C.check_components(fp)
+    assert res.status == RED and "ghost" in res.reason
+
+
 def test_components_reports_unprobed(fp):
     res = C.check_components(fp)
     assert res.status == GREEN and "chat-bridge" in res.reason
@@ -102,10 +113,13 @@ def test_brain_tailnet_unconfigured_is_amber(fp):
     assert C.check_brain_tailnet(fp).status == AMBER
 
 
-def test_brain_sessions_pruned_transcript_is_amber(fp):
+def test_brain_sessions_pruned_transcript_is_information(fp):
+    """Since prana 51a3f27 the brain starts a pruned session fresh with a
+    handover, so an expired transcript is noted, never a warning."""
     del fp.files[fp.paths.claude_projects / "C--sessions-telegram-42" / "abc-123.jsonl"]
     res = C.check_brain_sessions(fp)
-    assert res.status == AMBER and "prana/telegram-42" in res.reason
+    assert res.status == GREEN and "start fresh with a handover" in res.reason
+    assert res.details["expired"] == ["prana/telegram-42"]
 
 
 def test_brain_sessions_ignores_codex_backend(fp):
@@ -117,9 +131,28 @@ def test_brain_sessions_ignores_codex_backend(fp):
 
 # ── telegram ──────────────────────────────────────────────────────────
 
-def test_bridge_no_polls_is_red(fp):
+def test_bridge_no_poll_lines_is_amber_not_red(fp):
+    """Turning httpx request logging off (log_hygiene's advice) removes the
+    poll lines; that leaves polling unseen, not broken."""
     fp.put(fp.paths.host_log, "")
+    res = C.check_telegram_bridge(fp)
+    assert res.status == AMBER and "not visible" in res.reason
+
+
+def test_bridge_only_failed_polls_is_red(fp):
+    fp.put(fp.paths.host_log, poll_line(NOW, status="502 Bad Gateway") + "\n")
     assert C.check_telegram_bridge(fp).status == RED
+
+
+def test_bridge_conflict_before_a_good_poll_is_history(fp):
+    """A restart leaves one Conflict line; polls that succeed after it mean
+    there is no second poller now."""
+    fp.put(fp.paths.host_log, local_line(
+        NOW - timedelta(seconds=30), "WARNING prana.host.[chat-bridge]: err: "
+        "telegram.error.Conflict: terminated by other getUpdates request") + "\n"
+        + poll_line(NOW) + "\n")
+    res = C.check_telegram_bridge(fp)
+    assert res.status == GREEN and res.details["conflicts"] == 1
 
 
 def test_bridge_late_poll_is_amber(fp):
@@ -145,20 +178,37 @@ def test_inbound_failed_and_pruned_resume_is_red(fp):
                "# Chat exchange — FAILED\n\n## Suti\n\nx\n\n## Narada\n\n"
                "(brain 500: Internal Server Error)\n")
     del fp.files[fp.paths.claude_projects / "C--sessions-telegram-42" / "abc-123.jsonl"]
+    # the brain has been up since before the failures: nothing has changed
+    fp.on_sql("FROM host_alert_status", [
+        {"component": "brain", "healthy_since": 1760000000, "episode_open": 0,
+         "episode_opened_at": None}])
     res = C.check_telegram_inbound(fp)
     assert res.status == RED
-    assert "FAILED (brain 500" in res.reason and "pruned transcript" in res.reason
-    assert "/new" in res.hint
+    assert "FAILED (brain 500" in res.reason
+    assert "/new" in res.hint and "host.log" in res.hint
     # the streak starts at the first failure after the last OK
     assert res.since.isoformat().startswith("2026-10-22T16:02:32")
     # Suti's own words never appear in the reason
     assert "## Suti" not in res.reason
 
 
-def test_inbound_ok_but_pruned_resume_is_red(fp):
+def test_inbound_ok_with_pruned_resume_is_green(fp):
+    """The brain heals a pruned resume target itself (prana 51a3f27)."""
     del fp.files[fp.paths.claude_projects / "C--sessions-telegram-42" / "abc-123.jsonl"]
     res = C.check_telegram_inbound(fp)
-    assert res.status == RED and "next message will 500" in res.reason
+    assert res.status == GREEN and res.details["resume_target_present"] is False
+
+
+def test_inbound_failure_before_a_brain_restart_is_amber(fp):
+    """Failed at 23:00, brain restarted at 23:30, no message since: the
+    failure may be fixed and is untested, so not known red."""
+    fp.put(fp.paths.chat_cycles / "2026-11-03-130000-chat-42.md",
+           "# Chat exchange — FAILED\n\n## Suti\n\nx\n\n## Narada\n\n(brain 500)\n")
+    fp.on_sql("FROM host_alert_status", [
+        {"component": "brain", "healthy_since": NOW.timestamp() - 600, "episode_open": 0,
+         "episode_opened_at": None}])
+    res = C.check_telegram_inbound(fp)
+    assert res.status == AMBER and "no message has tested it since" in res.reason
 
 
 def test_inbound_after_new_uses_fresh_generation(fp):
@@ -269,11 +319,20 @@ def test_voice_box_missing_model_points_at_archive(fp):
 
 
 def test_voice_box_credits_fault_is_red(fp):
+    fp.put_json(fp.paths.voice_budget, {"days": {"2026-10-12": 1.0}, "reservations": {}})
     fp.put_json(fp.paths.voice_fault, {"code": "credits", "text": "OpenAI credit is empty.",
                                        "at": "2026-10-13T17:37:04"})
     res = C.check_voice_box(fp)
     assert res.status == RED and "OpenAI credit empty" in res.reason
     assert res.since.astimezone(TZ).strftime("%m-%d %H:%M") == "10-13 17:37"
+
+
+def test_voice_fault_survives_later_budget_entries(fp):
+    """The phone worker settles the budget even when the provider refuses
+    to start, so a later budget day is no proof the credit came back."""
+    fp.put_json(fp.paths.voice_fault, {"code": "credits", "at": "2026-10-13T17:37:04"})
+    assert C.check_voice_box(fp).status == RED
+    assert C.check_voice_phone(fp).status == RED
 
 
 def test_voice_box_health_down_is_red(fp):
@@ -287,6 +346,7 @@ def test_voice_box_other_fault_is_amber(fp):
 
 
 def test_voice_phone_credits_is_red(fp):
+    fp.put_json(fp.paths.voice_budget, {"days": {"2026-10-12": 1.0}, "reservations": {}})
     fp.put_json(fp.paths.voice_fault, {"code": "credits", "at": "2026-10-13T17:37:04"})
     res = C.check_voice_phone(fp)
     assert res.status == RED and "shared voice backend" in res.reason
@@ -382,8 +442,25 @@ def test_logd_dead_is_red(fp):
 
 def test_morning_not_sent_is_red(fp):
     fp.put_json(fp.paths.morning_status, {"day": "2026-11-02", "sent": True})
-    res = C.check_smriti_tasks(fp)
-    assert res.status == RED and "morning message not sent for 2026-11-03" in res.reason
+    res = C.check_morning(fp)
+    assert res.status == RED and "no morning message for 2026-11-03" in res.reason
+
+
+def test_morning_names_the_failed_phase(fp):
+    fp.put_json(fp.paths.morning_status, {"day": "2026-11-03", "sent": False,
+                                          "phase": "deliver", "reason": "TimeoutExpired"})
+    res = C.check_morning(fp)
+    assert res.status == RED
+    assert "composed, but delivery failed (TimeoutExpired)" in res.reason
+    fp.put_json(fp.paths.morning_status, {"day": "2026-11-03", "sent": False,
+                                          "phase": "compose", "reason": "RuntimeError"})
+    assert "composing failed (RuntimeError)" in C.check_morning(fp).reason
+
+
+def test_morning_before_its_hour_judges_yesterday(fp):
+    fp.now = lambda: NOW.replace(hour=20)  # 06:00 local on 11-04: today's isn't due yet
+    fp.put_json(fp.paths.morning_status, {"day": "2026-11-03", "sent": True})
+    assert C.check_morning(fp).status == GREEN
 
 
 def test_qmd_stale_index_is_red(fp):
@@ -459,6 +536,14 @@ def test_backup_no_upstream_is_red(fp):
 
 def test_deadman_silent_is_red(fp):
     fp.put(fp.paths.deadman_log, "2026-11-03T13:00:00Z healthy (age 12s)\n")
+    assert C.check_deadman(fp).status == RED
+
+
+def test_deadman_ignores_job_watch_lines(fp):
+    """job-watch.ps1 writes to the same log; its fresh lines must not hide
+    a deadman.ps1 that stopped ticking."""
+    fp.put(fp.paths.deadman_log, "2026-11-03T13:00:00Z healthy (age 12s)\n"
+                                 "2026-11-03T13:38:00Z job-watch: smriti-nightly ok\n")
     assert C.check_deadman(fp).status == RED
 
 
