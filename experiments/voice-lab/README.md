@@ -38,6 +38,90 @@ Recommendation: prioritize this native full-duplex comparison before spending
 more effort approximating its behavior with Realtime VAD settings. Retain the
 current baseline, synthetic fixtures, and no-3090/no-cognition scope.
 
+## Gemini Live talker, November 3
+
+Suti decided on 2026-11-03 that the talker in the talker/sage split
+([presence plan](../../docs/plans/narada-presence-2026-11-03.md), W5) runs on
+Gemini Live for speed and cost, as a stopgap. This is **stage 1: the talker
+alone.** It has no tools and no memory. The sage reads
+`output/talker-<call>.transcript.json` after the call; nothing in it runs live.
+
+### Facts checked 2026-11-03
+
+| Question | Answer | Source |
+|---|---|---|
+| Model | `gemini-3.8-live`, stable since September 2026. `gemini-3.1-flash-live-preview` is now a "legacy preview" | [3.8 model card](https://aistudio.google.com/docs/models/gemini-3.8-live), [3.1 card](https://aistudio.google.com/docs/models/gemini-3.1-flash-live-preview) |
+| Price (paid tier, per 1M tokens) | Audio in $3.00 (about $0.005/min), audio out $12.00 (about $0.018/min), text in $0.75, text out $4.50. 25 audio tokens a second. 3.8 has no context caching. Same prices for 3.1 | [pricing](https://aistudio.google.com/docs/pricing) |
+| Is the whole context re-billed every turn? | **Not documented.** The guard reconciles against the provider's own per-turn usage, so the caps hold either way; the smoke measures it | [session docs](https://aistudio.google.com/docs/live-api/session-management) (silent) |
+| Free vs paid tier | Free: Google may use prompts and responses to improve products, and human reviewers may read them. Paid (project linked to an active Cloud Billing account): not used to improve products; logged for a limited time for abuse detection only | [terms](https://aistudio.google.com/docs/terms), effective 2026-03-23 |
+| Google AI Pro credits | $10/month of Google Cloud credit (Ultra $100), claimed at developers.google.com/program/my-benefits. Google says it applies to the Gemini API "via AI Studio or Vertex AI", i.e. API-key usage billed to the Cloud Billing account. The Gemini app subscription itself carries no API quota | [Google blog, 2026-01-27](https://blog.google/innovation-and-ai/technology/developers-tools/gdp-premium-ai-pro-ultra/) |
+| LiveKit | `livekit-plugins-google` 1.8.10 (2026-10-28), needs `livekit-agents>=1.8.10`. Class `livekit.plugins.google.realtime.RealtimeModel`. It knows `gemini-3.8-live`, but its default is still 2.5 native audio, so the lab names the model. The September lab's 1.8.1 predates 3.8 | [PyPI](https://pypi.org/project/livekit-plugins-google/), [LiveKit docs](https://docs.livekit.io/agents/models/realtime/plugins/gemini/) |
+| Affective / proactive audio | On 3.8, proactive audio is always on (`proactive_audio: false` is an error) and affective dialog was removed. 3.1 supports neither | 3.8 and 3.1 model cards |
+| Session limits | Audio-only sessions last 15 min without compression; a connection lasts about 10 min, then GoAway; resumption handles stay valid 2 h; context 131,072 in / 65,536 out; sliding-window compression extends sessions | session docs, model cards |
+| Region for Brisbane | The Gemini Developer API (`generativelanguage.googleapis.com`) is global, with no region choice. Vertex doesn't document Live regions; community reports say no `australia-southeast1`. Use the Developer API and measure from here | [Vertex Live overview](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/live-api) |
+
+**Voice.** Live uses the 30 prebuilt voices, the same set as Chirp 3 HD.
+Male, with Google's one-word descriptors
+([genders](https://docs.cloud.google.com/text-to-speech/docs/chirp3-hd)):
+Achird Friendly, Algenib Gravelly, Algieba Smooth, Alnilam Firm, Charon
+Informative, Enceladus Breathy, Fenrir Excitable, Iapetus Clear, Orus Firm,
+Puck Upbeat, Rasalgethi Informative, Sadachbia Lively, Sadaltager
+Knowledgeable, Schedar Even, Umbriel Easy-going, Zubenelgenubi Casual.
+Default: **Umbriel** (easy-going: unhurried and warm, with no brightness).
+Audition alternates: **Algieba** and **Achird**. Skip the bright ones (Puck,
+Fenrir, Sadachbia), the announcer-like ones (Charon, Rasalgethi) and Enceladus
+(risks whispered closeness). This is inferred from descriptors; Suti's ear
+decides. Accent, pace and laughter come only from the instructions; there's
+no API control for them. Voice C (MiniMax) isn't available on this route.
+
+### What the lab does
+
+- **Mode `gemini`**, in `gemini_adapter.py` and `gemini_talker.py`, follows
+  the `live_adapter.py` pattern. The key is `GOOGLE_API_KEY` (or
+  `GEMINI_API_KEY`) from `~/.narada/.keys.env`; it is never logged or sent
+  to the browser.
+- **Instructions:** Narada's identity and voice spec, 1,800 characters (about 450 tokens), plus a
+  synthetic test brief. No memory files.
+- **Cost, reserved before each paid operation:** the first turn's ceiling
+  (context plus `max_output_tokens`=500) is reserved before connecting. Each
+  microphone chunk is reserved before it's sent to Google. After each
+  provider usage report, the actual cost is charged and the next turn's
+  ceiling is reserved. A refused reservation stops audio at once and closes
+  the provider session. If `output/closing-<voice>.pcm` exists, it then
+  plays as a free closing line. Pots: the session cap (default $0.50) and
+  the trial total (default $5, kept in `output/gemini-ledger.json`). Both
+  are the plan's interim caps until Suti sets his own. The browser shows
+  why a call ended; HTTP 402 means no session was opened.
+- **Idle timeout** (45 s with no speech either way, held while Narada is
+  still playing). **Hard max** 300 s (at most 540, below the 10-minute
+  connection lifetime). Compression starts at 12k tokens.
+- **Transcript:** keeps generated, played and interrupted speech apart.
+  `heard` holds only what Suti actually heard (V-E prerequisite 7).
+- **Sage seam:** `Sage.observe(event)` receives live transcript events
+  (`NullSage` today). `GeminiTalker.inject_context()` is a logged no-op;
+  for stage 2, 3.8 accepts mid-session client-content turns.
+- **Latency:** the server logs `latency` (end of speech, from input energy,
+  to the first model audio). The smoke measures end of speech to first
+  audible audio at the listener.
+
+### Run
+
+```powershell
+uv venv --python 3.12 experiments/voice-lab/.venv-gemini
+uv pip install --python experiments/voice-lab/.venv-gemini/Scripts/python.exe -r experiments/voice-lab/requirements-gemini.lock
+experiments/voice-lab/.venv-gemini/Scripts/python.exe -m pytest experiments/voice-lab/tests -q
+# paid, total <= US$0.50; spends nothing and prints the setup steps without a key:
+experiments/voice-lab/.venv-gemini/Scripts/python.exe -X utf8 experiments/voice-lab/smoke_gemini.py
+```
+
+The smoke starts its own lab server on a spare port, then runs two
+sessions. **A** speaks three questions and a story, interrupts it, and
+then stays silent until the idle timeout. **B** has a $0.012 cap that runs
+out mid-session. It also renders the closing clip once, on
+`gemini-3.8-flash-tts`. For listening, run `lab.py` from the same venv and
+pick "Gemini Live · Narada talker". Settings: `VOICE_LAB_GEMINI_VOICE`,
+`_MODEL`, `_SESSION_CAP_USD`, `_TRIAL_CAP_USD`, `_IDLE_SECONDS`, `_MAX_SECONDS`.
+
 ## OSS options and choice
 
 | Project | Relevant implementation | Fit for this experiment |
@@ -84,7 +168,8 @@ comparison. This is a desktop localhost lab, not a deployed phone endpoint.
 
 The server reads existing configuration from `~/.narada/.livekit.env` and
 `~/.narada/.voice.env`: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
-`OPENAI_API_KEY`. It serves the already-installed LiveKit browser client from
+`OPENAI_API_KEY`, and `GOOGLE_API_KEY` from `~/.narada/.keys.env` for the
+Gemini mode. It serves the already-installed LiveKit browser client from
 `../narada-phone-app/node_modules/livekit-client/dist/livekit-client.umd.js`.
 Set `VOICE_LAB_CLIENT_JS` if that asset lives elsewhere. Keys never go to the
 browser; its short-lived token is restricted to its unique test room.

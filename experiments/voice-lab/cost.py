@@ -1,4 +1,4 @@
-"""Price captured provider usage at official USD rates checked 2026-09-11."""
+"""Price captured provider usage at official USD rates (OpenAI 2026-09-11, Gemini 2026-11-03)."""
 import json
 from pathlib import Path
 import sys
@@ -6,6 +6,14 @@ import sys
 
 def estimate(report):
     events = report["events"]
+    if report["mode"] == "gemini":
+        from gemini_talker import price_usage, rates_for
+        rates = rates_for(report["model"])
+        usage = [e["usage"] for e in events if e["kind"] == "provider_usage" and e.get("api") == "gemini-live"]
+        assert usage, "No Gemini usage captured"
+        return {"voice_usd": sum(price_usage(u, rates) for u in usage), "usage_reports": len(usage),
+                "basis": "Sum of per-turn usage_metadata at paid-tier rates checked 2026-11-03; "
+                         "no cache discount (3.8 Live has none)"}
     if report["mode"] == "live":
         final = [e for e in events if e["kind"] == "provider_usage"
                  and e.get("event_type") == "session.closed"]

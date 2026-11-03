@@ -1,6 +1,36 @@
-# Voice lab results — September 11, 2026
+# Voice lab results
 
-## GPT-Live comparison, now available
+## Gemini Live talker, November 3, 2026: built, paid smoke not yet run
+
+`~/.narada/.keys.env` has no `GOOGLE_API_KEY` yet, so **nothing has been
+spent on Google** and there are no latency or cost measurements.
+`smoke_gemini.py` exits with the setup steps (see README) and spends nothing.
+
+What was verified without spending:
+
+- 32 unit tests pass (`tests/`), on livekit-agents 1.8.10 and
+  livekit-plugins-google 1.8.10. They cover the cost guard (cap exhausted
+  mid-session stops forwarding audio; first turn refused before connecting;
+  trial total; late usage still charged), the idle timeout (including
+  holding it while a reply is still playing), the transcript states
+  (played, interrupted, unplayed; only heard speech in `heard`), the
+  latency meter, pricing, and the plugin hook signatures. Disabling the
+  audio gate makes four of them fail.
+- Wiring check against the local LiveKit server with a deliberately
+  invalid key: `/health` offered `gemini`; a call opened with a reserved
+  first-turn ceiling of $0.0076. Google rejected the key (WebSocket 1007,
+  "API key not valid"), the call closed cleanly and wrote its transcript
+  file with $0 spent. A $0.001 session cap was refused with HTTP 402
+  before any connection.
+
+Open questions the first paid run answers: Gemini's per-turn usage
+(whether the whole context is re-billed each turn), real end-of-speech to
+first-audio latency from Brisbane, whether `max_output_tokens` bounds
+audio replies, and whether Umbriel can laugh the way the spec asks.
+
+## September 11, 2026
+
+### GPT-Live comparison, now available
 
 The listening page at **http://localhost:8899** now offers GPT-Live and both
 Realtime mini settings. This uses an isolated LiveKit Agents 1.8.1 / OpenAI

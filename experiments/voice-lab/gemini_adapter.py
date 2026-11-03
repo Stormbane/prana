@@ -1,0 +1,299 @@
+"""Gemini Live talker for the isolated lab: speech-to-speech, budget-guarded.
+
+Stage 1 of the talker/sage split: the talker speaks alone. The sage (Narada's
+main mind) reads `output/talker-<call>.transcript.json` after the call. No
+tools, no memory, no prana imports. Keys come from the environment
+(`~/.narada/.keys.env`); they are never logged or sent to the browser.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+
+from google.genai import types
+from livekit import rtc
+from livekit.agents import Agent, AgentSession
+from livekit.plugins.google.realtime import realtime_api
+
+from gemini_talker import (
+    DEFAULT_MODEL, DEFAULT_VOICE, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger,
+    NullSage, Pot, Sage, Transcript, estimate_tokens, instructions, pcm16_rms, rates_for,
+)
+
+HERE = Path(__file__).resolve().parent
+OUTPUT = HERE / "output"
+MODEL = os.getenv("VOICE_LAB_GEMINI_MODEL", DEFAULT_MODEL)
+VOICE = os.getenv("VOICE_LAB_GEMINI_VOICE", DEFAULT_VOICE)
+# Interim caps from the plan until Suti sets his own: <= $0.50 a session, trials <= $5.
+SESSION_CAP_USD = float(os.getenv("VOICE_LAB_GEMINI_SESSION_CAP_USD", "0.50"))
+TRIAL_CAP_USD = float(os.getenv("VOICE_LAB_GEMINI_TRIAL_CAP_USD", "5.00"))
+IDLE_SECONDS = float(os.getenv("VOICE_LAB_GEMINI_IDLE_SECONDS", "45"))
+# Below Gemini's ~10-minute connection lifetime, so no GoAway reconnects.
+MAX_SECONDS = min(540.0, float(os.getenv("VOICE_LAB_GEMINI_MAX_SECONDS", "300")))
+# Bounds each turn's in-flight output: 500 audio tokens is 20 s of speech, <= $0.006.
+MAX_OUTPUT_TOKENS = 500
+# Bounds the context billed per turn on longer calls (sliding window).
+COMPRESSION_TRIGGER_TOKENS, COMPRESSION_TARGET_TOKENS = 12_000, 6_000
+CLOSING_TEXT = "I'll have to stop us there; that's today's limit. Talk soon."
+
+
+def api_key() -> str | None:
+    return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+
+def closing_clip_path(voice: str = VOICE) -> Path:
+    """Pre-rendered 24 kHz mono s16le closing line; playing it costs nothing."""
+    return OUTPUT / f"closing-{voice}.pcm"
+
+
+class BudgetRefused(RuntimeError):
+    pass
+
+
+class MeteredSession(realtime_api.RealtimeSession):
+    """The plugin session with three hooks: gate audio, observe content, reconcile usage.
+
+    The two private hooks are pinned to livekit-plugins-google 1.8.10; a unit
+    test fails if the plugin renames them.
+    """
+
+    talker: "GeminiTalker"
+
+    def push_audio(self, frame: rtc.AudioFrame) -> None:
+        if self.talker.admit_input(frame):
+            super().push_audio(frame)
+
+    def _handle_server_content(self, server_content: types.LiveServerContent) -> None:
+        gen = self._current_generation
+        super()._handle_server_content(server_content)
+        self.talker.on_server_content(gen.response_id if gen else None, server_content)
+
+    def _handle_usage_metadata(self, usage_metadata: types.UsageMetadata) -> None:
+        # Billed even when the plugin has no generation to attach metrics to.
+        gen = self._current_generation
+        self.talker.on_usage(gen.response_id if gen else None,
+                             usage_metadata.model_dump(mode="json", exclude_none=True))
+        super()._handle_usage_metadata(usage_metadata)
+
+
+class MeteredModel(realtime_api.RealtimeModel):
+    def __init__(self, talker: "GeminiTalker", **kwargs):
+        super().__init__(**kwargs)
+        self._talker = talker
+
+    def session(self, *, turn_detection_disabled: bool = False) -> MeteredSession:
+        if self._talker.guard.stopped:
+            raise BudgetRefused("Budget refused: no new provider session")
+        # The connect task only starts on the next loop turn, after `talker` is set.
+        sess = MeteredSession(self)
+        sess.talker = self._talker
+        self._sessions.add(sess)
+        self._talker.rt = sess
+        return sess
+
+
+class GeminiTalker:
+    """One call's talker: guard, idle timeout, transcript, latency, sage seam."""
+
+    def __init__(self, call, *, session_cap_usd: float = SESSION_CAP_USD,
+                 idle_seconds: float = IDLE_SECONDS, max_seconds: float = MAX_SECONDS,
+                 sage: Sage | None = None):
+        self.call = call
+        self.model_name = MODEL
+        self.voice = VOICE
+        self.rates = rates_for(MODEL)
+        self.instructions = instructions()
+        self.max_seconds = min(max_seconds, MAX_SECONDS)
+        self.ledger = Ledger(OUTPUT / "gemini-ledger.json")
+        self.budget = Budget([Pot("session", min(session_cap_usd, SESSION_CAP_USD)),
+                              Pot("trial", TRIAL_CAP_USD, spent_usd=self.ledger.spent())])
+        self.guard = CostGuard(self.budget, self.rates, max_output_tokens=MAX_OUTPUT_TOKENS,
+                               base_context_tokens=estimate_tokens(self.instructions),
+                               on_stop=self._on_stop)
+        self.idle = IdleWatchdog(min(idle_seconds, IDLE_SECONDS))
+        self.sage = sage or NullSage()
+        self.transcript = Transcript(sink=self._on_transcript)
+        self.latency = LatencyMeter()
+        self.rt: MeteredSession | None = None
+        self.live = False
+        self.speaking = False   # replies arrive faster than they play; playback is activity
+        self.tasks: set[asyncio.Task] = set()
+        self.reserved_at_close = 0.0
+
+    # -- set-up ---------------------------------------------------------------
+
+    def model(self) -> MeteredModel:
+        key = api_key()
+        if not key:
+            raise RuntimeError("Set GOOGLE_API_KEY (or GEMINI_API_KEY) in ~/.narada/.keys.env")
+        return MeteredModel(
+            self, model=MODEL, api_key=key, voice=VOICE,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            # 3.8 Live: proactive audio is always on and affective dialog was removed,
+            # so neither option is sent (setting proactive_audio=false is an error).
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=COMPRESSION_TRIGGER_TOKENS,
+                sliding_window=types.SlidingWindow(target_tokens=COMPRESSION_TARGET_TOKENS)),
+        )
+
+    def open(self) -> None:
+        """Reserve the first turn before any paid connection is made."""
+        if not self.guard.open():
+            raise BudgetRefused(f"Budget refused before connecting: {self.budget.snapshot()}")
+        self.call.emit("budget_opened", budget=self.budget.snapshot(),
+                       first_turn_ceiling_usd=round(self.guard.turn_ceiling(), 6))
+
+    def attach(self, session: AgentSession) -> None:
+        @session.on("conversation_item_added")
+        def item(ev):
+            role = getattr(ev.item, "role", None)
+            text = getattr(ev.item, "text_content", "") or ""
+            if role == "user" and text:
+                self.transcript.user(text)
+            elif role == "assistant":
+                self.transcript.played(getattr(ev.item, "id", None), text,
+                                       interrupted=bool(getattr(ev.item, "interrupted", False)))
+
+        @session.on("agent_state_changed")
+        def agent_state(ev):
+            self.speaking = ev.new_state == "speaking"
+            self.idle.touch()
+
+        @session.on("user_state_changed")
+        def user_state(ev):
+            if ev.new_state == "speaking":
+                self.idle.touch()
+
+        self.live = True
+        self.idle.touch()
+        self._spawn(self._watch_idle())
+
+    # -- the three provider hooks --------------------------------------------
+
+    def admit_input(self, frame: rtc.AudioFrame) -> bool:
+        rms = pcm16_rms(frame.data)
+        self.latency.on_input(rms)
+        if rms >= self.latency.threshold:
+            self.idle.touch()
+        return self.guard.admit_audio(frame.samples_per_channel / frame.sample_rate)
+
+    def on_server_content(self, gen_id: str | None, sc: types.LiveServerContent) -> None:
+        if gen_id and sc.output_transcription and sc.output_transcription.text:
+            self.transcript.generated(gen_id, sc.output_transcription.text)
+            self.idle.touch()
+        if sc.input_transcription and sc.input_transcription.text:
+            self.idle.touch()
+        if gen_id and sc.model_turn and any(p.inline_data for p in sc.model_turn.parts or []):
+            self.idle.touch()
+            sample = self.latency.on_model_audio(gen_id)
+            if sample:
+                self.call.emit("latency", **sample)
+        if sc.interrupted:
+            self.call.emit("provider_interrupted", gen_id=gen_id)
+
+    def on_usage(self, gen_id: str | None, usage: dict) -> None:
+        usd = self.guard.on_usage(usage)
+        self.call.emit("provider_usage", api="gemini-live", gen_id=gen_id, usage=usage,
+                       usd=round(usd, 6), budget=self.budget.snapshot())
+
+    # -- the sage seam (stage 1: observe only) ---------------------------------
+
+    def _on_transcript(self, event: dict) -> None:
+        # The lab's event log owns "seq"; the transcript's own index travels as "turn".
+        self.call.emit(event["kind"], **{("turn" if k == "seq" else k): v
+                                         for k, v in event.items() if k != "kind"})
+        self.sage.observe(event)
+
+    def inject_context(self, text: str) -> bool:
+        """Stage 2 hook: the sage whispers context to the talker. A no-op today.
+
+        On gemini-3.8-live the route is a mid-session client-content turn
+        (turn_complete=False), which the 3.8 model accepts; 3.1 did not.
+        """
+        self.call.emit("sage_inject_ignored", stage=1, chars=len(text))
+        return False
+
+    # -- stopping ---------------------------------------------------------------
+
+    def _on_stop(self, reason: str) -> None:
+        # The guard already refuses audio. Close on the next loop tick, so the
+        # usage report that triggered the stop is logged before cap_reached.
+        if self.live:
+            asyncio.get_running_loop().call_soon(self._cap_reached, reason)
+
+    def _cap_reached(self, reason: str) -> None:
+        self.call.emit("cap_reached", reason=reason, budget=self.budget.snapshot(),
+                       audio_seconds_refused=round(self.guard.audio_seconds_refused, 3))
+        self._spawn(self.call.close(reason="cap"))
+
+    async def _watch_idle(self) -> None:
+        while not self.call.closed:
+            await asyncio.sleep(max(0.2, min(1.0, self.idle.remaining())))
+            if self.speaking:
+                self.idle.touch()
+            if self.idle.expired() and not self.call.closed:
+                self.call.emit("idle_timeout", seconds=self.idle.timeout)
+                await self.call.close(reason="idle")
+                return
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def finish(self, room: rtc.Room, reason: str) -> None:
+        """After the provider session is closed: account, play the free closing line, write the transcript."""
+        self.reserved_at_close = sum(r.usd for r in ([self.guard.turn] if self.guard.turn else [])
+                                     + self.guard.audio)
+        self.guard.close()
+        self.transcript.finish()
+        self.ledger.add(self.call.id, self.guard.actual_usd)
+        if reason == "cap":
+            await self._play_closing(room)
+        path = OUTPUT / f"talker-{self.call.id}.transcript.json"
+        summary = {
+            "stage": 1, "call_id": self.call.id, "model": self.model_name, "voice": self.voice,
+            "reason": reason, "cost_usd": round(self.guard.actual_usd, 6),
+            "unreconciled_ceiling_usd": round(self.reserved_at_close, 6),
+            "usage_reports": self.guard.reports, "budget": self.budget.snapshot(),
+            "audio_seconds_admitted": round(self.guard.audio_seconds_admitted, 3),
+            "audio_seconds_refused": round(self.guard.audio_seconds_refused, 3),
+            "latency": self.latency.samples,
+        }
+        path.write_text(json.dumps({**summary, "heard": self.transcript.heard(),
+                                    "entries": self.transcript.entries()}, indent=2,
+                                   ensure_ascii=False), encoding="utf-8")
+        self.call.emit("talker_summary", transcript=path.name, **summary)
+
+    async def _play_closing(self, room: rtc.Room) -> None:
+        clip = closing_clip_path(self.voice)
+        if not clip.is_file():
+            self.call.emit("closing_clip_missing", path=clip.name)
+            return
+        pcm = clip.read_bytes()
+        source = rtc.AudioSource(24000, 1, queue_size_ms=200)
+        track = rtc.LocalAudioTrack.create_audio_track("talker-closing-line", source)
+        try:
+            pub = await room.local_participant.publish_track(
+                track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+            for offset in range(0, len(pcm), 960):
+                chunk = pcm[offset:offset + 960].ljust(960, b"\0")
+                await source.capture_frame(rtc.AudioFrame(chunk, 24000, 1, 480))
+            await asyncio.wait_for(source.wait_for_playout(), 10)
+            await room.local_participant.unpublish_track(pub.sid)
+            self.call.emit("closing_clip_played", text=CLOSING_TEXT, usd=0)
+        except Exception as exc:  # the call is ending either way
+            self.call.emit("closing_clip_error", error_type=type(exc).__name__)
+        finally:
+            await source.aclose()
+
+
+def make_gemini(call, *, session_cap_usd=SESSION_CAP_USD, idle_seconds=IDLE_SECONDS,
+                max_seconds=MAX_SECONDS):
+    talker = GeminiTalker(call, session_cap_usd=session_cap_usd, idle_seconds=idle_seconds,
+                          max_seconds=max_seconds)
+    model = talker.model()
+    talker.open()
+    return talker, model, Agent(instructions=talker.instructions)

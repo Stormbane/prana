@@ -21,7 +21,7 @@ from livekit.agents.voice import room_io
 from livekit.plugins import openai
 from openai.types.realtime import AudioTranscription
 from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 HERE = Path(__file__).resolve().parent
@@ -50,17 +50,43 @@ tools when asked. Do not invent tools, memories, or background work.
 
 
 class Settings(BaseModel):
-    mode: Literal["semantic", "server", "live"] = "semantic"
+    mode: Literal["semantic", "server", "live", "gemini"] = "semantic"
+    # Gemini only, and only ever lowered: the server defaults are the ceilings.
+    session_cap_usd: float | None = Field(None, gt=0)
+    idle_seconds: float | None = Field(None, gt=0)
+    max_seconds: float | None = Field(None, gt=0)
+
+
+def google_key() -> bool:
+    return bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
+
+
+def available_modes() -> list[str]:
+    modes = []
+    if os.getenv("OPENAI_API_KEY"):
+        modes += ["semantic", "server"]
+        if hasattr(openai.realtime, "GPTLiveModel"):
+            modes.append("live")
+    if google_key():
+        try:
+            import gemini_adapter  # noqa: F401  (needs livekit-plugins-google)
+            modes.append("gemini")
+        except ImportError:
+            pass
+    return modes
 
 
 class Call:
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, settings: Settings | None = None):
         self.id = uuid.uuid4().hex
         # The existing automatic BOX worker explicitly declines this prefix.
         self.room_name = f"akhada-phone-voice-lab-{self.id}"
         self.identity = f"voice-lab-listener-{self.id}"
         self.mode = mode
+        self.settings = settings or Settings(mode=mode)
         self.model_name = "gpt-live-1" if mode == "live" else MODEL
+        self.max_seconds = MAX_SECONDS
+        self.talker = None
         self.started = time.monotonic()
         self.events: list[dict] = []
         self.room = rtc.Room()
@@ -132,6 +158,13 @@ class Call:
         elif self.mode == "live":
             from live_adapter import make_live
             self.model, agent = make_live(self)
+        elif self.mode == "gemini":
+            from gemini_adapter import make_gemini
+            overrides = {k: v for k, v in self.settings.model_dump().items()
+                         if k in ("session_cap_usd", "idle_seconds", "max_seconds") and v}
+            self.talker, self.model, agent = make_gemini(self, **overrides)
+            self.model_name = self.talker.model_name
+            self.max_seconds = self.talker.max_seconds
         else:
             call = self
 
@@ -185,30 +218,42 @@ class Call:
 
         @self.session.on("close")
         def on_close(ev):
-            asyncio.create_task(self.close())
+            asyncio.create_task(self.close(reason="session_closed"))
+
+        if self.talker:
+            self.talker.attach(self.session)
 
         await self.session.start(
             agent=agent, room=self.room,
             room_options=room_io.RoomOptions(participant_identity=self.identity,
                                             video_input=False))
-        self.emit("ready", model=self.model_name, mode=self.mode, max_seconds=MAX_SECONDS)
+        self.emit("ready", model=self.model_name, mode=self.mode, max_seconds=self.max_seconds,
+                  **({"voice": self.talker.voice, "idle_seconds": self.talker.idle.timeout,
+                      "session_cap_usd": self.talker.budget.pots[0].cap_usd} if self.talker else {}))
         self.timer = asyncio.create_task(self.expire())
 
     async def expire(self):
-        await asyncio.sleep(MAX_SECONDS)
+        await asyncio.sleep(self.max_seconds)
         self.emit("time_limit")
-        await self.close()
+        await self.close(reason="time_limit")
 
-    async def close(self):
+    async def close(self, reason: str = "ended"):
         if self.closed:
             return
         self.closed = True
+        self.emit("closing", reason=reason)
         if self.timer and self.timer is not asyncio.current_task():
             self.timer.cancel()
         if self.session:
             # Stop cancellable dummy work; no durable jobs are created here.
+            # For Gemini this closes the provider session: all paid work stops here.
             self.session.shutdown(drain=False)
             await self.session.aclose()
+        if self.talker:
+            for task in list(self.talker.tasks):
+                if task is not asyncio.current_task():
+                    task.cancel()
+            await self.talker.finish(self.room, reason)
         if hasattr(self, "pipeline"):
             for event in self.pipeline.provider_usage:
                 self.emit("provider_usage", **event)
@@ -232,10 +277,11 @@ call_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app):
-    for name in (".livekit.env", ".voice.env"):
+    for name in (".livekit.env", ".voice.env", ".keys.env"):
         load_dotenv(Path.home() / ".narada" / name, override=False)
-    missing = [k for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "OPENAI_API_KEY")
-               if not os.getenv(k)]
+    missing = [k for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET") if not os.getenv(k)]
+    if not available_modes():
+        missing.append("OPENAI_API_KEY or GOOGLE_API_KEY")
     if missing:
         raise RuntimeError("Missing configuration: " + ", ".join(missing))
     yield
@@ -271,10 +317,7 @@ async def client_js():
 
 @app.get("/health")
 async def health():
-    modes = ["semantic", "server"]
-    if hasattr(openai.realtime, "GPTLiveModel"):
-        modes.append("live")
-    return {"experiment": "voice-lab", "model": MODEL, "modes": modes,
+    return {"experiment": "voice-lab", "model": MODEL, "modes": available_modes(),
             "active": sum(not c.closed for c in calls.values())}
 
 
@@ -283,12 +326,16 @@ async def create_call(settings: Settings):
     async with call_lock:
         if any(not c.closed for c in calls.values()):
             raise HTTPException(409, "End the current test before starting another")
-        call = Call(settings.mode)
+        if settings.mode not in available_modes():
+            raise HTTPException(400, f"Mode {settings.mode!r} is not configured on this server")
+        call = Call(settings.mode, settings)
         calls[call.id] = call
         try:
             await asyncio.wait_for(call.start(), 25)
-        except Exception:
-            await call.close()
+        except Exception as exc:
+            await call.close(reason="start_failed")
+            if type(exc).__name__ == "BudgetRefused":
+                raise HTTPException(402, "Voice budget reached; no paid session was opened") from None
             raise
         return {"id": call.id, "url": os.environ["LIVEKIT_URL"],
                 "token": call.token(call.identity), "model": call.model_name, "mode": settings.mode}

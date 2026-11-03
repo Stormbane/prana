@@ -8,10 +8,10 @@ h1{font-size:36px;letter-spacing:-1px;margin-bottom:0}p{margin-top:8px}button,se
 <h1>Narada voice lab</h1>
 <p>A fresh conversation. Try a pause, interrupt a story, or talk while a lookup runs.</p>
 <label for="mode">Voice setting</label>
-<select id="mode"><option value="live" hidden>GPT-Live · continuous conversation</option><option value="semantic" selected>Realtime mini · patient</option><option value="server">Realtime mini · 700 ms silence</option></select>
+<select id="mode"><option value="live" hidden>GPT-Live · continuous conversation</option><option value="semantic" selected>Realtime mini · patient</option><option value="server">Realtime mini · 700 ms silence</option><option value="gemini" hidden>Gemini Live · Narada talker</option></select>
 <div><button id="start">Start listening test</button><button id="stop" disabled>End test</button><button id="mute" disabled>Mute mic</button></div>
 <p id="state" role="status">Ready</p>
-<small>Uses hosted OpenAI speech. Microphone audio goes to OpenAI; test transcripts are saved locally. Each call ends after five minutes. Headphones help isolate conversation timing from speaker echo.</small>
+<small>Uses hosted OpenAI speech, or Google for the Gemini talker. Microphone audio goes to that provider; test transcripts are saved locally. Each call ends after five minutes. Headphones help isolate conversation timing from speaker echo.</small>
 <details open><summary>Things to try</summary><ol>
 <li>“I was thinking …” Pause mid-thought, then continue.</li>
 <li>“Tell me a long story.” Interrupt with “Wait, make it about a mango.”</li>
@@ -24,8 +24,8 @@ h1{font-size:36px;letter-spacing:-1px;margin-bottom:0}p{margin-top:8px}button,se
 <script src="/client.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-let room=null, callId=null, timer=null, cursor=-1, muted=false, ending=false;
-fetch('/health').then(r=>r.json()).then(h=>{if(h.modes?.includes('live')){document.querySelector('option[value="live"]').hidden=false;$('mode').value='live';}}).catch(()=>{});
+let room=null, callId=null, timer=null, cursor=-1, muted=false, ending=false, endNote='';
+fetch('/health').then(r=>r.json()).then(h=>{if(h.modes?.includes('live')){document.querySelector('option[value="live"]').hidden=false;$('mode').value='live';}if(h.modes?.includes('gemini')){document.querySelector('option[value="gemini"]').hidden=false;}}).catch(()=>{});
 function line(text){$('transcript').textContent+=text+'\n\n';$('transcript').scrollTop=$('transcript').scrollHeight;}
 async function poll(){
   if(!callId)return;
@@ -38,6 +38,9 @@ async function poll(){
       if(e.kind==='conversation'&&e.text)line(`${e.role==='user'?'You':'Narada'}: ${e.text}${e.interrupted?' [interrupted]':''}`);
       if(e.kind==='agent_state')$('state').textContent=e.state;
       if(e.kind==='error')$('state').textContent=`Speech error: ${e.error_type}`;
+      if(e.kind==='cap_reached')endNote='the voice budget for this test was reached';
+      if(e.kind==='idle_timeout')endNote=`no speech for ${e.seconds} seconds`;
+      if(e.kind==='time_limit')endNote='time limit reached';
       $('events').textContent+=JSON.stringify(e)+'\n';
     }
     if(data.closed)await end();
@@ -48,7 +51,7 @@ async function end(){
   ending=true;clearInterval(timer);timer=null;
   const id=callId;callId=null;
   try{if(room){const r=room;room=null;await r.disconnect();}if(id)await fetch(`/calls/${id}`,{method:'DELETE'});}
-  finally{$('start').disabled=false;$('mode').disabled=false;$('stop').disabled=true;$('mute').disabled=true;$('state').textContent='Test ended';ending=false;}
+  finally{$('start').disabled=false;$('mode').disabled=false;$('stop').disabled=true;$('mute').disabled=true;$('state').textContent=endNote?`Test ended: ${endNote}`:'Test ended';endNote='';ending=false;}
 }
 $('start').onclick=async()=>{
   $('start').disabled=true;$('mode').disabled=true;$('state').textContent='Connecting…';
