@@ -63,8 +63,10 @@ def main(argv: list[str] | None = None) -> int:
                                probes.paths.doctor_json.with_name("doctor-digest.json"),
                                probes.paths.narada, today)
         print(f"digest: {note}", file=sys.stderr)
-        if rc:
-            return 3  # delivery failed: the scheduled task's result tells the truth
+        # The task's result reports delivery, not health: exiting 2 for
+        # "something is red" would make the scheduled_tasks check flag
+        # this task whenever the digest did its job.
+        return 3 if rc else 0
     return report.exit_code()
 
 

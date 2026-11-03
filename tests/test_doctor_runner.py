@@ -241,6 +241,19 @@ def test_send_digest_failure_leaves_state_for_a_retry(tmp_path):
     assert rc == 1 and "exited 1" in note and not state.exists()
 
 
+def test_cli_send_digest_exit_code_reports_delivery_not_health(monkeypatch):
+    """Red is the digest's job; the scheduled task must read 0 when it
+    delivered, and 3 only when delivery failed."""
+    from prana.doctor import send
+    fp = healthy_world()
+    fp.put(fp.paths.push_subs, "{}")
+    monkeypatch.setattr(cli, "Probes", lambda: fp)
+    monkeypatch.setattr(send, "send_digest", lambda *a, **k: (0, "digest sent"))
+    assert cli.main(["--send-digest"]) == 0
+    monkeypatch.setattr(send, "send_digest", lambda *a, **k: (1, "notify_suti exited 1"))
+    assert cli.main(["--send-digest"]) == 3
+
+
 def test_send_digest_nothing_red_sends_nothing(tmp_path):
     from datetime import date
     from prana.doctor import send
