@@ -51,6 +51,8 @@ src/prana/
                   behind an OpenAI-compatible /v1/chat/completions on
                   127.0.0.1:8811; per-session warm Agent SDK clients,
                   bearer-token tiers, frozen turn contract (spec §1a)
+  doctor/       — `narada doctor`: read-only green/amber/red checks over
+                  every piece (python scripts/doctor.py; docs/doctor.md)
   spawn.py      — hardened subprocess wrappers (shared: bridge + heartbeat)
   host/         — orchestrator behind the Narada_Host task: supervisor,
                   components.yaml registry, lockfile, log, install CLI
