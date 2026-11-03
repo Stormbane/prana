@@ -1,0 +1,180 @@
+# Isolated voice lab
+
+September 11, 2026. Suti's scope: evaluate natural voice independently of
+continuity and initiative, with **no speech model on the RTX 3090**.
+
+This experiment uses self-hosted LiveKit transport, the OSS LiveKit Agents
+framework, and hosted OpenAI Realtime speech. Only a dummy lookup is exposed.
+There are no imports from prana, no memory reads/writes, no real tools, and no
+brain, heartbeat, notification, or initiative integration. A fresh call starts
+with a short fixed character prompt and empty conversation history.
+
+## GPT-Live-1 API release
+
+Research update September 11: OpenAI's [API changelog](https://developers.openai.com/api/docs/changelog)
+confirms `gpt-live-1` general availability on September 10. Our existing API
+account can run actual GPT-Live audio sessions. The isolated LiveKit 1.8.1
+environment now serves a three-mode comparison at **http://localhost:8899**.
+The first GPT-Live audio run answered during a lookup and delivered its result;
+see [RESULTS.md](RESULTS.md). Human listening remains unscored.
+
+GPT-Live supports simultaneous listening/speaking and a separately selected
+backend. [Client delegation](https://developers.openai.com/api/docs/guides/live-delegation)
+can use our own code or model; a dummy backend therefore preserves this lab's
+isolation from continuity and initiative. Delegation events carry metadata,
+not parsed tool arguments, so the adapter must retain current transcripts.
+
+The [LiveKit adapter](https://docs.livekit.io/agents/models/realtime/plugins/gpt-live/)
+is `GPTLiveModel`; its guide specifies `livekit-agents[openai]~=1.8`. The current
+1.6.8 installation lacks that implementation. The `.venv-live` environment is
+separate from production. Changing `VOICE_LAB_MODEL` alone will not migrate this Realtime
+lab to the new Live API. Turn control and event assertions also need adapting.
+
+[Voice pricing](https://developers.openai.com/api/docs/models/gpt-live-1) is
+US$0.05 per session minute, billed per second, plus backend model/tool usage:
+US$0.25 for five minutes or US$3 for an hour before backend charges.
+
+Recommendation: prioritize this native full-duplex comparison before spending
+more effort approximating its behavior with Realtime VAD settings. Retain the
+current baseline, synthetic fixtures, and no-3090/no-cognition scope.
+
+## OSS options and choice
+
+| Project | Relevant implementation | Fit for this experiment |
+|---|---|---|
+| [LiveKit Agents](https://github.com/livekit/agents) | Realtime audio transport, provider plugins, turn/interruption handling and asynchronous tools | First choice: already installed, same media transport as phone and BOX |
+| [Pipecat](https://github.com/pipecat-ai/pipecat) | Composable audio pipelines, multiple speech providers, interruption handling and asynchronous function calls | Good second framework to compare if the LiveKit experiment exposes a limitation |
+| [LangChain voice demo](https://github.com/langchain-ai/voice-demo) | Reference implementations sharing a console across LiveKit, OpenAI Realtime and Google ADK Live | Useful examples; not a reason to add another framework or tracing service |
+
+LiveKit's [async-tool API](https://docs.livekit.io/agents/logic/tools/async/)
+releases a tool after its first `RunContext.update()`, then delivers its final
+result after the agent becomes idle. Its cancellation flag exposes cancellation
+tools. `AsyncToolset` is only needed for surviving an agent handoff; this lab has
+one agent, so ordinary function tools suffice.
+
+Pipecat provides [asynchronous calls](https://docs.pipecat.ai/pipecat/learn/function-calling)
+through `cancel_on_interruption=False`, plus progress updates and optional
+model-controlled cancellation. Both libraries supply conversation plumbing;
+neither alone recreates ChatGPT's proprietary speech model. Hosted inference
+removes the local GPU requirement, but it still requires network access and
+API usage. No framework swap is assumed to improve voice quality by itself.
+
+## Run
+
+From `C:\Projects\prana`:
+
+```powershell
+uv venv --python python experiments/voice-lab/.venv-live
+uv pip install --python experiments/voice-lab/.venv-live/Scripts/python.exe -r experiments/voice-lab/requirements-live.lock
+$env:VOICE_LAB_PORT='8899'
+experiments/voice-lab/.venv-live/Scripts/python.exe -X utf8 experiments/voice-lab/lab.py
+```
+
+Skip environment creation/install when `.venv-live` already exists. Port 8899
+is already running for the listening trial. The original Python environment
+and port 8898 still provide the earlier Realtime-only experiment.
+
+The current Python environment already has the dependencies. For a separate
+environment, install `experiments/voice-lab/requirements.txt`; the LiveKit
+server and browser-client asset are still required as described below.
+
+Open **http://localhost:8899** on this computer. Start the listening test,
+allow the microphone, and speak. Headphones are preferable for the first
+comparison. This is a desktop localhost lab, not a deployed phone endpoint.
+
+The server reads existing configuration from `~/.narada/.livekit.env` and
+`~/.narada/.voice.env`: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
+`OPENAI_API_KEY`. It serves the already-installed LiveKit browser client from
+`../narada-phone-app/node_modules/livekit-client/dist/livekit-client.umd.js`.
+Set `VOICE_LAB_CLIENT_JS` if that asset lives elsewhere. Keys never go to the
+browser; its short-lived token is restricted to its unique test room.
+
+Speech model defaults to `gpt-realtime-2.1-mini`, voice `cedar`. To test another
+available Realtime model, set `VOICE_LAB_MODEL` before starting the lab.
+Change one factor per comparison. No production configuration is read for
+the voice profile, and production workers are not restarted or modified.
+
+One call is allowed at a time, with a five-minute limit. End test or close the
+page to disconnect. The process can remain idle without an open model session;
+Ctrl+C stops it when launched in a terminal. No scheduled task is installed.
+Test rooms use the `akhada-phone-voice-lab-` prefix, which the existing BOX
+worker explicitly declines. The lab joins directly as its own agent and does
+not register an automatic worker or dispatch the production phone worker.
+
+## Compare
+
+The new environment provides three settings:
+
+- **GPT-Live:** native continuous conversation, `gpt-live-1`, voice `marin`,
+  short delegation prompt and a deterministic dummy backend.
+- **Patient:** semantic VAD, low eagerness; assesses whether the thought ended.
+- **Baseline:** server VAD, threshold 0.65 and 700 ms silence.
+
+The two Realtime modes use `cedar`; GPT-Live does not offer that voice. This is
+a stack comparison with different prompts and voices, not a controlled test
+of the speech model alone. Both Realtime modes allow speech interruption and use near-field noise reduction. OpenAI
+documents the [difference between these endpoint strategies](https://developers.openai.com/api/docs/guides/realtime-vad).
+These are turn-based Realtime settings, not a claim of GPT-Live full duplex.
+
+Repeat these in each mode, reversing order on the second pass:
+
+| Test | Prompt / action | What to judge |
+|---|---|---|
+| Hesitation | “I was thinking…” Pause, then finish the thought | Does it jump in or wait too long? |
+| Correction | Ask for a story, then speak over it to change the subject | Does it stop promptly and follow the correction? |
+| Backchannel | Say a quiet “mm-hm” while it speaks | Does it mistake agreement for a new turn? |
+| Concurrent work | Start a slow lookup; ask another question before it ends | Does it answer, then return naturally with the result? |
+| Failure | “Start a failing lookup” | Does it explicitly report failure after ten seconds? |
+| Cancellation | Start a slow lookup, then “Cancel that lookup” | Does the tool stop and stay stopped? |
+
+The success fixture takes 30 seconds and returns “mango seven.” The failing
+fixture raises a tool error after ten seconds. They perform no external work.
+Backchannels are a listening test only; this lab adds no canned “uh-huh” loop.
+
+Score each mode 1–5 for patience, interruption recovery, conversational rhythm
+and voice preference. Note cut-offs, dead air, repeated acknowledgments and
+unwanted interruptions. Synthetic checks do not substitute for this judgment.
+
+## Automated audio test
+
+The bounded GPT-Live/current-mini comparison uses the new server at 8899:
+
+```powershell
+experiments/voice-lab/.venv-live/Scripts/python.exe -X utf8 experiments/voice-lab/compare.py --mode live
+experiments/voice-lab/.venv-live/Scripts/python.exe -X utf8 experiments/voice-lab/compare.py --mode semantic
+```
+
+It sends the same cached utterances, keeps silence flowing between speech,
+waits for the 30-second lookup, and captures final provider usage on close.
+`transport_passed` only verifies nonzero returned audio; inspect transcripts
+for task correctness. Failure/cancellation/barge-in are not covered by this
+short comparison. Each run normally costs a few US cents.
+
+With the lab server running:
+
+```powershell
+python -X utf8 experiments/voice-lab/smoke.py --mode semantic
+python -X utf8 experiments/voice-lab/smoke.py --mode server
+```
+
+This uses hosted TTS to create and cache synthetic user utterances, publishes
+them as a microphone track over real WebRTC, and records returned audio. It
+checks an answer before tool completion, spoken final result, affirmative
+failure reporting after the framework confirms final-result playback,
+explicit cancellation and interruption of a story. It
+never opens the computer's microphone. A fresh run normally takes about two
+minutes plus fixture generation. It uses the existing OpenAI API account.
+
+`output/` is git-ignored. It contains per-call JSONL events, smoke-test JSON
+reports, synthetic PCM fixtures and returned WAV audio. Browser tests save
+transcripts and events, not microphone recordings. No test data goes to smriti.
+Summary findings are in [RESULTS.md](RESULTS.md).
+
+## What this establishes
+
+A successful run demonstrates the media and in-session tool paths. It does
+not prove ChatGPT parity, human preference, speaker echo handling, robust
+backchannel discrimination, phone/BOX quality, long-call stability, or recovery
+of work after process death. Those are distinct tests. The next decision is
+whether Suti prefers the timing of this isolated conversation, before any
+production integration or continuity work.
