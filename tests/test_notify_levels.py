@@ -325,3 +325,18 @@ def test_an_error_still_goes_to_both(monkeypatch):
     r = push.notify(body="voice worker down", level="error", source="host",
                     webpush_fn=lambda **kw: None, telegram_fn=lambda t: tg.append(t) or True)
     assert r["push"]["sent"] == 1 and tg == ["voice worker down"]
+
+
+def test_every_subscription_expired_is_no_device_and_the_fallback_retries(monkeypatch):
+    """Codex review: all 404/410 was recorded push=True; with Telegram also
+    failing, a retry then skipped the fallback for good."""
+    monkeypatch.setattr(push, "_push_all",
+                        lambda *a, **k: {"sent": 0, "failed": 0, "dropped": 1})
+    first = push.notify(body="Lunch?", level="message", source="akhada-checkin",
+                        event_id="exp-1", telegram_fn=lambda _t: False)
+    assert first["telegram"] is False
+    assert push.read_notifications()[-1]["delivered"]["push"] == "no_devices"
+    tg = []
+    push.notify(body="Lunch?", level="message", source="akhada-checkin",
+                event_id="exp-1", telegram_fn=lambda t: tg.append(t) or True)
+    assert tg == ["Lunch?"]

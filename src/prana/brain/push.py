@@ -454,9 +454,11 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
             # push=True for a month while push-subs.json was empty). It is
             # recorded distinctly — not False, so a later subscribe does
             # not replay a month of stale alarms on retry.
-            if not (result["push"].get("sent") or result["push"].get("failed")
-                    or result["push"].get("dropped")):
-                logger.warning("push: no subscribed devices — %r went nowhere", title)
+            if not (result["push"].get("sent") or result["push"].get("failed")):
+                # No device at all, or every subscription had expired (404/410,
+                # dropped): either way nothing arrived. Recording True here
+                # made a retry skip a message's Telegram fallback (Codex review).
+                logger.warning("push: no live subscribed devices — %r went nowhere", title)
                 outcomes["push"] = "no_devices"
             else:
                 outcomes["push"] = int(result["push"].get("failed", 0)) == 0
