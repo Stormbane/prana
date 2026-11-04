@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Narada voice lab</title>
+<style>
+body{font:17px/1.55 system-ui,sans-serif;max-width:800px;margin:50px auto;padding:0 24px;background:#f6f3e9;color:#293a32}
+h1{font-size:36px;letter-spacing:-1px;margin-bottom:0}p{margin-top:8px}button,select{font:inherit;padding:10px 16px;margin:5px 8px 5px 0;border:1px solid #768779;border-radius:8px;background:#fffef8;color:inherit}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}#start{background:#294f3e;color:white}#state{font-weight:650}#transcript{white-space:pre-wrap;background:#fffef8;padding:18px;border-radius:12px;min-height:140px;max-height:340px;overflow:auto}details{margin:20px 0}li{margin:6px 0}small{color:#56655c}audio{display:none}
+</style>
+<h1>Narada voice lab</h1>
+<p>A fresh conversation. Try a pause, interrupt a story, or talk while a lookup runs.</p>
+<label for="mode">Voice setting</label>
+<select id="mode"><option value="live" hidden>GPT-Live · continuous conversation</option><option value="semantic" selected>Realtime mini · patient</option><option value="server">Realtime mini · 700 ms silence</option><option value="gemini" hidden>Gemini Live · Narada talker</option></select>
+<div><button id="start">Start listening test</button><button id="stop" disabled>End test</button><button id="mute" disabled>Mute mic</button></div>
+<p id="state" role="status">Ready</p>
+<small>Uses hosted OpenAI speech, or Google for the Gemini talker. Microphone audio goes to that provider; test transcripts are saved locally. Each call ends after five minutes. Headphones help isolate conversation timing from speaker echo.</small>
+<details open><summary>Things to try</summary><ol>
+<li>“I was thinking …” Pause mid-thought, then continue.</li>
+<li>“Tell me a long story.” Interrupt with “Wait, make it about a mango.”</li>
+<li>“Start a slow lookup.” While it runs, ask “What is twelve times thirteen?” Then wait for the result.</li>
+<li>“Start a failing lookup.” It should explain the failure.</li>
+<li>“Start a slow lookup.” Then “Cancel that lookup.” It should stay cancelled.</li>
+</ol></details>
+<div id="transcript" role="log" aria-label="Conversation transcript"></div>
+<details><summary>Test events</summary><pre id="events"></pre></details>
+<script src="/client.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let room=null, callId=null, timer=null, cursor=-1, muted=false, ending=false, endNote='';
+fetch('/health').then(r=>r.json()).then(h=>{if(h.modes?.includes('live')){document.querySelector('option[value="live"]').hidden=false;$('mode').value='live';}if(h.modes?.includes('gemini')){document.querySelector('option[value="gemini"]').hidden=false;}}).catch(()=>{});
+function line(text){$('transcript').textContent+=text+'\n\n';$('transcript').scrollTop=$('transcript').scrollHeight;}
+async function poll(){
+  if(!callId)return;
+  try{
+    const res=await fetch(`/calls/${callId}/events?after=${cursor}`);
+    if(!res.ok)throw Error('Could not read test status');
+    const data=await res.json();
+    for(const e of data.events){
+      cursor=e.seq;
+      if(e.kind==='conversation'&&e.text)line(`${e.role==='user'?'You':'Narada'}: ${e.text}${e.interrupted?' [interrupted]':''}`);
+      if(e.kind==='agent_state')$('state').textContent=e.state;
+      if(e.kind==='error')$('state').textContent=`Speech error: ${e.error_type}`;
+      if(e.kind==='cap_reached')endNote='the voice budget for this test was reached';
+      if(e.kind==='idle_timeout')endNote=`no speech for ${e.seconds} seconds`;
+      if(e.kind==='time_limit')endNote='time limit reached';
+      $('events').textContent+=JSON.stringify(e)+'\n';
+    }
+    if(data.closed)await end();
+  }catch(e){$('state').textContent=e.message;}
+}
+async function end(){
+  if(ending)return;
+  ending=true;clearInterval(timer);timer=null;
+  const id=callId;callId=null;
+  try{if(room){const r=room;room=null;await r.disconnect();}if(id)await fetch(`/calls/${id}`,{method:'DELETE'});}
+  finally{$('start').disabled=false;$('mode').disabled=false;$('stop').disabled=true;$('mute').disabled=true;$('state').textContent=endNote?`Test ended: ${endNote}`:'Test ended';endNote='';ending=false;}
+}
+$('start').onclick=async()=>{
+  $('start').disabled=true;$('mode').disabled=true;$('state').textContent='Connecting…';
+  $('transcript').textContent='';$('events').textContent='';cursor=-1;muted=false;$('mute').textContent='Mute mic';
+  try{
+    // Request the mic before creating a paid model session.
+    const permission=await navigator.mediaDevices.getUserMedia({audio:true});permission.getTracks().forEach(t=>t.stop());
+    const res=await fetch('/calls',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:$('mode').value})});
+    if(!res.ok)throw Error((await res.json()).detail||'Could not start test');
+    const data=await res.json();callId=data.id;
+    room=new LivekitClient.Room({adaptiveStream:true});
+    room.on(LivekitClient.RoomEvent.TrackSubscribed,track=>{if(track.kind==='audio')document.body.appendChild(track.attach());});
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed,track=>track.detach().forEach(el=>el.remove()));
+    room.on(LivekitClient.RoomEvent.Disconnected,()=>{if(!ending)void end();});
+    await room.connect(data.url,data.token);await room.startAudio();await room.localParticipant.setMicrophoneEnabled(true);
+    $('state').textContent=`Listening · ${data.model}`;$('stop').disabled=false;$('mute').disabled=false;
+    timer=setInterval(poll,700);await poll();
+  }catch(e){await end();$('state').textContent=e.message;}
+};
+$('stop').onclick=end;
+$('mute').onclick=async()=>{try{muted=!muted;await room.localParticipant.setMicrophoneEnabled(!muted);$('mute').textContent=muted?'Unmute mic':'Mute mic';}catch(e){$('state').textContent=e.message;}};
+window.addEventListener('pagehide',()=>{if(callId)fetch(`/calls/${callId}`,{method:'DELETE',keepalive:true});});
+</script></html>
