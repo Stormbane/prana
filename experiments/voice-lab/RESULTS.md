@@ -1,5 +1,32 @@
 # Voice lab results
 
+## Gemini Live talker, paid smoke, November 4, 2026: passed, $0.043
+
+`smoke_gemini.py`, run with the shared trial ledger and the fixed cost guard
+(reviewed fail-closed; see the git log of 2026-11-04). Report:
+`output/smoke-gemini-20261104-124251.json`. Synthetic WebRTC audio on this
+PC through the local LiveKit server, not the phone route.
+
+- **Spend:** $0.043 in all, against a $0.50 cap: session A $0.0253, session
+  B $0.0040, the three spoken fixtures (rendered with Gemini TTS, since
+  OpenAI's credit is empty) and the closing clip. All of it is in
+  `~/.narada/voice/gemini-trial-ledger.json` (11 entries).
+- **Usage reports arrive on 3.8 Live, one per reply:** 5 reports for 5
+  replies in session A, so nothing was charged at a ceiling. Only $0.0011
+  of trailing microphone silence was charged at close (sent after the
+  last reply, until the 15 s idle timeout).
+- **The cap works mid-session (B):** the $0.012 cap stopped paid work after
+  the first turn ($0.0040; the next turn's ceiling no longer fitted), and
+  the free closing clip played.
+- **Conversation (A):** all checks passed. It answered the arithmetic
+  ("Four."), was interrupted mid-story and then said "Mango.", recorded
+  the cut reply as interrupted (61 of 140 generated characters played),
+  and closed on the idle timeout.
+- **Latency, end of speech to first audio:** 782–1391 ms at the server
+  (5 samples in A, 1 in B), and 1109–1297 ms at the client.
+- The replies used the lab's test brief, not Narada's identity, so they say
+  nothing about character.
+
 ## Gemini Live talker, November 3, 2026: built, paid smoke not yet run
 
 `~/.narada/.keys.env` has no `GOOGLE_API_KEY` yet, so **nothing has been

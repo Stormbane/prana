@@ -81,18 +81,32 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+FIXTURE_USD_EACH = 0.001   # one short sentence on gemini-3.8-flash-tts, rounded up
+
+
 async def fixtures() -> dict[str, bytes]:
-    from openai import AsyncOpenAI
+    """Suti's lines as 24 kHz mono s16le, cached by text. Missing ones are
+    rendered with Gemini TTS on the same key (OpenAI's credit has been
+    empty since 2026-09-14), each recorded in the trial ledger."""
     OUTPUT.mkdir(exist_ok=True)
     clips = {}
-    async with AsyncOpenAI() as client:
-        for key, phrase in PHRASES.items():
-            path = OUTPUT / f"fixture-{hashlib.sha256(phrase.encode()).hexdigest()[:12]}.pcm"
-            if not path.exists():
-                response = await client.audio.speech.create(
-                    model="gpt-4o-mini-tts", voice="alloy", input=phrase, response_format="pcm")
-                path.write_bytes(response.content)
-            clips[key] = path.read_bytes()
+    client = None
+    for key, phrase in PHRASES.items():
+        path = OUTPUT / f"fixture-{hashlib.sha256(phrase.encode()).hexdigest()[:12]}.pcm"
+        if not path.exists():
+            from google import genai
+            from google.genai import types
+            from gemini_adapter import api_key
+            client = client or genai.Client(api_key=api_key())
+            response = await client.aio.models.generate_content(
+                model="gemini-3.8-flash-tts", contents=f"Say plainly: {phrase}",
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=DEFAULT_VOICE)))))
+            path.write_bytes(response.candidates[0].content.parts[0].inline_data.data)
+            Ledger(trial_ledger_path()).add(f"fixture-{key}", FIXTURE_USD_EACH, "fixture")
+        clips[key] = path.read_bytes()
     return clips
 
 
