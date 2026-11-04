@@ -28,6 +28,9 @@ OUTPUT = HERE / "output"
 # One trial ledger for every checkout and process (Codex review, 2026-11-04:
 # a ledger in each checkout's output/ gave each its own full budget).
 LEDGER_PATH = trial_ledger_path()
+# Spend this process could not write to the ledger even at close (Codex
+# review): the next call must record it before it may spend anything.
+_UNRECORDED = {"usd": 0.0}
 MODEL = os.getenv("VOICE_LAB_GEMINI_MODEL", DEFAULT_MODEL)
 VOICE = os.getenv("VOICE_LAB_GEMINI_VOICE", DEFAULT_VOICE)
 # Interim caps from the plan until Suti sets his own: <= $0.50 a session, trials <= $5.
@@ -111,7 +114,11 @@ class GeminiTalker:
         self.instructions = instructions()
         self.max_seconds = min(max_seconds, MAX_SECONDS)
         self.ledger = Ledger(LEDGER_PATH)
+        self.unrecorded_usd = 0.0
         try:
+            if _UNRECORDED["usd"] > 0:  # an earlier call's spend comes first
+                self.ledger.add(call.id, _UNRECORDED["usd"], "late")
+                _UNRECORDED["usd"] = 0.0
             trial_spent = self.ledger.spent()
         except LedgerError as exc:  # never read an untrustworthy total as $0
             raise BudgetRefused(f"Budget refused: {exc}") from None
@@ -224,6 +231,8 @@ class GeminiTalker:
             self.trial.spent_usd = self.ledger.add(self.call.id, usd, kind)
             return True
         except (LedgerError, OSError) as exc:
+            # Kept, not dropped: close retries it (Codex review).
+            self.unrecorded_usd += usd
             # `entry`, not `kind`: emit's own first argument is the kind.
             self.call.emit("ledger_write_failed", entry=kind, usd=round(usd, 6),
                            error=type(exc).__name__)
@@ -282,7 +291,11 @@ class GeminiTalker:
         # Usage was recorded report by report; this adds only what was
         # billed without a report (a reply cut off by the close).
         charged = self.guard.close()
-        self._record(charged, "close")
+        # Retry anything a failed write left over, together with the close.
+        owed, self.unrecorded_usd = self.unrecorded_usd + charged, 0.0
+        if not self._record(owed, "close"):
+            _UNRECORDED["usd"] += self.unrecorded_usd   # the next call records it first
+            self.unrecorded_usd = 0.0
         self.transcript.finish()
         if reason == "cap":
             await self._play_closing(room)
@@ -291,6 +304,9 @@ class GeminiTalker:
             "stage": 1, "call_id": self.call.id, "model": self.model_name, "voice": self.voice,
             "reason": reason, "cost_usd": round(self.guard.actual_usd, 6),
             "charged_unreported_usd": round(self.guard.charged_at_close, 6),
+            "charged_unreported_replies_usd": round(self.guard.charged_replies_at_close, 6),
+            "charged_trailing_audio_usd": round(self.guard.charged_audio_at_close, 6),
+            "unrecorded_usd": round(_UNRECORDED["usd"], 6),
             "replies_started": len(self.guard.seen),
             "turn_ceiling_usd": round(self.guard.turn_ceiling(), 6),
             "unreconciled_ceiling_usd": round(self.reserved_at_close, 6),

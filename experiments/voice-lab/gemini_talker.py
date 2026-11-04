@@ -312,6 +312,8 @@ class CostGuard:
         self.audio: list[Reservation] = []
         self.actual_usd = 0.0
         self.charged_at_close = 0.0
+        self.charged_replies_at_close = 0.0   # replies started, never reported
+        self.charged_audio_at_close = 0.0     # mic audio sent after the last report
         self.reports = 0
         self.audio_seconds_admitted = 0.0
         self.audio_seconds_refused = 0.0
@@ -422,9 +424,13 @@ class CostGuard:
         if not self.stopped:
             self.stopped = "closed"
         owed = list(self.started.values()) + self.audio
-        charged = sum(r.usd for r in owed)
+        replies = sum(r.usd for r in self.started.values())
+        audio = sum(r.usd for r in self.audio)
+        charged = replies + audio
         for r in owed:
             self.budget.settle(r, actual_usd=r.usd)
+        self.charged_replies_at_close += replies
+        self.charged_audio_at_close += audio
         if self.turn:
             self.budget.settle(self.turn)
         self.turn, self.audio, self.started = None, [], {}

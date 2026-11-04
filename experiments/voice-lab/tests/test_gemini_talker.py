@@ -332,3 +332,14 @@ def test_a_stale_lock_is_broken_and_a_live_one_times_out(tmp_path):
     lock.write_text("", encoding="utf-8")             # a live holder
     with pytest.raises(LedgerError):
         Ledger(path, lock_timeout=0.2).add("b", 0.01)
+
+
+def test_close_keeps_unreported_replies_and_trailing_audio_apart():
+    g, _ = guard(cap=0.50)
+    g.open()
+    g.on_generation("g1")
+    g.on_usage(usage(prompt_text=800, out_audio=100), "g1")   # every reply reported
+    g.admit_audio(2.0)                                         # then silence until the idle close
+    g.close()
+    assert g.charged_replies_at_close == 0
+    assert g.charged_audio_at_close == pytest.approx(g.audio_cost(2.0))

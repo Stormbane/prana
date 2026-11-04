@@ -35,6 +35,7 @@ class FakeCall:
 def _ledger_in_tmp(tmp_path, monkeypatch):
     """No test may touch the real trial ledger in ~/.narada."""
     monkeypatch.setattr(gemini_adapter, "LEDGER_PATH", tmp_path / "gemini-ledger.json")
+    monkeypatch.setitem(gemini_adapter._UNRECORDED, "usd", 0.0)
 
 
 @pytest.fixture
@@ -301,3 +302,57 @@ def test_a_ledger_that_cannot_be_written_stops_the_call(out, monkeypatch):
     talker.on_usage("g1", _usage())
     assert talker.guard.stopped == "ledger"
     assert any(e["kind"] == "ledger_write_failed" for e in call.events)
+
+
+def test_a_failed_ledger_write_is_retried_at_close(out, monkeypatch):
+    async def scenario():
+        call = FakeCall()
+        talker = GeminiTalker(call)
+        talker.open()
+        real_add, fails = talker.ledger.add, [1]
+
+        def flaky(*a, **k):
+            if fails:
+                fails.pop()
+                raise gemini_adapter.LedgerError("locked")
+            return real_add(*a, **k)
+        monkeypatch.setattr(talker.ledger, "add", flaky)
+        talker.on_usage("g1", _usage())           # the write fails; the call stops
+        reported = talker.guard.actual_usd
+        await talker.finish(None, "ledger")      # the retry succeeds
+        return talker, reported
+
+    talker, reported = asyncio.run(scenario())
+    recorded = gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).spent()
+    assert recorded == pytest.approx(reported + talker.guard.charged_at_close) and reported > 0
+    assert gemini_adapter._UNRECORDED["usd"] == 0
+
+
+def test_spend_still_unwritten_at_close_comes_before_the_next_call(out, monkeypatch):
+    async def first_call():
+        talker = GeminiTalker(FakeCall())
+        talker.open()
+
+        def down(*a, **k):
+            raise gemini_adapter.LedgerError("locked")
+        monkeypatch.setattr(talker.ledger, "add", down)
+        talker.on_usage("g1", _usage())
+        await talker.finish(None, "ledger")
+        return talker.guard.actual_usd
+
+    owed = asyncio.run(first_call())
+    assert gemini_adapter._UNRECORDED["usd"] == pytest.approx(owed) and owed > 0
+    talker = GeminiTalker(FakeCall())             # the ledger works again
+    assert talker.trial.spent_usd == pytest.approx(owed)
+    sessions = json.loads(gemini_adapter.LEDGER_PATH.read_text(encoding="utf-8"))["sessions"]
+    assert sessions[-1]["kind"] == "late" and gemini_adapter._UNRECORDED["usd"] == 0
+
+
+def test_the_next_call_refuses_while_earlier_spend_cannot_be_written(out, monkeypatch):
+    gemini_adapter._UNRECORDED["usd"] = 0.02
+
+    def down(self, *a, **k):
+        raise gemini_adapter.LedgerError("locked")
+    monkeypatch.setattr(gemini_adapter.Ledger, "add", down)
+    with pytest.raises(BudgetRefused):
+        GeminiTalker(FakeCall())

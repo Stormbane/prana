@@ -267,11 +267,16 @@ async def session_a(s: Session) -> None:
     # left for the close to charge at a ceiling (the guard's evidence that
     # usage reports arrive on 3.8 Live).
     s.report["checks"]["usage_reports_cover_replies"] = {
+        # Trailing mic silence after the last report is charged as audio,
+        # legitimately; only an unreported REPLY means reports went missing.
         "passed": summary["usage_reports"] >= summary["replies_started"] > 0
-                  and summary["charged_unreported_usd"] == 0
+                  and summary["charged_unreported_replies_usd"] == 0
+                  and summary["unrecorded_usd"] == 0
                   and summary["cost_usd"] <= SESSION_A["session_cap_usd"],
         "usage_reports": summary["usage_reports"], "replies_started": summary["replies_started"],
-        "charged_unreported_usd": summary["charged_unreported_usd"], "cost_usd": summary["cost_usd"]}
+        "charged_unreported_replies_usd": summary["charged_unreported_replies_usd"],
+        "charged_trailing_audio_usd": summary["charged_trailing_audio_usd"],
+        "cost_usd": summary["cost_usd"]}
     s.report["summary"] = summary
 
 
