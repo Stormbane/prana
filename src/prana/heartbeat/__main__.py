@@ -148,11 +148,16 @@ def main() -> None:
     else:
         print(f"Display: not reachable ({args.display_ip}) — running without display")
 
+    # The same configured address for weather as for the display (Codex
+    # review): ExpressionClient() alone would fall back to deha's default.
+    from prana.indriyas.karmendriyas.drishti.expression import ExpressionClient
+    expression = ExpressionClient(device_ip=args.display_ip) if args.display_ip else None
     daemon = HeartbeatDaemon(
         viveka=viveka,
         delegate=delegate,
         manifest=manifest,
         display=display,
+        expression=expression,
         interval=args.interval,
     )
 
