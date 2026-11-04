@@ -472,7 +472,8 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
     # device, now or on an earlier attempt. error and emergency still go
     # everywhere: Telegram works when the rest of Narada is down.
     if (row.get("level", level) in TELEGRAM_FALLBACK_ONLY and "telegram" in channels
-            and (int((result["push"] or {}).get("sent", 0)) > 0 or already.get("push") is True)):
+            and (int((result["push"] or {}).get("sent", 0)) > 0 or already.get("push") is True
+                 or "push" in set(delivered_channels))):
         channels.remove("telegram")
         result["channels"] = channels
         outcomes["telegram"] = "skipped"

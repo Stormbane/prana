@@ -340,3 +340,12 @@ def test_every_subscription_expired_is_no_device_and_the_fallback_retries(monkey
     push.notify(body="Lunch?", level="message", source="akhada-checkin",
                 event_id="exp-1", telegram_fn=lambda t: tg.append(t) or True)
     assert tg == ["Lunch?"]
+
+
+def test_a_push_the_producer_already_delivered_suppresses_telegram_too(monkeypatch):
+    """Codex recheck: delivered_channels=["push"] still reached Telegram."""
+    tg = []
+    r = push.notify(body="From the phone itself", level="message", source="app",
+                    delivered_channels=["push"], webpush_fn=lambda **kw: None,
+                    telegram_fn=lambda t: tg.append(t) or True)
+    assert tg == [] and r["push"] is None and "telegram" not in r["channels"]
