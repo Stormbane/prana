@@ -215,8 +215,12 @@ class Probes:
                  tailnet_base: str | None = None,
                  local_tz: tzinfo | None = None) -> None:
         self.paths = paths or Paths.default()
-        self.tailnet_base = tailnet_base if tailnet_base is not None else os.environ.get(
-            "NARADA_DOCTOR_TAILNET", "https://<machine>.<tailnet>.ts.net")
+        if tailnet_base is None:
+            # The machine's tailnet name is private (prana.site); "" reads
+            # as not configured, which the tailnet check reports amber.
+            from prana.site import load_site
+            tailnet_base = os.environ.get("NARADA_DOCTOR_TAILNET") or load_site().tailnet_url() or ""
+        self.tailnet_base = tailnet_base
         self.local_tz = local_tz or datetime.now().astimezone().tzinfo
         self._lock = threading.Lock()
         self._tasks: dict[str, TaskInfo] | None = None

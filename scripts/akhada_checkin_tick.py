@@ -30,9 +30,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 QUIET_START_H, QUIET_END_H = 4, 7  # ruled: 04:00-07:00 Brisbane
-TALK_URL = os.environ.get(
-    "AKHADA_TALK_URL",
-    "https://<machine>.<tailnet>.ts.net:8799/talk")
+def _talk_url() -> str | None:
+    """The akhada Talk page on this machine's tailnet name, which is private
+    (prana.site), or AKHADA_TALK_URL; None leaves the link out."""
+    if os.environ.get("AKHADA_TALK_URL"):
+        return os.environ["AKHADA_TALK_URL"]
+    from prana.site import load_site
+    base = load_site().tailnet_url(8799)
+    return f"{base}/talk" if base else None
 
 
 def _talk_page_up() -> bool:
@@ -148,8 +153,9 @@ def main() -> int:
     # claim_checkin can re-take).
     try:
         text = out["text"]
-        if _talk_page_up():
-            text += f"\nTalk: {TALK_URL}"
+        talk = _talk_url()
+        if talk and _talk_page_up():
+            text += f"\nTalk: {talk}"
         from prana.state.router import route_utterance
     except BaseException:
         release_checkin(store, out["slot"], out["day"])

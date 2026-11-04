@@ -21,7 +21,7 @@ agents; findings in smriti + session transcript).
 - **But old process management is still running in parallel:** `NaradaSupervisor`
   (old) is Running alongside `Narada_Host`, with `NaradaSupervisorWatchdog`,
   `NaradaHeartbeat`, `NaradaLogTail` still registered.
-- **BOX-3 is dark.** No ping at 192.168.0.35 (DHCP lease likely lost). Flashed
+- **BOX-3 is dark.** No ping at the BOX's LAN address (DHCP lease likely lost). Flashed
   firmware is an HA voice-satellite; "Host Not Found" = "no Home Assistant has
   connected to me." The HA-centric voice path is dead and not coming back.
 - **Toolchain present:** docker ✅, claude ✅, codex ✅. Missing: wezterm, kimi CLI.

@@ -241,7 +241,7 @@ class HeartbeatDaemon:
         self._running = False
 
     def _maybe_pull_weather(self) -> None:
-        """Pull current home weather and push to body if interval elapsed.
+        """Pull the home's current weather and push to body if interval elapsed.
 
         Fail-soft: any error logged at WARNING and the cycle continues. Weather
         is non-essential to cognition — missing a pull just means the visual

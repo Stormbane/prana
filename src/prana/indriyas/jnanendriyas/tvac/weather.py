@@ -1,7 +1,8 @@
-"""Open-Meteo weather fetcher for the body's physical location.
+"""Open-Meteo weather fetcher for the body's home.
 
-The body lives in the home's place (from the private site file). Open-Meteo is a
-free, no-auth weather API that serves current and forecast data directly
+The home's place comes from prana.site (the private site.json), never from
+this public repo; with no place configured there is no fetch. Open-Meteo is
+a free, no-auth weather API that serves current and forecast data directly
 from public weather model output. Polled by cognition every ~10 minutes
 and pushed to the body via ExpressionClient.set_weather().
 """
@@ -14,16 +15,13 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from deha.expression.layers import Weather
+from prana.site import Site, load_site
 
 logger = logging.getLogger(__name__)
 
-# The home's coordinates (private: the site file).
-HOME_LAT = 0.0
-HOME_LON = 0.0
-
-OPEN_METEO_URL = (
+OPEN_METEO = (
     "https://api.open-meteo.com/v1/forecast"
-    f"?latitude={HOME_LAT}&longitude={HOME_LON}"
+    "?latitude={lat}&longitude={lon}"
     "&current=temperature_2m,precipitation,weather_code,cloud_cover,"
     "wind_speed_10m,wind_direction_10m"
     "&timezone=Australia%2FBrisbane"
@@ -32,15 +30,25 @@ OPEN_METEO_URL = (
 DEFAULT_TIMEOUT = 10.0
 
 
-def fetch_home_weather(timeout: float = DEFAULT_TIMEOUT) -> Weather | None:
-    """Fetch current conditions for home from Open-Meteo.
+def open_meteo_url(site: Site | None = None) -> str | None:
+    """The forecast URL for the home's place, or None when none is configured."""
+    home = (site or load_site()).home
+    return OPEN_METEO.format(lat=home[0], lon=home[1]) if home else None
+
+
+def fetch_home_weather(timeout: float = DEFAULT_TIMEOUT, site: Site | None = None) -> Weather | None:
+    """Fetch current conditions at the home's place from Open-Meteo.
 
     Returns a Weather instance, or None if the fetch failed (network down,
-    API hiccup). Cognition should treat None as "keep last known weather"
-    and try again next cycle.
+    API hiccup) or no place is configured. Cognition should treat None as
+    "keep last known weather" and try again next cycle.
     """
+    url = open_meteo_url(site)
+    if url is None:
+        logger.info("No home place in the site file; no weather fetch.")
+        return None
     try:
-        with urlopen(OPEN_METEO_URL, timeout=timeout) as resp:
+        with urlopen(url, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (URLError, TimeoutError, json.JSONDecodeError) as e:
         logger.warning("Weather fetch failed: %s: %s", type(e).__name__, e)

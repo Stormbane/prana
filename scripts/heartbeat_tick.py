@@ -18,7 +18,8 @@ from prana.spawn import run_hidden
 
 SVAPNA_ROOT = Path("C:/Projects/svapna")
 LORA_PATH = "models/lora/latest"
-DISPLAY_IP = "192.168.0.35"
+# The body's LAN address is private: prana.site reads it from site.json.
+DISPLAY_IP = __import__("prana.site", fromlist=["load_site"]).load_site().box_ip
 
 
 def main() -> int:
@@ -34,7 +35,7 @@ def main() -> int:
         sys.executable, "-u", "-m", "prana.heartbeat",
         "--once",
         "--lora-path", LORA_PATH,
-        "--display-ip", DISPLAY_IP,
+        *(["--display-ip", DISPLAY_IP] if DISPLAY_IP else []),
     ]
 
     proc = run_hidden(

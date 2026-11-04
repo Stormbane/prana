@@ -30,7 +30,7 @@ services:
           # unreachable from the LAN) + a STUN-derived public IP (hairpin
           # NAT, unreliable) — LAN devices like the BOX-3 can then never
           # establish media and abort. Found via the box's connect loop.
-          node_ip: 192.168.0.20
+          node_ip: ${LIVEKIT_NODE_IP:?set LIVEKIT_NODE_IP to this PC's LAN address}
           stun_servers: []
     command: --bind 0.0.0.0
     ports:

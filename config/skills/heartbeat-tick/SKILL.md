@@ -28,7 +28,7 @@ Use the terminal tool, exactly once:
 
 ```
 terminal(
-  command="python -u -m prana.heartbeat --once --lora-path models/lora/latest --display-ip 192.168.0.35",
+  command="python -u -m prana.heartbeat --once --lora-path models/lora/latest --display-ip <box-lan-address>",
   workdir="C:\\Projects\\svapna",
   timeout=600
 )

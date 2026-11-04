@@ -28,7 +28,7 @@ echo. >> logs\heartbeat.log
 echo ================================================================ >> logs\heartbeat.log
 echo [%date% %time%] Heartbeat starting... >> logs\heartbeat.log
 echo ================================================================ >> logs\heartbeat.log
-python -u -m prana.heartbeat --lora-path models/lora/2026-04-08 --display-ip 192.168.0.35 --interval 1800 >> logs\heartbeat.log 2>&1
+python -u -m prana.heartbeat --lora-path models/lora/2026-04-08 --display-ip <box-lan-address> --interval 1800 >> logs\heartbeat.log 2>&1
 echo [%date% %time%] Heartbeat stopped (exit code %errorlevel%). Restarting in 60 seconds... >> logs\heartbeat.log
 timeout /t 60 /nointerrupt
 goto loop

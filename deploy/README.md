@@ -5,7 +5,7 @@ location-agnostic and consume absolute URLs. This directory is the home
 of that config (platform spec, "Where it lives — NOT in the PWA
 folder").
 
-## Current serve map (machine: `<machine>`, tailnet `<tailnet>.ts.net`)
+## Current serve map (machine and tailnet names: see ~/.narada/host/site.json)
 
 | Public (tailnet-only, HTTPS) | Local backend | What |
 |---|---|---|

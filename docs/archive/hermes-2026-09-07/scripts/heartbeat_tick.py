@@ -16,7 +16,7 @@ from pathlib import Path
 
 SVAPNA_ROOT = Path("C:/Projects/svapna")
 LORA_PATH = "models/lora/latest"
-DISPLAY_IP = "192.168.0.35"
+DISPLAY_IP = "<box-lan-address>"
 
 
 def main() -> int:

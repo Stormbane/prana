@@ -21,6 +21,12 @@ from pathlib import Path
 
 from prana.heartbeat.daemon import HeartbeatDaemon, DEFAULT_INTERVAL
 from prana.heartbeat.delegate import ClaudeDelegate
+
+
+def _site_box_ip() -> str | None:
+    """The body's LAN address is private: prana.site reads it from site.json."""
+    from prana.site import load_site
+    return load_site().box_ip
 from deha.display import DisplayClient
 from prana.heartbeat.viveka import VivekaCore
 from prana.heartbeat.wake import WAKE_PATH, WakeManifestError, load_manifest
@@ -82,8 +88,8 @@ def main() -> None:
         help="Claude model for delegation (default: claude-sonnet-4-6)",
     )
     parser.add_argument(
-        "--display-ip", type=str, default="192.168.0.35",
-        help="ESP32 display device IP address",
+        "--display-ip", type=str, default=_site_box_ip(),
+        help="ESP32 display device IP address (default: box_ip in the site file)",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
