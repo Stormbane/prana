@@ -252,7 +252,13 @@ class Ledger:
         try:
             yield
         finally:
-            lock.unlink(missing_ok=True)
+            # A lock that won't delete must not turn a committed write into
+            # an error: the caller would retry it and charge twice (Codex
+            # review). Left behind, it goes stale and is broken in 60 s.
+            try:
+                self._patiently(lambda: lock.unlink(missing_ok=True))
+            except OSError:
+                pass
 
     def add(self, call_id: str, usd: float, kind: str = "usage") -> float:
         """Record spend; returns the new trial total (every process's)."""

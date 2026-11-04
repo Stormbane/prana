@@ -343,3 +343,21 @@ def test_close_keeps_unreported_replies_and_trailing_audio_apart():
     g.close()
     assert g.charged_replies_at_close == 0
     assert g.charged_audio_at_close == pytest.approx(g.audio_cost(2.0))
+
+
+def test_a_lock_that_will_not_delete_does_not_undo_a_committed_write(tmp_path, monkeypatch):
+    """Before: the error after a good write made the caller retry it, and
+    $0.02 became $0.04."""
+    import pathlib
+    real_unlink = pathlib.Path.unlink
+
+    def stuck(self, *a, **k):
+        if self.name.endswith(".lock"):
+            raise PermissionError(13, "in use")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "unlink", stuck)
+    monkeypatch.setattr(Ledger, "TRANSIENT_TRIES", 2)
+    ledger = Ledger(tmp_path / "ledger.json")
+    assert ledger.add("a", 0.02) == pytest.approx(0.02)   # no error raised
+    monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
+    assert Ledger(tmp_path / "ledger.json").spent() == pytest.approx(0.02)

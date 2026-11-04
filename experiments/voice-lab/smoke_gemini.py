@@ -311,6 +311,11 @@ async def main(args) -> int:
                + CLOSING_CLIP_RESERVE_USD + FIXTURE_RESERVE_USD)
     assert planned <= SMOKE_CAP_USD, planned
     trial_cap = float(os.getenv("VOICE_LAB_GEMINI_TRIAL_CAP_USD", "5.00"))
+    legacy = OUTPUT / "gemini-ledger.json"
+    if legacy.exists():
+        print(f"Reconcile the old per-checkout ledger {legacy} into {trial_ledger_path()} "
+              "and remove it; nothing run.")
+        return 3
     try:
         spent = ledger.spent()
     except LedgerError as exc:  # never read an untrustworthy total as $0

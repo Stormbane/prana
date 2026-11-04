@@ -356,3 +356,23 @@ def test_the_next_call_refuses_while_earlier_spend_cannot_be_written(out, monkey
     monkeypatch.setattr(gemini_adapter.Ledger, "add", down)
     with pytest.raises(BudgetRefused):
         GeminiTalker(FakeCall())
+
+
+def test_a_busy_ledger_never_freezes_a_live_call(out):
+    import time
+    talker = GeminiTalker(FakeCall())
+    talker.open()
+    lock = gemini_adapter.LEDGER_PATH.with_name(gemini_adapter.LEDGER_PATH.name + ".lock")
+    lock.write_text("", encoding="utf-8")            # another writer holds it
+    started = time.monotonic()
+    talker.on_usage("g1", _usage())
+    assert time.monotonic() - started < 2.0          # gave up fast (was up to 10 s)
+    assert talker.guard.stopped == "ledger" and talker.unrecorded_usd > 0
+
+
+def test_an_old_per_checkout_ledger_must_be_reconciled_first(out, monkeypatch):
+    legacy = out / "gemini-ledger-old.json"
+    legacy.write_text('{"spent_usd": 1.0, "sessions": []}', encoding="utf-8")
+    monkeypatch.setattr(gemini_adapter, "LEGACY_LEDGER", legacy)
+    with pytest.raises(BudgetRefused, match="reconcile"):
+        GeminiTalker(FakeCall())

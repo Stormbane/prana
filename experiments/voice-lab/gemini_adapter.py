@@ -31,6 +31,14 @@ LEDGER_PATH = trial_ledger_path()
 # Spend this process could not write to the ledger even at close (Codex
 # review): the next call must record it before it may spend anything.
 _UNRECORDED = {"usd": 0.0}
+# Writes during a live call run on the event loop, so they give up fast:
+# a busy or stale lock carries the charge to the close and stops the call,
+# instead of freezing audio for the default 10 s (Codex review).
+IN_CALL_LOCK_TIMEOUT_S = 0.5
+# Before 2026-11-04 each checkout kept its own ledger here. None ever held
+# spend (no paid run had happened), but if one appears, its balance must be
+# reconciled into the shared ledger by hand before anything is spent.
+LEGACY_LEDGER = OUTPUT / "gemini-ledger.json"
 MODEL = os.getenv("VOICE_LAB_GEMINI_MODEL", DEFAULT_MODEL)
 VOICE = os.getenv("VOICE_LAB_GEMINI_VOICE", DEFAULT_VOICE)
 # Interim caps from the plan until Suti sets his own: <= $0.50 a session, trials <= $5.
@@ -113,8 +121,11 @@ class GeminiTalker:
         self.rates = rates_for(MODEL)
         self.instructions = instructions()
         self.max_seconds = min(max_seconds, MAX_SECONDS)
-        self.ledger = Ledger(LEDGER_PATH)
+        self.ledger = Ledger(LEDGER_PATH, lock_timeout=IN_CALL_LOCK_TIMEOUT_S)
         self.unrecorded_usd = 0.0
+        if LEGACY_LEDGER.exists():
+            raise BudgetRefused(f"Budget refused: reconcile the old per-checkout ledger "
+                                f"{LEGACY_LEDGER} into {LEDGER_PATH}, then remove it")
         try:
             if _UNRECORDED["usd"] > 0:  # an earlier call's spend comes first
                 self.ledger.add(call.id, _UNRECORDED["usd"], "late")
