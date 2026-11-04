@@ -853,6 +853,12 @@ def check_host_alerts(p: Probes) -> CheckResult:
 
 _OK_RESULTS = (0, None, 0x41301, 0x41303)  # ok, unknown, running, not yet run
 
+# Tasks paused on purpose, with why: shown, never counted as a problem.
+# Remove an entry when the task comes back.
+PAUSED_ON_PURPOSE = {
+    "Narada_Scene_Nightly": "until deha's nightly replaces it (redesign L7; Suti, 2026-11-04)",
+}
+
 
 def check_scheduled_tasks(p: Probes) -> CheckResult:
     r = _result("scheduled_tasks", "Narada scheduled tasks")
@@ -866,7 +872,8 @@ def check_scheduled_tasks(p: Probes) -> CheckResult:
         if name in covered:
             continue
         if t.state.lower() == "disabled":
-            disabled.append(name)
+            if name not in PAUSED_ON_PURPOSE:
+                disabled.append(name)
         elif t.last_result not in _OK_RESULTS:
             bad.append(f"{name} 0x{t.last_result:X}")
     notes = []

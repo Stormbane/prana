@@ -590,6 +590,15 @@ def test_scheduler_unreadable_is_amber(fp):
     assert C.check_scheduled_tasks(fp).status == AMBER
 
 
+def test_a_task_paused_on_purpose_is_not_a_problem(fp):
+    tasks = fp.scheduled_tasks()
+    tasks["Narada_Scene_Nightly"] = task("Narada_Scene_Nightly", 0x1, state="Disabled")
+    tasks["Narada_Figures"] = task("Narada_Figures", 0, state="Disabled")
+    res = C.check_scheduled_tasks(fp)
+    assert res.status == AMBER and "disabled: Narada_Figures" in res.reason
+    assert "Narada_Scene_Nightly" not in res.reason
+
+
 def test_log_hygiene_flags_token_without_printing_it(fp):
     token = "123456789:AAH" + "x" * 32
     fp.put(fp.paths.host_log, local_line(
