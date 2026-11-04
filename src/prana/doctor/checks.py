@@ -718,48 +718,6 @@ def check_morning(p: Probes) -> CheckResult:
              details=details)
 
 
-def check_qmd_index(p: Probes) -> CheckResult:
-    r = _result("qmd_index", "qmd recall index")
-    if not p.exists(p.paths.qmd_index):
-        return r(RED, f"qmd index missing at {p.paths.qmd_index}")
-    try:
-        rows = p.sqlite_query(p.paths.qmd_index,
-                              "SELECT max(modified_at) AS newest, count(*) AS n "
-                              "FROM documents WHERE active = 1")
-    except Exception as exc:  # noqa: BLE001
-        return r(AMBER, f"can't read the qmd index ({type(exc).__name__})")
-    newest = _parse_iso(rows[0]["newest"]) if rows else None
-    n = rows[0]["n"] if rows else 0
-    last_refresh = None
-    crashes = 0
-    for line in (p.tail_text(p.paths.smriti_metrics, 4 * 1024 * 1024) or "").splitlines():
-        if '"recall_index_refresh"' not in line:
-            continue
-        ev = _json(line)
-        if isinstance(ev, dict):
-            last_refresh = ev
-            if ev.get("returncode") not in (0, None):
-                crashes += 1
-    details = {"documents": n, "newest": newest.isoformat() if newest else None,
-               "last_refresh_rc": last_refresh.get("returncode") if last_refresh else None,
-               "refresh_crashes_in_window": crashes}
-    if newest is None:
-        return r(RED, "qmd index has no documents", details=details)
-    age_d = (p.now() - newest).total_seconds() / 86400
-    rc_note = (f"; nightly embed last rc {details['last_refresh_rc']}"
-               if last_refresh else "")
-    if age_d > 7:
-        return r(RED, f"newest indexed document is {_local(p, newest)[:10]} "
-                      f"({int(age_d)} days old){rc_note}, so nothing new is landing",
-                 since=newest, hint="run `qmd update` by hand and read its output; the "
-                                    "nightly refresh only logs embed's return code",
-                 details=details)
-    if age_d > 2 or crashes:
-        return r(AMBER, f"newest document {int(age_d)} day(s) old; "
-                        f"{crashes} embed crash(es) in window", since=newest, details=details)
-    return r(GREEN, f"{n} documents, newest {_ago(p, newest)}", since=newest, details=details)
-
-
 # ── akhada ────────────────────────────────────────────────────────────
 
 def check_akhada_tick(p: Probes) -> CheckResult:
@@ -963,7 +921,6 @@ CHECKS: list[tuple[str, Callable[[Probes], CheckResult]]] = [
     ("smriti_nightly", check_smriti_nightly),
     ("smriti_tasks", check_smriti_tasks),
     ("morning", check_morning),
-    ("qmd_index", check_qmd_index),
     ("akhada_tick", check_akhada_tick),
     ("memory_backup", check_memory_backup),
     ("deadman", check_deadman),
@@ -982,7 +939,6 @@ TITLES = {
     "voice_phone": "Phone voice worker", "box_device": "BOX device (ESP32-S3-BOX-3)",
     "push_subs": "Phone push subscriptions", "smriti_nightly": "smriti nightly",
     "smriti_tasks": "smriti logd", "morning": "Morning message (the daily heartbeat)",
-    "qmd_index": "qmd recall index",
     "akhada_tick": "akhada check-in tick", "memory_backup": "Memory backup pushed (GitHub)",
     "deadman": "Dead-man watchdog (deadman.ps1)", "host_alerts": "Host alerts (A3 pager)",
     "scheduled_tasks": "Narada scheduled tasks", "log_hygiene": "Secrets in host.log",

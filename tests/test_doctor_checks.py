@@ -463,26 +463,6 @@ def test_morning_before_its_hour_judges_yesterday(fp):
     assert C.check_morning(fp).status == GREEN
 
 
-def test_qmd_stale_index_is_red(fp):
-    fp.on_sql("FROM documents", [{"newest": "2026-09-06T14:42:44.887Z", "n": 6433}])
-    res = C.check_qmd_index(fp)
-    assert res.status == RED and "57 days old" in res.reason
-    assert "rc 0" in res.reason  # the refresh says ok while nothing lands
-
-
-def test_qmd_missing_is_red(fp):
-    del fp.files[fp.paths.qmd_index]
-    assert C.check_qmd_index(fp).status == RED
-
-
-def test_qmd_unreadable_is_amber(fp):
-    import sqlite3
-    fp.on_sql("FROM documents", sqlite3.OperationalError("database is locked"))
-    assert C.check_qmd_index(fp).status == AMBER
-
-
-# ── akhada ────────────────────────────────────────────────────────────
-
 def test_akhada_tick_failed_is_red(fp):
     fp.put(fp.paths.cron_logs / "Narada_Akhada_Checkin.log",
            cron_block(NOW - timedelta(hours=1), 1, "Traceback: boom"))

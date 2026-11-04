@@ -50,13 +50,14 @@ Each check runs in its own daemon thread under the run deadline. A check that cr
 | `smriti_nightly` | `log/.nightly-status.json`; failure streak from deadman job-watch | didn't run last night, or any step failed (named) |
 | `smriti_tasks` | logd pid alive and state fresh | logd dead |
 | `morning` | the morning message, **the daily heartbeat Suti notices** (`log/.morning-status.json`) | not sent for the due day (07:30 local); names the failed phase: composing or delivery |
-| `qmd_index` | newest document in qmd's index (read-only sqlite) | newest document older than 7 days |
 | `akhada_tick` | Narada_Akhada_Checkin cron log | last rc≠0; no run for 14 h |
 | `memory_backup` | `~/.narada` commits ahead of `@{u}` and their age | oldest unpushed older than 48 h, or ≥50 unpushed |
 | `deadman` | deadman.log recency (job-watch lines ignored), restart budget, can it page | silent 15 min; budget exhausted |
 | `host_alerts` | A3 alert DB: open episodes, stuck outbox | undelivered alerts older than 15 min |
 | `scheduled_tasks` | other Narada_* tasks' last result; debrief false green | (amber only) |
 | `log_hygiene` | bot token in host.log | (amber only) |
+
+*Retired 2026-11-04: `qmd_index`. smriti dropped its qmd refresh step (smriti `cafb9d5`): qmd's only consumer, the ambient-recall hook, was switched off after an eval found 18 of 20 injections unrelated, so a stale qmd index is no longer a fault.*
 
 "since" is when the current state began, as best the evidence shows. `since_approx: true` marks a lower bound or an inference, for example log retention or the mtime of the directory a missing file was in.
 
