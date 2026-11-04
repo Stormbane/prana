@@ -1,10 +1,11 @@
 """Unit tests for the Gemini talker core: no network, no LiveKit server, no spend."""
 from array import array
+import json
 
 import pytest
 
 from gemini_talker import (
-    INTERRUPTED, PLAYED, UNPLAYED, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger, Pot,
+    INTERRUPTED, PLAYED, UNPLAYED, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger, LedgerError, Pot,
     Rates, Transcript, estimate_tokens, instructions, pcm16_rms, price_usage, rates_for,
 )
 
@@ -224,3 +225,110 @@ def test_rms_reads_int16_memoryviews_by_bytes():
     samples = array("h", [3000, -3000] * 240)
     assert pcm16_rms(memoryview(samples)) == pytest.approx(3000)
     assert pcm16_rms(bytes(10)) == 0
+
+
+# --- the money holes (Codex review, 2026-11-04) ------------------------------------
+
+def test_every_reply_holds_a_ceiling_even_with_no_usage_reports():
+    """Before: the next turn was reserved only on a usage report, so with no
+    reports only the first reply was ever bounded. Now each reply reserves
+    when it starts, and the cap stops the call."""
+    g, stops = guard(cap=0.05)
+    assert g.open()
+    started = 0
+    for i in range(100):                              # bounded: a broken guard fails, not hangs
+        if not g.on_generation(f"g{i}"):
+            break
+        started += 1
+    assert 0 < started < 10 and stops == ["cap"]
+    session = g.budget.pots[0]
+    assert session.reserved_usd <= session.cap_usd + 1e-9
+    charged = g.close()                               # all of it is owed: none was reported
+    assert charged == pytest.approx((started + 1) * g.turn_ceiling())
+    assert session.spent_usd == pytest.approx(charged) and session.reserved_usd == pytest.approx(0)
+
+
+def test_a_reply_cut_off_by_the_close_is_charged_at_its_ceiling():
+    g, _ = guard(cap=0.50)
+    g.open()
+    g.on_generation("g1")
+    g.admit_audio(1.0)
+    charged = g.close()
+    assert charged == pytest.approx(g.turn_ceiling() + g.audio_cost(1.0))
+    assert g.budget.pots[0].spent_usd == pytest.approx(charged)
+
+
+def test_a_turn_no_reply_used_is_released_not_charged():
+    g, _ = guard(cap=0.50)
+    g.open()
+    assert g.close() == 0
+    assert g.budget.pots[0].spent_usd == 0 and g.budget.pots[0].reserved_usd == 0
+
+
+def test_a_report_settles_only_its_own_reply():
+    g, _ = guard(cap=0.50)
+    g.open()
+    g.on_generation("g1")
+    g.on_generation("g2")                             # g2 began before g1's report
+    g.on_usage(usage(prompt_text=800, out_audio=100), "g1")
+    assert list(g.started) == ["g2"]
+    assert g.close() == pytest.approx(g.turn_ceiling(), rel=0.2)   # g2 is still owed
+
+
+def test_a_reported_reply_is_not_charged_again_at_close():
+    g, _ = guard(cap=0.50)
+    g.open()
+    g.on_generation("g1")
+    g.on_usage(usage(prompt_text=800, out_audio=100), "g1")
+    spent = g.budget.pots[0].spent_usd
+    assert g.close() == 0 and g.budget.pots[0].spent_usd == spent
+
+
+def test_a_corrupt_ledger_refuses_instead_of_reading_zero(tmp_path):
+    path = tmp_path / "ledger.json"
+    ledger = Ledger(path)
+    ledger.add("a", 4.90)
+    path.write_text('{"spent_usd": 4.9, "sess', encoding="utf-8")   # a write cut off
+    with pytest.raises(LedgerError):
+        ledger.spent()
+    with pytest.raises(LedgerError):
+        ledger.add("b", 0.01)
+    assert path.read_text(encoding="utf-8") == '{"spent_usd": 4.9, "sess'   # history kept
+
+
+def test_ledger_writes_are_atomic_and_serialised_across_writers(tmp_path):
+    import threading
+    path = tmp_path / "ledger.json"
+    ledgers = [Ledger(path) for _ in range(8)]        # as if from separate processes
+    errors = []
+
+    def write(lg):
+        try:
+            for _ in range(10):
+                lg.add("c", 0.01)
+        except Exception as exc:  # a dead writer must fail the test, not vanish
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=write, args=(lg,)) for lg in ledgers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert Ledger(path).spent() == pytest.approx(0.80)
+    assert len(json.loads(path.read_text(encoding="utf-8"))["sessions"]) == 80
+    assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob("*.lock"))
+
+
+def test_a_stale_lock_is_broken_and_a_live_one_times_out(tmp_path):
+    import os
+    import time
+    path = tmp_path / "ledger.json"
+    lock = tmp_path / "ledger.json.lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 120
+    os.utime(lock, (old, old))                        # its holder died two minutes ago
+    assert Ledger(path).add("a", 0.01) == pytest.approx(0.01)
+    lock.write_text("", encoding="utf-8")             # a live holder
+    with pytest.raises(LedgerError):
+        Ledger(path, lock_timeout=0.2).add("b", 0.01)

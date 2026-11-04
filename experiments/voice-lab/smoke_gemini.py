@@ -34,7 +34,7 @@ import aiohttp
 from dotenv import load_dotenv
 from livekit import rtc
 
-from gemini_talker import DEFAULT_VOICE, Ledger, pcm16_rms
+from gemini_talker import DEFAULT_VOICE, Ledger, LedgerError, pcm16_rms, trial_ledger_path
 
 HERE = Path(__file__).resolve().parent
 OUTPUT = HERE / "output"
@@ -114,7 +114,7 @@ async def render_closing_clip(voice: str) -> str:
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)))))
     data = response.candidates[0].content.parts[0].inline_data.data
     path.write_bytes(data)  # 24 kHz mono s16le
-    Ledger(OUTPUT / "gemini-ledger.json").add("closing-clip", CLOSING_CLIP_RESERVE_USD)
+    Ledger(trial_ledger_path()).add("closing-clip", CLOSING_CLIP_RESERVE_USD, "closing-clip")
     return "rendered"
 
 
@@ -263,6 +263,15 @@ async def session_a(s: Session) -> None:
         "passed": {"played", "interrupted"} <= states and
                   all(h["text"] for h in transcript["heard"]),
         "states": sorted(states), "heard_turns": len(transcript["heard"])}
+    # Money: every reply that started was reported by Google, so nothing was
+    # left for the close to charge at a ceiling (the guard's evidence that
+    # usage reports arrive on 3.8 Live).
+    s.report["checks"]["usage_reports_cover_replies"] = {
+        "passed": summary["usage_reports"] >= summary["replies_started"] > 0
+                  and summary["charged_unreported_usd"] == 0
+                  and summary["cost_usd"] <= SESSION_A["session_cap_usd"],
+        "usage_reports": summary["usage_reports"], "replies_started": summary["replies_started"],
+        "charged_unreported_usd": summary["charged_unreported_usd"], "cost_usd": summary["cost_usd"]}
     s.report["summary"] = summary
 
 
@@ -279,7 +288,8 @@ async def session_b(s: Session) -> None:
     clip = next((e["kind"] for e in evs if e["kind"].startswith("closing_clip")), None)
     s.report["checks"]["cap_mid_session"] = {
         "passed": bool(usage_before) and not usage_after_close and summary["reason"] == "cap"
-                  and spent <= SESSION_B["session_cap_usd"] + 0.05,
+                  # past the cap by at most the one reply in flight (was cap + $0.05)
+                  and spent <= SESSION_B["session_cap_usd"] + summary["turn_ceiling_usd"],
         "paid_turns_before_cap": len(usage_before), "session_spent_usd": spent,
         "audio_seconds_refused": summary["audio_seconds_refused"], "closing_clip": clip}
     s.report["summary"] = summary
@@ -291,13 +301,18 @@ async def main(args) -> int:
         print(SETUP)
         return 2
     voice = os.getenv("VOICE_LAB_GEMINI_VOICE", DEFAULT_VOICE)
-    ledger = Ledger(OUTPUT / "gemini-ledger.json")
+    ledger = Ledger(trial_ledger_path())
     planned = (SESSION_A["session_cap_usd"] + SESSION_B["session_cap_usd"]
                + CLOSING_CLIP_RESERVE_USD + FIXTURE_RESERVE_USD)
     assert planned <= SMOKE_CAP_USD, planned
     trial_cap = float(os.getenv("VOICE_LAB_GEMINI_TRIAL_CAP_USD", "5.00"))
-    if ledger.spent() + planned > trial_cap:
-        print(f"Trial budget would be exceeded (spent {ledger.spent():.4f} of {trial_cap}); nothing run.")
+    try:
+        spent = ledger.spent()
+    except LedgerError as exc:  # never read an untrustworthy total as $0
+        print(f"{exc}; nothing run.")
+        return 3
+    if spent + planned > trial_cap:
+        print(f"Trial budget would be exceeded (spent {spent:.4f} of {trial_cap}); nothing run.")
         return 3
 
     clips = await fixtures()

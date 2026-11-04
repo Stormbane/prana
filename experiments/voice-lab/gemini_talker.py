@@ -11,9 +11,11 @@ observe and do nothing.
 from __future__ import annotations
 
 from array import array
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 import math
+import os
 from pathlib import Path
 import time
 from typing import Callable, Protocol
@@ -161,27 +163,112 @@ class Budget:
                          "reserved_usd": round(p.reserved_usd, 6)} for p in self.pots}
 
 
-class Ledger:
-    """Trial-total spend across lab sessions (the plan's interim "trials total <= $5")."""
+def trial_ledger_path() -> Path:
+    """The one trial ledger for every checkout and process: the lab, the
+    smoke test and its closing clip all spend against it."""
+    return Path(os.getenv("VOICE_LAB_GEMINI_LEDGER")
+                or Path.home() / ".narada" / "voice" / "gemini-trial-ledger.json")
 
-    def __init__(self, path: Path):
+
+class LedgerError(RuntimeError):
+    """The trial ledger exists but can't be trusted: refuse to spend."""
+
+
+class Ledger:
+    """Trial-total spend across every lab session (the plan's interim "trials total <= $5").
+
+    It fails closed (Codex review, 2026-11-04). A ledger that exists but
+    can't be read raises LedgerError instead of reading as $0, which once
+    let a truncated file turn $4.90 into $0.01. Writes are atomic (temp file
+    then replace) and serialised across processes by a lock file, so the lab
+    and the smoke test can't lose each other's spend. Callers record every
+    usage report as it arrives, so a crash loses at most one report.
+    """
+
+    LOCK_STALE_S = 60.0
+    # Windows answers "access denied" for a moment while another writer's
+    # delete or replace settles (or a scanner holds the file). That is busy,
+    # not broken: retry briefly, then fail closed.
+    TRANSIENT_TRIES = 50
+    TRANSIENT_WAIT_S = 0.02
+
+    def __init__(self, path: Path, lock_timeout: float = 10.0):
         self.path = path
+        self.lock_timeout = lock_timeout
+
+    def _patiently(self, fn):
+        for attempt in range(self.TRANSIENT_TRIES):
+            try:
+                return fn()
+            except PermissionError:
+                if attempt == self.TRANSIENT_TRIES - 1:
+                    raise
+                time.sleep(self.TRANSIENT_WAIT_S)
+
+    def _read(self) -> dict:
+        try:
+            text = self._patiently(lambda: self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"spent_usd": 0.0, "sessions": []}
+        except OSError as exc:
+            raise LedgerError(f"trial ledger unreadable ({type(exc).__name__}): {self.path}") from None
+        try:
+            data = json.loads(text)
+            spent = float(data["spent_usd"])
+            if spent < 0 or not isinstance(data.setdefault("sessions", []), list):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise LedgerError(f"trial ledger corrupt, refusing to spend: {self.path}") from None
+        return data
 
     def spent(self) -> float:
-        try:
-            return float(json.loads(self.path.read_text(encoding="utf-8"))["spent_usd"])
-        except (FileNotFoundError, KeyError, ValueError):
-            return 0.0
+        return float(self._read()["spent_usd"])
 
-    def add(self, call_id: str, usd: float) -> None:
+    @contextmanager
+    def _locked(self):
+        lock = self.path.with_name(self.path.name + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.lock_timeout
+        while True:
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                break
+            except PermissionError:  # the previous holder's delete is settling
+                if time.monotonic() > deadline:
+                    raise LedgerError(f"trial ledger locked for {self.lock_timeout:.0f}s: {lock}") from None
+                time.sleep(0.005)
+                continue
+            except FileExistsError:
+                try:  # a holder that died leaves its lock behind
+                    if time.time() - lock.stat().st_mtime > self.LOCK_STALE_S:
+                        lock.unlink(missing_ok=True)
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise LedgerError(f"trial ledger locked for {self.lock_timeout:.0f}s: {lock}") from None
+                time.sleep(0.02)
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            data = {"spent_usd": 0.0, "sessions": []}
-        data["spent_usd"] = round(data["spent_usd"] + usd, 6)
-        data["sessions"].append({"call_id": call_id, "usd": round(usd, 6), "at": time.time()})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            yield
+        finally:
+            lock.unlink(missing_ok=True)
+
+    def add(self, call_id: str, usd: float, kind: str = "usage") -> float:
+        """Record spend; returns the new trial total (every process's)."""
+        with self._locked():
+            data = self._read()
+            data["spent_usd"] = round(data["spent_usd"] + max(0.0, usd), 6)
+            data["sessions"].append({"call_id": call_id, "usd": round(max(0.0, usd), 6),
+                                     "kind": kind, "at": time.time()})
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            try:
+                self._patiently(lambda: os.replace(tmp, self.path))
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                raise LedgerError(f"trial ledger not written ({type(exc).__name__}): {self.path}") from None
+            return float(data["spent_usd"])
 
 
 # --- Cost guard: reserve before every paid operation --------------------------
@@ -195,8 +282,17 @@ class CostGuard:
 
     - `open()` reserves the first turn's ceiling before any connection.
     - `admit_audio()` reserves each chunk's input cost before it is sent.
+    - `on_generation()` gives every reply a turn ceiling the moment it
+      starts: the pending one if there is one, else a fresh reservation.
+      So the guard no longer depends on usage reports arriving to bound
+      spend (Codex review, 2026-11-04: with no reports, only the first turn
+      was ever reserved, and 300 s of audio was charged $0).
     - `on_usage()` settles open reservations against the provider's actual
       usage, then reserves the next turn's ceiling.
+    - `close()` charges, at their ceilings, replies that started but were
+      never reported (a call ended mid-reply is still billed by Google)
+      and audio sent since the last report. It returns that charge, so the
+      caller can record it.
 
     If any reservation is refused, the guard stops: no further audio is
     admitted and `on_stop(reason)` fires once, so the caller can close the
@@ -210,9 +306,12 @@ class CostGuard:
         self.max_output_tokens = max_output_tokens
         self.context_tokens = base_context_tokens
         self.on_stop = on_stop
-        self.turn: Reservation | None = None
+        self.turn: Reservation | None = None          # reserved, no reply started yet
+        self.started: dict[str, Reservation] = {}     # replies started, not yet reported
+        self.seen: set[str] = set()
         self.audio: list[Reservation] = []
         self.actual_usd = 0.0
+        self.charged_at_close = 0.0
         self.reports = 0
         self.audio_seconds_admitted = 0.0
         self.audio_seconds_refused = 0.0
@@ -241,12 +340,42 @@ class CostGuard:
         self.audio_seconds_admitted += seconds
         return True
 
-    def on_usage(self, usage: dict) -> float:
-        """Reconcile one provider usage report; always charges the actual cost."""
+    def on_generation(self, gen_id: str) -> bool:
+        """A reply has started; it must hold a turn ceiling. False if refused."""
+        if gen_id in self.seen:
+            return gen_id in self.started or not self.stopped
+        self.seen.add(gen_id)
+        if self.turn is not None:
+            self.started[gen_id], self.turn = self.turn, None
+            return True
+        ceiling = self.turn_ceiling()
+        r = self.budget.reserve(ceiling, "turn")
+        if r is None:
+            # Past the cap, but Google will bill this reply anyway: keep it
+            # owed (an unreserved entry) so close() charges it, then stop.
+            self.started[gen_id] = Reservation(ceiling, "turn-over-cap", open=False)
+            self.stop("cap")
+            return False
+        self.started[gen_id] = r
+        return True
+
+    def on_usage(self, usage: dict, gen_id: str | None = None) -> float:
+        """Reconcile one provider usage report; always charges the actual cost.
+
+        A report names its reply when the plugin knows it; then only that
+        reply's reservation is settled. A report with no reply settles all
+        started ones (the plugin attaches usage to no generation only
+        between replies)."""
         actual = price_usage(usage, self.rates)
         self.reports += 1
         self.actual_usd += actual
-        open_ = ([self.turn] if self.turn else []) + self.audio
+        if gen_id is not None and gen_id in self.started:
+            done = [self.started.pop(gen_id)]
+        elif gen_id is None:
+            done, self.started = list(self.started.values()), {}
+        else:
+            done = []
+        open_ = done + ([self.turn] if self.turn else []) + self.audio
         self.turn, self.audio = None, []
         for r in open_:
             self.budget.settle(r)
@@ -267,6 +396,15 @@ class CostGuard:
             return False
         return True
 
+    def recheck(self) -> bool:
+        """Stop if any pot is now over its cap: a pot's spend can change
+        outside this guard (the trial total, refreshed from the shared
+        ledger after another process spent). True while within the caps."""
+        if any(p.spent_usd + p.reserved_usd > p.cap_usd + 1e-12 for p in self.budget.pots):
+            self.stop("cap")
+            return False
+        return True
+
     def stop(self, reason: str) -> None:
         if self.stopped:
             return
@@ -274,13 +412,24 @@ class CostGuard:
         if self.on_stop:
             self.on_stop(reason)
 
-    def close(self) -> None:
-        """Release unused reservations; spent stays as reconciled."""
+    def close(self) -> float:
+        """End the session's accounting; returns what it charged here.
+
+        Replies that started but were never reported, and audio sent since
+        the last report, are billed by Google whether or not a report
+        arrives, so they are charged at their reserved ceilings: the safe
+        side. The pending turn (no reply started) is only released."""
         if not self.stopped:
             self.stopped = "closed"
-        for r in ([self.turn] if self.turn else []) + self.audio:
-            self.budget.settle(r)
-        self.turn, self.audio = None, []
+        owed = list(self.started.values()) + self.audio
+        charged = sum(r.usd for r in owed)
+        for r in owed:
+            self.budget.settle(r, actual_usd=r.usd)
+        if self.turn:
+            self.budget.settle(self.turn)
+        self.turn, self.audio, self.started = None, [], {}
+        self.charged_at_close += charged
+        return charged
 
 
 # --- Idle timeout ------------------------------------------------------------

@@ -31,6 +31,12 @@ class FakeCall:
             self.reasons.append(reason)
 
 
+@pytest.fixture(autouse=True)
+def _ledger_in_tmp(tmp_path, monkeypatch):
+    """No test may touch the real trial ledger in ~/.narada."""
+    monkeypatch.setattr(gemini_adapter, "LEDGER_PATH", tmp_path / "gemini-ledger.json")
+
+
 @pytest.fixture
 def out(tmp_path, monkeypatch):
     monkeypatch.setattr(gemini_adapter, "OUTPUT", tmp_path)
@@ -232,3 +238,66 @@ def test_lab_offers_gemini_only_with_a_key(monkeypatch):
     assert lab.available_modes() == ["gemini"]
     with pytest.raises(Exception):
         lab.Settings(mode="gemini", session_cap_usd=-1)
+
+
+# --- the money holes (Codex review, 2026-11-04) ------------------------------------
+
+def _usage(out_audio=100):
+    return {"prompt_token_count": 800, "response_token_count": out_audio,
+            "prompt_tokens_details": [{"modality": "TEXT", "token_count": 800}],
+            "response_tokens_details": [{"modality": "AUDIO", "token_count": out_audio}]}
+
+
+def test_a_corrupt_ledger_refuses_before_any_connection(out):
+    gemini_adapter.LEDGER_PATH.write_text('{"spent_usd": 4.', encoding="utf-8")
+    with pytest.raises(BudgetRefused, match="corrupt"):
+        GeminiTalker(FakeCall())
+
+
+def test_each_usage_report_reaches_the_shared_ledger_as_it_arrives(out):
+    call = FakeCall()
+    talker = GeminiTalker(call)
+    talker.open()
+    talker.on_usage("g1", _usage())
+    first = gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).spent()
+    assert first == pytest.approx(talker.guard.actual_usd) and first > 0
+    talker.on_usage("g2", _usage())
+    assert gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).spent() == pytest.approx(talker.guard.actual_usd)
+
+
+def test_another_process_spend_counts_against_the_trial_cap(out):
+    talker = GeminiTalker(FakeCall())
+    talker.open()
+    gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).add("smoke-test", 4.99)   # elsewhere
+    talker.on_usage("g1", _usage())
+    assert talker.trial.spent_usd > 4.99
+    assert talker.guard.stopped == "cap"           # the next turn no longer fits the trial
+
+
+def test_a_reply_cut_off_by_hanging_up_is_recorded(out):
+    async def scenario():
+        call = FakeCall()
+        talker = GeminiTalker(call)
+        talker.open()
+        talker.on_server_content("g1", types.LiveServerContent(
+            output_transcription=types.Transcription(text="Once upon a time")))
+        await talker.finish(None, "ended")           # no usage report ever came
+        return talker
+
+    talker = asyncio.run(scenario())
+    owed = talker.guard.charged_at_close
+    assert owed > 0
+    assert gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).spent() == pytest.approx(owed)
+
+
+def test_a_ledger_that_cannot_be_written_stops_the_call(out, monkeypatch):
+    call = FakeCall()
+    talker = GeminiTalker(call)
+    talker.open()
+
+    def broken(*a, **k):
+        raise gemini_adapter.LedgerError("locked")
+    monkeypatch.setattr(talker.ledger, "add", broken)
+    talker.on_usage("g1", _usage())
+    assert talker.guard.stopped == "ledger"
+    assert any(e["kind"] == "ledger_write_failed" for e in call.events)

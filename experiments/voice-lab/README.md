@@ -89,7 +89,8 @@ no API control for them. Voice C (MiniMax) isn't available on this route.
   ceiling is reserved. A refused reservation stops audio at once and closes
   the provider session. If `output/closing-<voice>.pcm` exists, it then
   plays as a free closing line. Pots: the session cap (default $0.50) and
-  the trial total (default $5, kept in `output/gemini-ledger.json`). Both
+  the trial total (default $5, kept in `~/.narada/voice/gemini-trial-ledger.json`, one
+  ledger for every checkout and process, written after every usage report). Both
   are the plan's interim caps until Suti sets his own. The browser shows
   why a call ended; HTTP 402 means no session was opened.
 - **Idle timeout** (45 s with no speech either way, held while Narada is

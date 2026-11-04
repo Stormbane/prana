@@ -244,16 +244,20 @@ class Call:
         self.emit("closing", reason=reason)
         if self.timer and self.timer is not asyncio.current_task():
             self.timer.cancel()
-        if self.session:
-            # Stop cancellable dummy work; no durable jobs are created here.
-            # For Gemini this closes the provider session: all paid work stops here.
-            self.session.shutdown(drain=False)
-            await self.session.aclose()
-        if self.talker:
-            for task in list(self.talker.tasks):
-                if task is not asyncio.current_task():
-                    task.cancel()
-            await self.talker.finish(self.room, reason)
+        try:
+            if self.session:
+                # Stop cancellable dummy work; no durable jobs are created here.
+                # For Gemini this closes the provider session: all paid work stops here.
+                self.session.shutdown(drain=False)
+                await self.session.aclose()
+        finally:
+            # The talker's accounting runs even if closing the provider
+            # session failed: its spend still goes to the ledger (Codex review).
+            if self.talker:
+                for task in list(self.talker.tasks):
+                    if task is not asyncio.current_task():
+                        task.cancel()
+                await self.talker.finish(self.room, reason)
         if hasattr(self, "pipeline"):
             for event in self.pipeline.provider_usage:
                 self.emit("provider_usage", **event)

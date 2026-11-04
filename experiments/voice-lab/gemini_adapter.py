@@ -19,11 +19,15 @@ from livekit.plugins.google.realtime import realtime_api
 
 from gemini_talker import (
     DEFAULT_MODEL, DEFAULT_VOICE, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger,
-    NullSage, Pot, Sage, Transcript, estimate_tokens, instructions, pcm16_rms, rates_for,
+    LedgerError, NullSage, Pot, Sage, Transcript, estimate_tokens, instructions, pcm16_rms,
+    rates_for, trial_ledger_path,
 )
 
 HERE = Path(__file__).resolve().parent
 OUTPUT = HERE / "output"
+# One trial ledger for every checkout and process (Codex review, 2026-11-04:
+# a ledger in each checkout's output/ gave each its own full budget).
+LEDGER_PATH = trial_ledger_path()
 MODEL = os.getenv("VOICE_LAB_GEMINI_MODEL", DEFAULT_MODEL)
 VOICE = os.getenv("VOICE_LAB_GEMINI_VOICE", DEFAULT_VOICE)
 # Interim caps from the plan until Suti sets his own: <= $0.50 a session, trials <= $5.
@@ -106,9 +110,13 @@ class GeminiTalker:
         self.rates = rates_for(MODEL)
         self.instructions = instructions()
         self.max_seconds = min(max_seconds, MAX_SECONDS)
-        self.ledger = Ledger(OUTPUT / "gemini-ledger.json")
-        self.budget = Budget([Pot("session", min(session_cap_usd, SESSION_CAP_USD)),
-                              Pot("trial", TRIAL_CAP_USD, spent_usd=self.ledger.spent())])
+        self.ledger = Ledger(LEDGER_PATH)
+        try:
+            trial_spent = self.ledger.spent()
+        except LedgerError as exc:  # never read an untrustworthy total as $0
+            raise BudgetRefused(f"Budget refused: {exc}") from None
+        self.trial = Pot("trial", TRIAL_CAP_USD, spent_usd=trial_spent)
+        self.budget = Budget([Pot("session", min(session_cap_usd, SESSION_CAP_USD)), self.trial])
         self.guard = CostGuard(self.budget, self.rates, max_output_tokens=MAX_OUTPUT_TOKENS,
                                base_context_tokens=estimate_tokens(self.instructions),
                                on_stop=self._on_stop)
@@ -180,6 +188,10 @@ class GeminiTalker:
         return self.guard.admit_audio(frame.samples_per_channel / frame.sample_rate)
 
     def on_server_content(self, gen_id: str | None, sc: types.LiveServerContent) -> None:
+        # The first sign of a reply (its audio or its transcript) reserves
+        # its turn ceiling, whether or not a usage report ever follows.
+        if gen_id and (sc.output_transcription or (sc.model_turn and sc.model_turn.parts)):
+            self.guard.on_generation(gen_id)
         if gen_id and sc.output_transcription and sc.output_transcription.text:
             self.transcript.generated(gen_id, sc.output_transcription.text)
             self.idle.touch()
@@ -194,9 +206,29 @@ class GeminiTalker:
             self.call.emit("provider_interrupted", gen_id=gen_id)
 
     def on_usage(self, gen_id: str | None, usage: dict) -> None:
-        usd = self.guard.on_usage(usage)
+        usd = self.guard.on_usage(usage, gen_id)
+        if self._record(usd, "usage"):
+            # The trial total now includes any other process's spend; the
+            # next turn was reserved before that was known.
+            self.guard.recheck()
         self.call.emit("provider_usage", api="gemini-live", gen_id=gen_id, usage=usage,
                        usd=round(usd, 6), budget=self.budget.snapshot())
+
+    def _record(self, usd: float, kind: str) -> bool:
+        """Write spend to the shared ledger now, and take the trial total from
+        it (another process's spend included). A ledger that can't be written
+        stops the call: no unrecorded spending."""
+        if usd <= 0:
+            return True
+        try:
+            self.trial.spent_usd = self.ledger.add(self.call.id, usd, kind)
+            return True
+        except (LedgerError, OSError) as exc:
+            # `entry`, not `kind`: emit's own first argument is the kind.
+            self.call.emit("ledger_write_failed", entry=kind, usd=round(usd, 6),
+                           error=type(exc).__name__)
+            self.guard.stop("ledger")
+            return False
 
     # -- the sage seam (stage 1: observe only) ---------------------------------
 
@@ -246,16 +278,21 @@ class GeminiTalker:
     async def finish(self, room: rtc.Room, reason: str) -> None:
         """After the provider session is closed: account, play the free closing line, write the transcript."""
         self.reserved_at_close = sum(r.usd for r in ([self.guard.turn] if self.guard.turn else [])
-                                     + self.guard.audio)
-        self.guard.close()
+                                     + list(self.guard.started.values()) + self.guard.audio)
+        # Usage was recorded report by report; this adds only what was
+        # billed without a report (a reply cut off by the close).
+        charged = self.guard.close()
+        self._record(charged, "close")
         self.transcript.finish()
-        self.ledger.add(self.call.id, self.guard.actual_usd)
         if reason == "cap":
             await self._play_closing(room)
         path = OUTPUT / f"talker-{self.call.id}.transcript.json"
         summary = {
             "stage": 1, "call_id": self.call.id, "model": self.model_name, "voice": self.voice,
             "reason": reason, "cost_usd": round(self.guard.actual_usd, 6),
+            "charged_unreported_usd": round(self.guard.charged_at_close, 6),
+            "replies_started": len(self.guard.seen),
+            "turn_ceiling_usd": round(self.guard.turn_ceiling(), 6),
             "unreconciled_ceiling_usd": round(self.reserved_at_close, 6),
             "usage_reports": self.guard.reports, "budget": self.budget.snapshot(),
             "audio_seconds_admitted": round(self.guard.audio_seconds_admitted, 3),
