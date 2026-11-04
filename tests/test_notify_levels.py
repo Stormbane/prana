@@ -292,3 +292,36 @@ def test_zero_devices_is_recorded_as_no_devices_not_delivered(monkeypatch):
     again = push.notify(body="Good morning", level="message", source="notify-suti",
                         event_id="nd-1", telegram_fn=lambda _t: True)
     assert "push" not in again["channels"]
+
+
+# ── a message reaches Telegram only when the app push didn't (2026-11-04) ──
+
+def _subs(monkeypatch, sent: int):
+    monkeypatch.setattr(push, "_load_subs", lambda: {"e": {"endpoint": "e"}} if sent else {})
+    monkeypatch.setattr(push, "_vapid_pem_path", lambda: Path("nope.pem"))
+
+
+def test_a_message_the_app_received_does_not_go_to_telegram(monkeypatch):
+    _subs(monkeypatch, sent=1)
+    tg = []
+    r = push.notify(body="Good morning", level="message", source="notify-suti",
+                    webpush_fn=lambda **kw: None, telegram_fn=lambda t: tg.append(t) or True)
+    assert r["push"]["sent"] == 1 and tg == [] and "telegram" not in r["channels"]
+    assert push.read_notifications()[-1]["delivered"] == {"push": True, "telegram": "skipped"}
+
+
+def test_a_message_no_device_received_falls_back_to_telegram(monkeypatch):
+    _subs(monkeypatch, sent=0)
+    tg = []
+    r = push.notify(body="Good morning", level="message", source="notify-suti",
+                    webpush_fn=lambda **kw: None, telegram_fn=lambda t: tg.append(t) or True)
+    assert tg == ["Good morning"] and r["telegram"] is True
+    assert push.read_notifications()[-1]["delivered"] == {"push": "no_devices", "telegram": True}
+
+
+def test_an_error_still_goes_to_both(monkeypatch):
+    _subs(monkeypatch, sent=1)
+    tg = []
+    r = push.notify(body="voice worker down", level="error", source="host",
+                    webpush_fn=lambda **kw: None, telegram_fn=lambda t: tg.append(t) or True)
+    assert r["push"]["sent"] == 1 and tg == ["voice worker down"]

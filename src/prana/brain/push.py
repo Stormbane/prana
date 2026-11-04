@@ -50,6 +50,9 @@ _LOCK = threading.Lock()
 LEVELS: tuple[str, ...] = ("log", "warn", "message", "error", "emergency")
 DEFAULT_LEVEL = "error"  # migration-safe: unlabelled callers keep paging
 
+# Levels whose Telegram leg is a fallback for the push, not a copy of it.
+TELEGRAM_FALLBACK_ONLY: frozenset[str] = frozenset({"message"})
+
 ROUTING: dict[str, tuple[str, ...]] = {
     "log": (),
     "warn": ("badge",),
@@ -461,6 +464,16 @@ def notify(*, body: str, title: str = "Narada", level: str = DEFAULT_LEVEL,
             logger.warning("push subsystem failed: %s", exc)
             result["push"] = {"sent": 0, "failed": 1, "dropped": 0, "error": str(exc)[:200]}
             outcomes["push"] = False
+    # A `message` goes to the app; Telegram is only its fallback (Suti,
+    # 2026-11-04: Narada speaks through the app, and the same line on
+    # Telegram was noise). It goes there only when the push reached no
+    # device, now or on an earlier attempt. error and emergency still go
+    # everywhere: Telegram works when the rest of Narada is down.
+    if (row.get("level", level) in TELEGRAM_FALLBACK_ONLY and "telegram" in channels
+            and (int((result["push"] or {}).get("sent", 0)) > 0 or already.get("push") is True)):
+        channels.remove("telegram")
+        result["channels"] = channels
+        outcomes["telegram"] = "skipped"
     if "telegram" in channels:
         try:
             result["telegram"] = _telegram(
