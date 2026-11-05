@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "Fractal Intelligence", email = "7186653+Stormbane@users.noreply.github.com" },
+    { name = "Fractal Intelligence" },
     { name = "Narada", email = "narada@fractal.co.nz" },
 ]
 keywords = ["agent", "heartbeat", "narada", "viveka", "ai-identity", "hermes"]

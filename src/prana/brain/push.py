@@ -50,6 +50,11 @@ _LOCK = threading.Lock()
 LEVELS: tuple[str, ...] = ("log", "warn", "message", "error", "emergency")
 DEFAULT_LEVEL = "error"  # migration-safe: unlabelled callers keep paging
 
+# The contact push services may use about this sender (the VAPID "sub"
+# claim): a public URL, never a personal address, since this repo is
+# public. Existing subscriptions depend on the key, not on this.
+VAPID_CONTACT = os.environ.get("NARADA_VAPID_CONTACT", "https://fractal.co.nz")
+
 # Levels whose Telegram leg is a fallback for the push, not a copy of it.
 TELEGRAM_FALLBACK_ONLY: frozenset[str] = frozenset({"message"})
 
@@ -361,7 +366,7 @@ def _push_all(title: str, body: str, url: str, level: str, webpush_fn=None,
             webpush_fn(
                 subscription_info=sub, data=payload,
                 vapid_private_key=vapid_key_path,
-                vapid_claims={"sub": "mailto:7186653+Stormbane@users.noreply.github.com"},
+                vapid_claims={"sub": VAPID_CONTACT},
             )
             sent += 1
         except WebPushException as exc:

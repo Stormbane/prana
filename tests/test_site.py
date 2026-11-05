@@ -106,5 +106,10 @@ def test_none_of_this_install_s_private_values_appear_in_the_repo():
                if v and len(v) >= 6]
     if s.home:
         needles += [f"{s.home[0]:.3f}", f"{s.home[1]:.3f}"]
+    try:  # strings that must never be published, kept only in the private file
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        needles += [str(v) for v in raw.get("never_publish", []) if len(str(v)) >= 4]
+    except (OSError, ValueError):
+        pass
     hits = sorted({n for n, text in _tracked_text() for v in needles if v in text})
     assert hits == [], "private values found in tracked files (names withheld)"
