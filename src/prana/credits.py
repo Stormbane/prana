@@ -33,9 +33,11 @@ def credits_path() -> Path:
 
 
 def load_keys() -> dict[str, str]:
-    """Provider keys from the env files (values stay in memory only)."""
-    keys: dict[str, str] = {}
-    for name in (".keys.env", ".voice.env"):
+    """Settings and keys with the voice worker's precedence: the process
+    environment first, then .voice.env, then .keys.env (each filling only
+    what is still missing, as load_dotenv does). Values stay in memory."""
+    keys: dict[str, str] = {k: v for k, v in os.environ.items() if v}
+    for name in (".voice.env", ".keys.env"):
         try:
             for line in (Path.home() / ".narada" / name).read_text(encoding="utf-8").splitlines():
                 if "=" in line and not line.lstrip().startswith("#"):
@@ -45,11 +47,13 @@ def load_keys() -> dict[str, str]:
                         keys.setdefault(k.strip(), v)
         except OSError:
             continue
-    for k in ("OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "FAL_KEY", "OPENAI_API_KEY", "OPENAI_ADMIN_KEY",
-              "ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY", "GOOGLE_API_KEY"):
-        if os.environ.get(k):
-            keys.setdefault(k, os.environ[k])
     return keys
+
+
+def _gemini_setting(keys: dict[str, str], name: str, default: str) -> str:
+    """A Gemini setting as the talker resolves it (NARADA_GEMINI_*, then the
+    lab's VOICE_LAB_GEMINI_*), from the same sources as the worker."""
+    return keys.get(f"NARADA_GEMINI_{name}") or keys.get(f"VOICE_LAB_GEMINI_{name}") or default
 
 
 class HttpStatus(Exception):
@@ -90,11 +94,12 @@ def _status_for_balance(balance: float | None) -> str:
 def gemini(keys: dict[str, str], get: Getter) -> dict[str, Any]:
     """Our own ledger: the month's spend against Suti's cap, exactly."""
     try:
-        from prana.voice.gemini.core import Ledger, month_start, trial_ledger_path
-        spent = Ledger(trial_ledger_path()).spent(since=month_start())
+        from prana.voice.gemini.core import Ledger, month_start
+        ledger = Path(_gemini_setting(keys, "LEDGER", str(Path.home() / ".narada" / "voice" / "gemini-trial-ledger.json")))
+        spent = Ledger(ledger).spent(since=month_start())
     except Exception as exc:  # noqa: BLE001 - reported, never guessed
         return _row("gemini", "Gemini (voice)", status="error", note=f"ledger unreadable: {type(exc).__name__}")
-    cap = float(os.environ.get("NARADA_GEMINI_MONTH_CAP_USD") or 10.0)
+    cap = float(_gemini_setting(keys, "MONTH_CAP_USD", "10.00"))
     left = cap - spent
     return _row("gemini", "Gemini (voice)", status=_status_for_balance(left), spent_usd=round(spent, 4),
                 limit_usd=cap, balance_usd=round(left, 4), period="this month",

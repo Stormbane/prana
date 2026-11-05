@@ -25,6 +25,8 @@ def fake(responses):
 @pytest.fixture(autouse=True)
 def _ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("NARADA_GEMINI_LEDGER", str(tmp_path / "ledger.json"))
+    monkeypatch.delenv("NARADA_GEMINI_MONTH_CAP_USD", raising=False)
+    monkeypatch.delenv("VOICE_LAB_GEMINI_MONTH_CAP_USD", raising=False)
 
 
 def test_each_provider_reports_what_it_honestly_can(tmp_path):
@@ -33,6 +35,7 @@ def test_each_provider_reports_what_it_honestly_can(tmp_path):
         "https://openrouter.ai/api/v1/key": {"data": {"limit_remaining": None, "usage_monthly": 3.2}},
     })
     keys = {"FAL_KEY": "k1", "OPENROUTER_API_KEY": "k2", "OPENAI_API_KEY": "k3"}
+    keys["NARADA_GEMINI_LEDGER"] = str(tmp_path / "ledger.json")
     out = credits.run(get, keys, path=tmp_path / "credits.json")
     rows = {r["provider"]: r for r in out["providers"]}
     assert rows["fal"]["balance_usd"] == 24.5 and rows["fal"]["status"] == "ok"
@@ -77,3 +80,29 @@ def test_latest_marks_an_old_check_stale(tmp_path):
     credits.run(fake({}), {}, path=path)
     assert credits.latest(path)["stale"] is False
     assert credits.latest(path, now=__import__("time").time() + 40 * 3600)["stale"] is True
+
+
+def test_gemini_reads_the_cap_and_ledger_the_worker_uses(tmp_path):
+    """Review: a cap set in the env files must reach this check too."""
+    from prana.voice.gemini.core import Ledger
+    ledger = tmp_path / "voice-ledger.json"
+    Ledger(ledger).add("call", 1.25)
+    keys = {"NARADA_GEMINI_LEDGER": str(ledger), "VOICE_LAB_GEMINI_MONTH_CAP_USD": "20"}
+    out = credits.run(fake({}), keys, path=tmp_path / "c.json")
+    g = next(r for r in out["providers"] if r["provider"] == "gemini")
+    assert g["limit_usd"] == 20.0 and g["spent_usd"] == 1.25 and g["balance_usd"] == 18.75
+
+
+def test_keys_follow_the_workers_precedence(tmp_path, monkeypatch):
+    """Review: the environment wins, then .voice.env, then .keys.env."""
+    home = tmp_path / "home"
+    (home / ".narada").mkdir(parents=True)
+    (home / ".narada" / ".voice.env").write_text("OPENROUTER_API_KEY=from-voice\nFAL_KEY=fal-voice\n", encoding="utf-8")
+    (home / ".narada" / ".keys.env").write_text("OPENROUTER_API_KEY=from-keys\nFAL_KEY=fal-keys\nGOOGLE_API_KEY=g\n", encoding="utf-8")
+    monkeypatch.setattr(credits.Path, "home", lambda: home)
+    monkeypatch.setenv("FAL_KEY", "fal-env")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    keys = credits.load_keys()
+    assert keys["FAL_KEY"] == "fal-env"
+    assert keys["OPENROUTER_API_KEY"] == "from-voice"
+    assert keys["GOOGLE_API_KEY"] == "g"
