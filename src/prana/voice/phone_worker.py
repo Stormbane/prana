@@ -121,6 +121,40 @@ def session_limit(cap_s: float, talker) -> float:
     return cap_s if talker is None else min(cap_s, talker.max_seconds)
 
 
+# The Gemini talker's tools on the phone (Suti 2026-11-05: "trim the voice
+# instructions"). Gemini bills the tool declarations again on every turn,
+# so the phone carries what a phone call needs: memory, the web, messages,
+# timers, and logging. The BOX's media tools, rarely used admin, and the
+# coding-session action (it can block the call for minutes) stay off;
+# escalate_to_narada reaches everything else.
+GEMINI_PHONE_TOOLS = frozenset({
+    "recall_memory", "remember_this", "escalate_to_narada", "about_myself",
+    "end_conversation", "web_search", "read_page", "message_suti",
+    "set_timer", "set_reminder", "list_timers", "cancel_timer",
+    "set_rest_timer", "cancel_rest_timer", "brief_mode", "list_coding_sessions",
+    "log_meal", "add_meal_items", "log_vital", "log_workout", "log_set",
+    "log_habit", "log_day_check", "set_day_kind", "amend_entry", "void_entry",
+    "get_today", "get_today_summary", "search_food_log",
+    "start_exercise", "get_exercise_history", "answer_choice", "skip_ask",
+})
+
+# What Gemini is told instead of the full fitness briefing: where to look.
+GEMINI_TODAY_NOTE = (
+    "TODAY: for what he has eaten, logged or trained today, call "
+    "get_today_summary before you answer or confirm a log; don't guess."
+)
+
+
+def tool_name(tool) -> str:
+    info = getattr(tool, "info", None)
+    return getattr(tool, "id", None) or getattr(info, "name", "") or ""
+
+
+def phone_tools(tools: list, gemini: bool) -> list:
+    """The phone's tools: all of them on OpenAI, the call-sized set on Gemini."""
+    return [t for t in tools if tool_name(t) in GEMINI_PHONE_TOOLS] if gemini else tools
+
+
 NUDGE_COOLDOWN_S = 3.0
 
 
@@ -305,7 +339,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 f"\n\nACCENT: speak with a {accent} accent — unforced "
                 "and consistent, the way someone who grew up speaking "
                 "it sounds, never a caricature.")
-        pack_text = context_pack(getattr(ctx.job, "metadata", None))
+        # Gemini rebills the whole prompt every turn: a shorter recent-chat pack.
+        pack_text = (context_pack(getattr(ctx.job, "metadata", None), max_turns=6, max_chars=240)
+                     if pipeline.is_gemini else context_pack(getattr(ctx.job, "metadata", None)))
         if pack_text:
             instructions += "\n\n" + pack_text
             logger.info("context pack: %d chars from the chat session", len(pack_text))
@@ -320,7 +356,9 @@ async def entrypoint(ctx: JobContext) -> None:
         from prana.brain.fitness import briefing_block
         fit_state: dict = {"base": instructions, "stamp": None, "busy": False}
         fit_block, fit_state["stamp"] = briefing_block("voice")
-        instructions += fit_block
+        # Gemini gets a pointer instead of the briefing: it can't be refreshed
+        # mid-call anyway, and get_today_summary is always current.
+        instructions += ("\n\n" + GEMINI_TODAY_NOTE) if pipeline.is_gemini else fit_block
 
         async def _refresh_fitness() -> None:
             """Before each reply (HookedAgent); the stamp moves only
@@ -367,11 +405,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # gemini/adapter.MeteredModel): its briefing is the one at the
             # call's start.
             before_reply=None if pipeline.is_gemini else _refresh_fitness,
-            tools=build_voice_tools(
+            tools=phone_tools(build_voice_tools(
                 tier=tier, session_id=ctx.job.id,
                 music=None, publish=_publish_activity, end_session=bye.set,
                 speak=_session_speak,
-                voice_info=pipeline.info()),
+                voice_info=pipeline.info()), pipeline.is_gemini),
             call=call)
 
         @session.on("error")
