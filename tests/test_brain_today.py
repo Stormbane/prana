@@ -160,3 +160,14 @@ def test_a_bad_time_is_a_bad_request(client):
         "identity": "vital:weight", "kind": "number", "event_id": "w-bad", "day": "2026-10-12",
         "payload": {"value": 80.4, "at": "not a time"}})
     assert r.status_code == 400
+
+
+def test_a_new_answer_aimed_at_an_older_page_without_a_time_is_still_refused(client):
+    """Recheck: the replay exception must not let a NEW stale-page answer
+    write to today."""
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 9, 0, tzinfo=clock.TZ))
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "vital:weight", "kind": "number", "event_id": "w-new-old", "day": "2026-10-12",
+        "payload": {"value": 80.4}}).json()
+    assert r["result"]["ok"] is False and r["result"]["closed"] is True

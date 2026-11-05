@@ -33,6 +33,12 @@ def _store():
     return Store()
 
 
+def _committed(store, event_id: str) -> bool:
+    """Has akhada already recorded this event (a retry of a committed tap)?"""
+    with store.connect() as c:
+        return c.execute("SELECT 1 FROM events WHERE event_id = ?", (event_id,)).fetchone() is not None
+
+
 def _answer(body: dict[str, Any]) -> dict[str, Any]:
     from akhada import asks
     from akhada.tools.items import ToolError
@@ -56,16 +62,16 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
     day = body.get("day")
     if day is not None and not isinstance(day, str):
         raise HTTPException(400, "day must be a date string (YYYY-MM-DD)")
-    # Only a tap that carries its own time can be judged here (the app's
-    # always do): without one, a retry of an answer that already committed
-    # must reach akhada's replay rather than be refused (review).
-    if day is not None and kind != "check" and payload.get("at"):
+    # A retry of an answer that already committed goes straight to akhada's
+    # replay, whatever the clock says now (review); a NEW answer aimed at an
+    # older page is judged here.
+    if day is not None and kind != "check" and not _committed(store, event_id):
         from akhada import clock
         today = asks.reporting_day(clock.now())
         # The day the tap was made counts too: an answer queued offline at
         # 23:58 and delivered after 04:00 still reports on its own day.
         try:
-            made = asks.reporting_day(clock.parse_at(payload.get("at")))
+            made = asks.reporting_day(clock.parse_at(payload.get("at"))) if payload.get("at") else today
         except ValueError as exc:  # bad client input is a 400, not a 502 (review)
             raise HTTPException(400, f"payload.at is not a time: {exc}") from None
         if day not in (today, made):
