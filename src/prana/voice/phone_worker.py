@@ -145,6 +145,14 @@ GEMINI_TODAY_NOTE = (
 )
 
 
+def now_line(now=None) -> str:
+    """The call's local date and time, for the talker (one line)."""
+    from datetime import datetime
+
+    t = now or datetime.now()
+    return f"NOW: {t.strftime('%A %d %B %Y, %H:%M')} (local time)."
+
+
 def tool_name(tool) -> str:
     info = getattr(tool, "info", None)
     return getattr(tool, "id", None) or getattr(info, "name", "") or ""
@@ -358,7 +366,10 @@ async def entrypoint(ctx: JobContext) -> None:
         fit_block, fit_state["stamp"] = briefing_block("voice")
         # Gemini gets a pointer instead of the briefing: it can't be refreshed
         # mid-call anyway, and get_today_summary is always current.
-        instructions += ("\n\n" + GEMINI_TODAY_NOTE) if pipeline.is_gemini else fit_block
+        # With the time: the briefing carried it, and without it he greeted
+        # an evening call with "good morning".
+        instructions += (("\n\n" + now_line() + "\n" + GEMINI_TODAY_NOTE)
+                         if pipeline.is_gemini else fit_block)
 
         async def _refresh_fitness() -> None:
             """Before each reply (HookedAgent); the stamp moves only

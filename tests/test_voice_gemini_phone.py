@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("livekit.plugins.google")
 pytest.importorskip("akhada")  # the fitness pack is optional; its tools are most of the set
 
-from prana.voice.phone_worker import GEMINI_PHONE_TOOLS, GEMINI_TODAY_NOTE, phone_tools, tool_name  # noqa: E402
+from prana.voice.phone_worker import GEMINI_PHONE_TOOLS, GEMINI_TODAY_NOTE, now_line, phone_tools, tool_name  # noqa: E402
 
 
 async def _noop(*a, **k):
@@ -47,3 +47,10 @@ def test_gemini_gets_the_call_sized_set_and_openai_everything(tools):
 def test_the_today_note_points_at_the_tool_it_names():
     assert "get_today_summary" in GEMINI_TODAY_NOTE
     assert "get_today_summary" in GEMINI_PHONE_TOOLS
+
+
+def test_the_talker_is_told_the_time():
+    """The briefing used to carry it; an evening call was greeted 'good morning'."""
+    from datetime import datetime
+
+    assert now_line(datetime(2026, 11, 5, 18, 40)) == "NOW: Thursday 05 November 2026, 18:40 (local time)."
