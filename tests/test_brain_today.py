@@ -125,7 +125,7 @@ def test_other_asks_aimed_at_an_older_page_are_refused(client):
     clock.set_fake_now(datetime(2026, 10, 13, 9, 0, tzinfo=clock.TZ))
     r = client.post("/api/today/answer", headers=H, json={
         "identity": "vital:weight", "kind": "number", "event_id": "w-old", "day": "2026-10-12",
-        "payload": {"value": 80.4}}).json()
+        "payload": {"value": 80.4, "at": "2026-10-13T09:00:00+10:00"}}).json()
     assert r["result"]["ok"] is False and "carried over to today" in r["result"]["error"]
     r = client.post("/api/today/answer", headers=H, json={
         "identity": "vital:weight", "kind": "number", "event_id": "w-new", "day": "2026-10-13",
@@ -140,3 +140,23 @@ def test_an_offline_answer_delivered_after_the_turn_keeps_its_day(client):
         "identity": "vital:weight", "kind": "number", "event_id": "w-queued", "day": "2026-10-12",
         "payload": {"value": 80.4, "at": "2026-10-12T23:58:00+10:00"}}).json()
     assert r["result"]["ok"]
+
+
+def test_a_tap_without_its_own_time_reaches_akhadas_replay(client):
+    """Review: a committed answer retried after 04:00 without payload.at
+    must replay, not be refused by the older-page guard."""
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 3, 0, tzinfo=clock.TZ))
+    body = {"identity": "vital:weight", "kind": "number", "event_id": "w-retry", "day": "2026-10-12",
+            "payload": {"value": 80.4}}
+    assert client.post("/api/today/answer", headers=H, json=body).json()["result"]["ok"]
+    clock.set_fake_now(datetime(2026, 10, 13, 5, 0, tzinfo=clock.TZ))
+    again = client.post("/api/today/answer", headers=H, json=body).json()["result"]
+    assert not again.get("closed")
+
+
+def test_a_bad_time_is_a_bad_request(client):
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "vital:weight", "kind": "number", "event_id": "w-bad", "day": "2026-10-12",
+        "payload": {"value": 80.4, "at": "not a time"}})
+    assert r.status_code == 400
