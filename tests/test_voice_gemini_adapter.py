@@ -388,12 +388,13 @@ def test_instructions_never_change_mid_call(monkeypatch):
     assert "mutable_instructions" in inspect.getsource(realtime_api.RealtimeSession.update_instructions)
 
 
-def test_the_talker_does_not_think_unless_told(monkeypatch):
-    """Thinking tokens cost money and delay the first word (Suti 2026-11-05)."""
+def test_no_thinking_setting_is_sent_unless_asked(monkeypatch):
+    """gemini-3.8-live refuses thinking settings with 1007 and the call dies
+    (a live probe, 2026-11-05): by default nothing is sent."""
     monkeypatch.delenv("NARADA_GEMINI_THINKING_BUDGET", raising=False)
     monkeypatch.delenv("VOICE_LAB_GEMINI_THINKING_BUDGET", raising=False)
-    assert gemini_adapter.thinking_kwargs()["thinking_config"].thinking_budget == 0
-    monkeypatch.setenv("NARADA_GEMINI_THINKING_BUDGET", "default")
     assert gemini_adapter.thinking_kwargs() == {}
+    monkeypatch.setenv("NARADA_GEMINI_THINKING_BUDGET", "0")
+    assert gemini_adapter.thinking_kwargs()["thinking_config"].thinking_budget == 0
     monkeypatch.setenv("NARADA_GEMINI_THINKING_BUDGET", "256")
     assert gemini_adapter.thinking_kwargs()["thinking_config"].thinking_budget == 256

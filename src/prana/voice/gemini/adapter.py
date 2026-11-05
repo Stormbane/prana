@@ -68,11 +68,12 @@ CLOSING_TEXT = "I'll have to stop us there; that's today's limit. Talk soon."
 
 
 def thinking_kwargs() -> dict:
-    """The talker doesn't think before speaking (Suti 2026-11-05: "make the
-    Gemini stuff even cheaper"): thinking tokens are billed and delay the
-    first word. NARADA_GEMINI_THINKING_BUDGET: 0 (the default) turns it off;
-    "default" sends nothing and leaves the model's own setting; a number caps it."""
-    raw = _env("THINKING_BUDGET", "0").strip().lower()
+    """Thinking settings for the talker. gemini-3.8-live on the Gemini API
+    refuses both thinking_level and thinking_budget (a live probe on
+    2026-11-05: "1007 Thinking budget is not supported for this model", and
+    every call failed), so the default sends nothing. A model that accepts a
+    budget can be given one with NARADA_GEMINI_THINKING_BUDGET (0 = off)."""
+    raw = _env("THINKING_BUDGET", "default").strip().lower()
     if raw in ("", "default"):
         return {}
     return {"thinking_config": types.ThinkingConfig(thinking_budget=int(raw))}
