@@ -675,9 +675,30 @@ def create_app(config: BrainConfig, backend_factory,
     # (debounced, and again when it comes back online). The brain only
     # records turns that reached it; this is the copy of what the phone
     # holds, including messages that never got through. A copy, not the
-    # record: last write wins, whole document, atomic on disk.
+    # record, atomic on disk. Messages MERGE by id (redesign L2b; Codex R3):
+    # the phone keeps only its last 60 messages, so a whole-document write
+    # let a short local copy erase the fuller history here. A message the
+    # phone still has is replaced; one it dropped is kept; a new one joins.
     _CHAT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
     _CHAT_BODY_MAX = 1_000_000
+
+    def _merge_messages(prior: list, incoming: list) -> list:
+        """The brain's copy, updated by the phone's: same-id messages take
+        the phone's version in place; ones the phone no longer holds stay;
+        new ones join in the phone's order. Id-less messages are kept as
+        sent (old clients), never duplicated by value."""
+        by_id = {m.get("id"): i for i, m in enumerate(prior)
+                 if isinstance(m, dict) and m.get("id")}
+        merged = list(prior)
+        for m in incoming:
+            mid = m.get("id") if isinstance(m, dict) else None
+            if mid and mid in by_id:
+                merged[by_id[mid]] = m
+            elif m not in merged:
+                if mid:
+                    by_id[mid] = len(merged)
+                merged.append(m)
+        return merged
 
     def _chat_path(tier: str, chat_id: str) -> Path:
         return config.chats_root / tier / f"{chat_id}.json"
@@ -696,14 +717,19 @@ def create_app(config: BrainConfig, backend_factory,
             raise HTTPException(400, "body must be JSON")
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(400, "body must be an object with a messages list")
-        doc = {**body, "id": chat_id, "tier": tier,
-               "mirrored_at": datetime.now().isoformat(timespec="seconds")}
         path = _chat_path(tier, chat_id)
+        try:
+            prior = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, ValueError):
+            prior = {}
+        messages = _merge_messages(prior.get("messages") or [], body["messages"])
+        doc = {**body, "messages": messages, "id": chat_id, "tier": tier,
+               "mirrored_at": datetime.now().isoformat(timespec="seconds")}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)  # atomic: never a torn chat on disk
-        return {"ok": True, "id": chat_id, "messages": len(body["messages"]),
+        return {"ok": True, "id": chat_id, "messages": len(messages),
                 "mirrored_at": doc["mirrored_at"]}
 
     @app.get("/api/chats")
