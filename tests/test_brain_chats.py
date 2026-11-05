@@ -105,3 +105,23 @@ def test_tiers_are_separate_and_ids_and_bodies_are_checked(brain):
     big = {"messages": [{"id": "m", "role": "user", "text": "x" * 1_100_000, "status": "complete"}]}
     assert _put(client, "conv-4", big).status_code == 413
     assert client.put("/api/chats/conv-5", content="{}").status_code == 401
+
+
+
+def test_odd_ids_never_break_the_mirror(brain):
+    """Review: a non-string id (from an old client, or already on disk) is
+    kept by value, never a 500, and never blocks later writes."""
+    client, _ = brain
+    r = _put(client, "odd", {"title": "Odd", "messages": [{"id": ["m1"], "text": "x"}, {"text": "no id"}]})
+    assert r.status_code == 200
+    r = _put(client, "odd", {"title": "Odd", "messages": [{"id": "m2", "text": "fine"}, {"text": "no id"}]})
+    assert r.status_code == 200 and r.json()["messages"] == 3
+
+
+def test_a_big_history_merges_quickly(brain):
+    import time
+    client, _ = brain
+    big = [{"id": f"m{i}", "role": "user", "text": "x"} for i in range(5000)]
+    start = time.perf_counter()
+    assert _put(client, "big", {"title": "Big", "messages": big}).status_code == 200
+    assert time.perf_counter() - start < 1.0

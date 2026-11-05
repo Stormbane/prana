@@ -685,18 +685,24 @@ def create_app(config: BrainConfig, backend_factory,
     def _merge_messages(prior: list, incoming: list) -> list:
         """The brain's copy, updated by the phone's: same-id messages take
         the phone's version in place; ones the phone no longer holds stay;
-        new ones join in the phone's order. Id-less messages are kept as
-        sent (old clients), never duplicated by value."""
-        by_id = {m.get("id"): i for i, m in enumerate(prior)
-                 if isinstance(m, dict) and m.get("id")}
+        new ones join in the phone's order. Only string ids index; anything
+        else (old clients, odd data already on disk) is compared by value,
+        and only those pay for the scan (review: linear for real chats)."""
+        def mid(m):
+            v = m.get("id") if isinstance(m, dict) else None
+            return v if isinstance(v, str) and v else None
+
         merged = list(prior)
+        by_id = {mid(m): i for i, m in enumerate(merged) if mid(m) is not None}
         for m in incoming:
-            mid = m.get("id") if isinstance(m, dict) else None
-            if mid and mid in by_id:
-                merged[by_id[mid]] = m
+            k = mid(m)
+            if k is not None:
+                if k in by_id:
+                    merged[by_id[k]] = m
+                else:
+                    by_id[k] = len(merged)
+                    merged.append(m)
             elif m not in merged:
-                if mid:
-                    by_id[mid] = len(merged)
                 merged.append(m)
         return merged
 
