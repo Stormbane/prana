@@ -351,6 +351,36 @@ the subscription.
 - **LiveKit Build's free allowance is a hard cap.** Requests fail after it, so quota exhaustion
   is tested as a case of its own.
 
+### W5a. Gemini in real calls: the integration plan (Narada, 2026-11-05)
+
+Suti, 2026-11-05: "I don't think the Gemini talk is working." It isn't yet: Gemini runs only in
+`experiments/voice-lab`. Real phone and BOX calls still use the OpenAI worker, whose credit is
+empty, so every call fails. The paid smoke passed on 2026-11-04 ($0.043 of $0.50). The steps:
+
+1. **A side-by-side voice environment.** The lab's Gemini hooks are pinned to
+   `livekit-agents` 1.8.10, `livekit-plugins-google` 1.8.10 and `google-genai` 2.34.0. The
+   running worker's `.venv-voice` has agents 1.8.1 and no Google plugin. Build `.venv-voice-next`
+   from a lock file and point the host's voice launch at it. Rollback is pointing it back.
+2. **Move the talker core into prana.** `gemini_talker.py` and `gemini_adapter.py` move to
+   `src/prana/voice/gemini/`, with their tests: prices, the reserve-before-generation guard, the
+   locked ledger, the idle watchdog, the transcript and the latency meter. The ledger moves to
+   `~/.narada/voice/gemini-ledger.json`, and the pre-rendered closing clip moves with it.
+3. **One provider seam.** `VoicePipeline` gains a Gemini branch next to the OpenAI ones.
+   `gemini-3.8-live` joins `VOICE_MODELS`, so the app's existing model picker selects it.
+   Switching back to an OpenAI model is the one-step rollback (V-E gate 8).
+4. **Tools.** Stage 1 keeps today's capability: the talker gets the same tier-filtered voice
+   tools through Gemini Live function calling, as the OpenAI talker has them now. Handing tools
+   to the sage, so the talker takes no irreversible action, is stage 2.
+5. **The V-E gates as tests**, with a fake realtime session: interrupting stops generation;
+   interrupting during a tool run gives that tool an explicit outcome; a drop after a mutation
+   doesn't repeat it; duplicate events have no duplicate effect; a restart ends cleanly; a slow
+   tool reaches a final state; transcripts mark what was heard.
+6. **Caps.** $0.50 a session and Suti's monthly number, enforced in the worker. Until he sets
+   the monthly number, trials stop at $5 in total. When a cap is reached, Narada says the free
+   closing line, and the app shows the fault.
+7. **The phone trial.** Suti calls. The worker logs end-of-speech to first audio, and the app's
+   presence header shows LiveKit's listening, thinking and speaking.
+
 ## W7. A pluggable mind: Narada beyond any one model (Suti, 2026-11-03)
 
 "Right now it's Opus... at some point we might be using an OpenAI model, or a Kimi model, or a
