@@ -67,6 +67,17 @@ COMPRESSION_TRIGGER_TOKENS, COMPRESSION_TARGET_TOKENS = 12_000, 6_000
 CLOSING_TEXT = "I'll have to stop us there; that's today's limit. Talk soon."
 
 
+def thinking_kwargs() -> dict:
+    """The talker doesn't think before speaking (Suti 2026-11-05: "make the
+    Gemini stuff even cheaper"): thinking tokens are billed and delay the
+    first word. NARADA_GEMINI_THINKING_BUDGET: 0 (the default) turns it off;
+    "default" sends nothing and leaves the model's own setting; a number caps it."""
+    raw = _env("THINKING_BUDGET", "0").strip().lower()
+    if raw in ("", "default"):
+        return {}
+    return {"thinking_config": types.ThinkingConfig(thinking_budget=int(raw))}
+
+
 def api_key() -> str | None:
     return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 
@@ -185,6 +196,7 @@ class GeminiTalker:
             context_window_compression=types.ContextWindowCompressionConfig(
                 trigger_tokens=COMPRESSION_TRIGGER_TOKENS,
                 sliding_window=types.SlidingWindow(target_tokens=COMPRESSION_TARGET_TOKENS)),
+            **thinking_kwargs(),
         )
 
     def open(self) -> None:
