@@ -36,17 +36,16 @@ def load_keys() -> dict[str, str]:
     """Settings and keys with the voice worker's precedence: the process
     environment first, then .voice.env, then .keys.env (each filling only
     what is still missing, as load_dotenv does). Values stay in memory."""
+    from dotenv import dotenv_values  # the worker's own parser: comments, quotes, ${...}
+
     keys: dict[str, str] = {k: v for k, v in os.environ.items() if v}
     for name in (".voice.env", ".keys.env"):
-        try:
-            for line in (Path.home() / ".narada" / name).read_text(encoding="utf-8").splitlines():
-                if "=" in line and not line.lstrip().startswith("#"):
-                    k, v = line.split("=", 1)
-                    v = v.strip().strip('"').strip("'")
-                    if v and not v.startswith("PASTE_"):
-                        keys.setdefault(k.strip(), v)
-        except OSError:
+        path = Path.home() / ".narada" / name
+        if not path.is_file():
             continue
+        for k, v in dotenv_values(path).items():
+            if v and not v.startswith("PASTE_"):
+                keys.setdefault(k, v)
     return keys
 
 

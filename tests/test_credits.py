@@ -106,3 +106,17 @@ def test_keys_follow_the_workers_precedence(tmp_path, monkeypatch):
     assert keys["FAL_KEY"] == "fal-env"
     assert keys["OPENROUTER_API_KEY"] == "from-voice"
     assert keys["GOOGLE_API_KEY"] == "g"
+
+
+def test_env_files_are_read_with_dotenv_semantics(tmp_path, monkeypatch):
+    """Recheck: a comment after a value, or quotes, mean what the worker reads."""
+    home = tmp_path / "home"
+    (home / ".narada").mkdir(parents=True)
+    (home / ".narada" / ".voice.env").write_text(
+        'NARADA_GEMINI_MONTH_CAP_USD=12.50 # monthly budget' + chr(10) + 'FAL_KEY="quoted-key"' + chr(10), encoding="utf-8")
+    monkeypatch.setattr(credits.Path, "home", lambda: home)
+    monkeypatch.delenv("NARADA_GEMINI_MONTH_CAP_USD", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    keys = credits.load_keys()
+    assert keys["NARADA_GEMINI_MONTH_CAP_USD"] == "12.50"
+    assert keys["FAL_KEY"] == "quoted-key"
