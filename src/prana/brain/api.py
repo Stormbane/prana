@@ -486,6 +486,7 @@ def create_app(config: BrainConfig, backend_factory,
             "scope": "app_and_box",
             "live_voice": selected_voice(saved, "gpt-live-1"),
             "realtime_voice": selected_voice(saved, "gpt-realtime"),
+            "gemini_voice": selected_voice(saved, "gemini-3.8-live"),
             "voice_options": VOICE_OPTIONS,
         }
 

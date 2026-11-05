@@ -124,10 +124,11 @@ class GeminiTalker:
 
     def __init__(self, call, *, session_cap_usd: float = SESSION_CAP_USD,
                  idle_seconds: float = IDLE_SECONDS, max_seconds: float = MAX_SECONDS,
-                 sage: Sage | None = None, instructions_text: str | None = None):
+                 sage: Sage | None = None, instructions_text: str | None = None,
+                 voice: str | None = None):
         self.call = call
         self.model_name = MODEL
-        self.voice = VOICE
+        self.voice = voice or VOICE
         self.rates = rates_for(MODEL)
         # The worker's full instructions (identity, memory pack, briefing), or
         # the lab's test brief; either way the guard prices the real context.
@@ -167,7 +168,7 @@ class GeminiTalker:
         if not key:
             raise RuntimeError("Set GOOGLE_API_KEY (or GEMINI_API_KEY) in ~/.narada/.keys.env")
         return MeteredModel(
-            self, model=MODEL, api_key=key, voice=VOICE,
+            self, model=MODEL, api_key=key, voice=self.voice,
             max_output_tokens=MAX_OUTPUT_TOKENS,
             # 3.8 Live: proactive audio is always on and affective dialog was removed,
             # so neither option is sent (setting proactive_audio=false is an error).
@@ -367,13 +368,14 @@ class GeminiTalker:
             await source.aclose()
 
 
-def open_talker(call, *, instructions_text: str | None = None,
+def open_talker(call, *, instructions_text: str | None = None, voice: str | None = None,
                 session_cap_usd=SESSION_CAP_USD, idle_seconds=IDLE_SECONDS,
                 max_seconds=MAX_SECONDS) -> tuple[GeminiTalker, MeteredModel]:
     """A guarded talker and its model, with the first turn already reserved.
     Raises BudgetRefused (spend nothing) or RuntimeError (no key)."""
     talker = GeminiTalker(call, session_cap_usd=session_cap_usd, idle_seconds=idle_seconds,
-                          max_seconds=max_seconds, instructions_text=instructions_text)
+                          max_seconds=max_seconds, instructions_text=instructions_text,
+                          voice=voice)
     model = talker.model()
     talker.open()
     return talker, model

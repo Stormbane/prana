@@ -267,9 +267,14 @@ async def entrypoint(ctx: JobContext) -> None:
     # startup error must reach the app too).
     faults = FaultTracker()
     spoke = {"v": False}
+    call = None
     try:
-        from prana.voice.pipeline import VoicePipeline
+        from prana.voice.pipeline import GeminiCall, VoicePipeline
         pipeline = VoicePipeline(surface="phone", prefs=load_voice_prefs())
+        if pipeline.is_gemini:
+            faults.provider = "gemini"
+        # Gemini's guard ends the call at a cap (or after idle) through this.
+        call = GeminiCall(ctx.room.name, lambda _reason: bye.set())
         prefs = pipeline.prefs
         realtime_model = pipeline.model_name
         session = pipeline.session
@@ -351,7 +356,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 tier=tier, session_id=ctx.job.id,
                 music=None, publish=_publish_activity, end_session=bye.set,
                 speak=_session_speak,
-                voice_info=pipeline.info()))
+                voice_info=pipeline.info()),
+            call=call)
 
         @session.on("error")
         def _note_fault(ev) -> None:
@@ -359,6 +365,7 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.error("voice fault (%s): %s", fault.code, fault.text)
 
         await session.start(agent=agent, room=ctx.room)
+        pipeline.started()
         logger.info("phone session open (model=%s, room=%s)",
                     realtime_model, ctx.room.name)
 
@@ -519,7 +526,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.warning("session digest failed: %s", exc)
         if session is not None:
             try:
-                await pipeline.aclose()
+                # A cap or idle end from the Gemini guard names itself.
+                await pipeline.aclose(ctx.room, (call.reason if call is not None else "") or reason)
             except Exception as exc:
                 logger.warning("session close failed: %s", exc)
         budget.settle(reservation, time.monotonic() - started)

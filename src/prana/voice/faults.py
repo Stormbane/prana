@@ -31,7 +31,7 @@ BILLING_URL = "platform.openai.com/settings/organization/billing"
 
 # Worst first: a credit refusal is followed by "connection closed" errors
 # that would otherwise win by arriving last.
-_RANK = ("credits", "auth", "rate", "model", "connect", "unknown")
+_RANK = ("budget", "credits", "auth", "rate", "model", "connect", "unknown")
 
 # Plain ASCII sentences: the box draws chips in the UNSCII pixel font,
 # which has no glyph for an em dash (field 2026-09-16: a square in the
@@ -43,13 +43,24 @@ TEXT: dict[str, str] = {
     "model": "The voice model refused to start. Try another model in Settings.",
     "connect": "Couldn't reach OpenAI for voice. Check the network and try again.",
     "unknown": "Voice failed. See the worker log.",
+    # Our own cap, not the provider's (the Gemini cost guard, W5a).
+    "budget": "Voice has reached its spending cap for now. Calls come back when the budget allows.",
+}
+
+# The same faults on Gemini (W5a): the OpenAI wording would send Suti to
+# the wrong billing page.
+GEMINI_TEXT: dict[str, str] = {
+    "credits": "Gemini credit or quota is used up. No voice until it is topped up in Google AI Studio.",
+    "auth": "The Gemini key was rejected. Voice is off until the key is fixed.",
+    "rate": "Gemini is rate-limiting voice right now. Give it a minute and try again.",
+    "connect": "Couldn't reach Gemini for voice. Check the network and try again.",
 }
 
 # Faults retrying cannot mend. The session ends on the first one instead
 # of sitting through the model's retry loop (field 2026-09-16: the
 # refusal was classified 3 s after the tap; the chip came 18 s later,
 # after eight retries).
-FATAL = frozenset({"credits", "auth", "model"})
+FATAL = frozenset({"budget", "credits", "auth", "model"})
 
 _ASCII_MAP = {
     0x2014: "-", 0x2013: "-", 0x2012: "-",   # dashes
@@ -64,8 +75,9 @@ def ascii_text(text: str) -> str:
     return "".join(ch if ord(ch) < 128 else "?" for ch in text.translate(_ASCII_MAP))
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("budget", re.compile(r"Budget refused", re.I)),
     ("credits", re.compile(r"credit_balance_exhausted|no credits remaining|insufficient_quota|exceeded your current quota", re.I)),
-    ("auth", re.compile(r"invalid_api_key|incorrect api key|401|unauthorized|authentication", re.I)),
+    ("auth", re.compile(r"invalid_api_key|incorrect api key|api key not valid|API_KEY_INVALID|401|unauthorized|authentication", re.I)),
     ("rate", re.compile(r"rate[_ ]limit|429|too many requests|tokens per min", re.I)),
     ("model", re.compile(r"model_not_found|does not exist|unsupported_model|invalid model", re.I)),
     ("connect", re.compile(r"connection closed|connection failed|connect|timed out|timeout|unreachable", re.I)),
@@ -86,9 +98,9 @@ class Fault:
         return self.code in FATAL
 
 
-def classify(error: object) -> Fault:
+def classify(error: object, provider: str = "openai") -> Fault:
     """A fault for anything a session error carries — the error object,
-    its cause chain, or plain text."""
+    its cause chain, or plain text — worded for the provider."""
     parts: list[str] = []
     seen: set[int] = set()
     cur: object = error
@@ -101,10 +113,11 @@ def classify(error: object) -> Fault:
                 parts.append(json.dumps(v) if isinstance(v, dict) else v)
         cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
     text = " ".join(parts)
+    words = {**TEXT, **GEMINI_TEXT} if provider == "gemini" else TEXT
     for code, pattern in _PATTERNS:
         if pattern.search(text):
-            return Fault(code, TEXT[code])
-    return Fault("unknown", TEXT["unknown"])
+            return Fault(code, words[code])
+    return Fault("unknown", words["unknown"])
 
 
 # The provider's own words. The LiveKit OpenAI plugin logs the real
@@ -187,16 +200,17 @@ class FaultTracker:
     Create it before the session starts: it only sees provider errors
     logged after its creation."""
 
-    def __init__(self) -> None:
+    def __init__(self, provider: str = "openai") -> None:
         self.current: Fault | None = None
+        self.provider = provider
         self._after = _seq()
         install_provider_tap()
 
     def note(self, error: object) -> Fault:
-        fault = classify(error)
+        fault = classify(error, self.provider)
         # The provider's words outrank a generic exception.
         for text in take_provider_errors(self._after):
-            other = classify(text)
+            other = classify(text, self.provider)
             if other.rank < fault.rank:
                 fault = other
         if self.current is None or fault.rank < self.current.rank:

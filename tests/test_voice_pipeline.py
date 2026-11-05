@@ -34,7 +34,8 @@ def test_box_never_auto_joins_either_phone_surface():
     assert not is_phone_room("narada-body")
 
 
-def test_both_surfaces_read_the_same_saved_model(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_both_surfaces_read_the_same_saved_model(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.delenv("NARADA_VOICE_MODEL", raising=False)
     assert selected_model() == "gpt-live-1"
@@ -46,7 +47,8 @@ def test_both_surfaces_read_the_same_saved_model(tmp_path, monkeypatch):
         selected_model({"model": "invented"})
 
 
-def test_saved_voice_follows_both_surfaces_and_survives_model_switch(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_saved_voice_follows_both_surfaces_and_survives_model_switch(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setenv("NARADA_LIVE_VOICE", "marin")
     update_prefs({"live_voice": "vesper", "realtime_voice": "cedar"})
@@ -83,7 +85,8 @@ async def test_provider_preserves_only_supplied_tools(monkeypatch, model, provid
     await pipeline.model.aclose()
 
 
-def test_usage_does_not_include_transcripts(caplog):
+@pytest.mark.asyncio
+async def test_usage_does_not_include_transcripts(caplog):
     pipeline = VoicePipeline(surface="phone", prefs={"model": "gpt-live-1"})
     pipeline._record({"type": "session.input_transcript.delta", "delta": "private words"})
     pipeline._record({"type": "session.closed", "usage": {"seconds": 82}})

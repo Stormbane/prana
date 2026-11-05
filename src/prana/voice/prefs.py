@@ -17,7 +17,14 @@ import time
 from pathlib import Path
 
 VOICE_MODELS = ("gpt-live-1", "gpt-realtime-2.1-mini", "gpt-realtime-2.1",
-                "gpt-realtime", "gpt-realtime-mini")
+                "gpt-realtime", "gpt-realtime-mini",
+                # Gemini Live as the talker (presence plan W5a, 2026-11-05):
+                # speech to speech, under the cost guard in prana.voice.gemini.
+                "gemini-3.8-live")
+
+
+def is_gemini(model: str) -> bool:
+    return model.startswith("gemini-")
 
 # Provider voice identities are separate from the character/delivery prompt.
 # https://developers.openai.com/api/docs/guides/live-conversations
@@ -39,10 +46,18 @@ VOICE_OPTIONS = {
     ],
     "realtime_voice": [{"id": v, "label": v.title()} for v in (
         "cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")],
+    # Google's own voices; the descriptors are Google's (voice-lab RESULTS.md).
+    "gemini_voice": [
+        {"id": "Umbriel", "label": "Umbriel · easy-going"},
+        {"id": "Algieba", "label": "Algieba · smooth"},
+        {"id": "Achird", "label": "Achird · friendly"},
+    ],
 }
 
 
 def selected_voice(prefs: dict, model: str) -> str:
+    if is_gemini(model):
+        return prefs.get("gemini_voice") or os.environ.get("NARADA_GEMINI_VOICE", "Umbriel")
     live = model == "gpt-live-1"
     key = "live_voice" if live else "realtime_voice"
     # Keep deployment overrides (including approved custom voices) available.

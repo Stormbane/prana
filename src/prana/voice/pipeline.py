@@ -17,7 +17,7 @@ from livekit.plugins import openai
 from openai.types.realtime import AudioTranscription
 from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
 
-from prana.voice.prefs import read_prefs, selected_model, selected_voice
+from prana.voice.prefs import is_gemini, read_prefs, selected_model, selected_voice
 
 logger = logging.getLogger("narada-voice")
 
@@ -53,13 +53,47 @@ Do not claim an action succeeded just because you asked the backend.
 """
 
 
+class GeminiCall:
+    """What the Gemini talker needs from a call (the lab's Call, for the
+    worker): an id, an event log, and a way to end it. Events are logged
+    without words: transcripts never go to the host log (as `_record`)."""
+
+    WORDS = ("text", "heard", "entries")
+
+    def __init__(self, call_id: str, end) -> None:
+        self.id = call_id
+        self.closed = False
+        self.reason = ""
+        self._end = end
+
+    def emit(self, kind: str, **data) -> None:
+        fields = {k: v for k, v in data.items() if k not in self.WORDS}
+        logger.info("gemini %s %s", kind, json.dumps(fields, default=str)[:2000])
+
+    async def close(self, reason: str = "ended") -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.reason = reason
+        self._end(reason)
+
+
 class VoicePipeline:
     def __init__(self, *, surface: str, tv: bool = False, prefs: dict | None = None):
         self.prefs = read_prefs() if prefs is None else dict(prefs)
         self.surface = surface
         self.tv = tv
         self.model_name = selected_model(self.prefs)
+        if is_gemini(self.model_name) and surface != "phone":
+            # Gemini is wired for the phone only (W5a); the BOX follows in
+            # V-F. Until then it keeps an OpenAI model rather than failing.
+            fallback = os.environ.get("NARADA_BOX_VOICE_MODEL", "gpt-realtime-mini")
+            logger.info("Gemini is phone-only for now; the %s uses %s", surface, fallback)
+            self.model_name = fallback
+            self.prefs = {k: v for k, v in self.prefs.items() if k != "model"}
         self.is_live = self.model_name == "gpt-live-1"
+        self.is_gemini = is_gemini(self.model_name)
+        self.talker = None
         self.voice = selected_voice(self.prefs, self.model_name)
         self.backend_model = os.environ.get("NARADA_LIVE_BACKEND_MODEL", "gpt-5.6-luna")
         self.session = AgentSession(user_away_timeout=None)
@@ -71,7 +105,7 @@ class VoicePipeline:
             "model": self.model_name,
             "voice": self.voice,
             "surface": self.surface,
-            "backend": "live" if self.is_live else "realtime",
+            "backend": "live" if self.is_live else "gemini" if self.is_gemini else "realtime",
             "tv_mode": self.tv,
             **({"delegation_model": self.backend_model} if self.is_live else {}),
         }
@@ -110,9 +144,11 @@ class VoicePipeline:
         self.provider_usage.append(record)
         logger.info("voice provider usage %s", json.dumps({**self.info(), **record}))
 
-    def agent(self, *, instructions: str, tools: list, before_reply=None) -> Agent:
+    def agent(self, *, instructions: str, tools: list, before_reply=None,
+              call: GeminiCall | None = None) -> Agent:
         """Use exactly the tier-filtered tools supplied by the admitted
-        surface. `before_reply`: awaited (bounded) before each reply."""
+        surface. `before_reply`: awaited (bounded) before each reply.
+        `call`: required for Gemini, whose guard can end the call."""
         pipeline = self
         accent = os.environ.get("NARADA_VOICE_ACCENT", "warm, natural Indian English")
         delivery = NARADA_DELIVERY
@@ -121,7 +157,18 @@ class VoicePipeline:
         delivery += f"\nSpeak the language with ISO code {self.prefs.get('language') or 'en'} unless asked to switch."
         if self.prefs.get("brevity") == "brief":
             delivery += "\nKeep replies to one or two short sentences."
-        if self.is_live:
+        if self.is_gemini:
+            if call is None:
+                raise RuntimeError("a Gemini talker needs the call it may end")
+            # Stage 1 (W5a): the talker carries the same instructions and
+            # tools as the OpenAI talker; the guard reserves the first turn
+            # before any paid connection (BudgetRefused spends nothing).
+            from prana.voice.gemini.adapter import open_talker
+
+            speech_instructions = instructions + "\n\nDELIVERY:\n" + delivery
+            self.talker, self.model = open_talker(
+                call, instructions_text=speech_instructions, voice=self.voice)
+        elif self.is_live:
             from livekit.plugins.openai.realtime import GPTLiveModel
 
             class MeteredLive(GPTLiveModel):
@@ -188,13 +235,23 @@ class VoicePipeline:
         return HookedAgent(llm=self.model, instructions=speech_instructions, tools=tools,
                            before_reply=before_reply)
 
-    async def aclose(self) -> None:
+    def started(self) -> None:
+        """After session.start: the Gemini talker watches the session (idle,
+        transcript, speaking) from here on."""
+        if self.talker is not None:
+            self.talker.attach(self.session)
+
+    async def aclose(self, room=None, reason: str = "ended") -> None:
         try:
             self.session.shutdown(drain=False)
             await self.session.aclose()
         finally:
             if self.model is not None:
                 await self.model.aclose()
+            # Gemini: account for what was billed without a report, and at a
+            # cap play the free closing line, while the room is still there.
+            if self.talker is not None and room is not None:
+                await self.talker.finish(room, reason)
         if self.is_live:
             finals = [e for e in self.provider_usage if e["type"] == "session.closed"]
             seconds = sum(e["usage"]["seconds"] for e in finals if e.get("usage"))
