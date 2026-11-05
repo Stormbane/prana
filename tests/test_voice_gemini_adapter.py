@@ -241,13 +241,36 @@ def test_each_usage_report_reaches_the_shared_ledger_as_it_arrives(out):
     assert gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).spent() == pytest.approx(talker.guard.actual_usd)
 
 
-def test_another_process_spend_counts_against_the_trial_cap(out):
+def test_another_process_spend_counts_against_the_month_cap(out):
     talker = GeminiTalker(FakeCall())
     talker.open()
-    gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).add("smoke-test", 4.99)   # elsewhere
+    near = gemini_adapter.MONTH_CAP_USD - 0.01
+    gemini_adapter.Ledger(gemini_adapter.LEDGER_PATH).add("smoke-test", near)   # elsewhere
     talker.on_usage("g1", _usage())
-    assert talker.trial.spent_usd > 4.99
-    assert talker.guard.stopped == "cap"           # the next turn no longer fits the trial
+    assert talker.month.spent_usd > near
+    assert talker.guard.stopped == "cap"           # the next turn no longer fits the month
+
+
+def test_last_months_spend_does_not_count(out):
+    """Suti's cap is US$10 a calendar month (2026-11-05)."""
+    import json
+    import time
+
+    ledger = gemini_adapter.LEDGER_PATH
+    old = time.time() - 40 * 86400   # well before this month began
+    ledger.write_text(json.dumps({"spent_usd": 9.99, "sessions": [
+        {"call_id": "october", "usd": 9.99, "kind": "usage", "at": old}]}), encoding="utf-8")
+    talker = GeminiTalker(FakeCall())
+    assert gemini_adapter.MONTH_CAP_USD == 10.0
+    assert talker.month.spent_usd == 0.0
+    talker.open()                                   # refused only if this month's spend is near the cap
+    assert not talker.guard.stopped
+    # An entry with no time counts: unknown spend is never free.
+    data = json.loads(ledger.read_text(encoding="utf-8"))
+    data["sessions"].append({"call_id": "untimed", "usd": 9.99, "kind": "usage"})
+    data["spent_usd"] = 19.98
+    ledger.write_text(json.dumps(data), encoding="utf-8")
+    assert GeminiTalker(FakeCall()).month.spent_usd == 9.99
 
 
 def test_a_reply_cut_off_by_hanging_up_is_recorded(out):
@@ -318,7 +341,7 @@ def test_spend_still_unwritten_at_close_comes_before_the_next_call(out, monkeypa
     owed = asyncio.run(first_call())
     assert gemini_adapter._UNRECORDED["usd"] == pytest.approx(owed) and owed > 0
     talker = GeminiTalker(FakeCall())             # the ledger works again
-    assert talker.trial.spent_usd == pytest.approx(owed)
+    assert talker.month.spent_usd == pytest.approx(owed)
     sessions = json.loads(gemini_adapter.LEDGER_PATH.read_text(encoding="utf-8"))["sessions"]
     assert sessions[-1]["kind"] == "late" and gemini_adapter._UNRECORDED["usd"] == 0
 

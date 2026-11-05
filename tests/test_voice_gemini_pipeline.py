@@ -80,7 +80,7 @@ async def test_switching_back_is_one_step(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_an_exhausted_budget_refuses_before_any_connection_and_says_so():
-    adapter.Ledger(adapter.LEDGER_PATH).add("earlier", adapter.TRIAL_CAP_USD)
+    adapter.Ledger(adapter.LEDGER_PATH).add("earlier", adapter.MONTH_CAP_USD)
     pipeline = VoicePipeline(surface="phone", prefs={"model": "gemini-3.8-live"})
     call, _ = _call()
     with pytest.raises(adapter.BudgetRefused) as refused:

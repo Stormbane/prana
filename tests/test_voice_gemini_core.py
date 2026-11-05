@@ -361,3 +361,25 @@ def test_a_lock_that_will_not_delete_does_not_undo_a_committed_write(tmp_path, m
     assert ledger.add("a", 0.02) == pytest.approx(0.02)   # no error raised
     monkeypatch.setattr(pathlib.Path, "unlink", real_unlink)
     assert Ledger(tmp_path / "ledger.json").spent() == pytest.approx(0.02)
+
+
+def test_the_month_starts_at_local_midnight_on_the_first():
+    from datetime import datetime
+
+    from prana.voice.gemini.core import month_start
+
+    mid = datetime(2026, 11, 17, 15, 30).timestamp()
+    assert datetime.fromtimestamp(month_start(mid)) == datetime(2026, 11, 1, 0, 0)
+    first = datetime(2026, 12, 1, 0, 0, 5).timestamp()
+    assert datetime.fromtimestamp(month_start(first)) == datetime(2026, 12, 1, 0, 0)
+
+
+def test_the_ledger_totals_since_a_time(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    ledger.add("a", 1.0)
+    import time
+    cut = time.time() + 0.001
+    time.sleep(0.01)
+    assert ledger.add("b", 2.0, since=cut) == pytest.approx(2.0)
+    assert ledger.spent() == pytest.approx(3.0)
+    assert ledger.spent(since=cut) == pytest.approx(2.0)

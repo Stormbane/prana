@@ -165,6 +165,15 @@ class Budget:
                          "reserved_usd": round(p.reserved_usd, 6)} for p in self.pots}
 
 
+def month_start(now: float | None = None) -> float:
+    """The start of this calendar month in local time (the PC's, Brisbane),
+    as epoch seconds: the monthly cap counts spend from here."""
+    from datetime import datetime
+
+    t = datetime.fromtimestamp(time.time() if now is None else now)
+    return t.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
 def trial_ledger_path() -> Path:
     """The one trial ledger for every checkout and process: the lab, the
     smoke test and its closing clip all spend against it."""
@@ -223,8 +232,17 @@ class Ledger:
             raise LedgerError(f"trial ledger corrupt, refusing to spend: {self.path}") from None
         return data
 
-    def spent(self) -> float:
-        return float(self._read()["spent_usd"])
+    @staticmethod
+    def _total(data: dict, since: float | None) -> float:
+        """All spend, or the spend recorded at or after `since` (an entry
+        without a time counts: unknown is never free)."""
+        if since is None:
+            return float(data["spent_usd"])
+        return round(sum(max(0.0, float(e.get("usd") or 0.0)) for e in data["sessions"]
+                         if float(e.get("at", math.inf)) >= since), 6)
+
+    def spent(self, since: float | None = None) -> float:
+        return self._total(self._read(), since)
 
     @contextmanager
     def _locked(self):
@@ -262,8 +280,10 @@ class Ledger:
             except OSError:
                 pass
 
-    def add(self, call_id: str, usd: float, kind: str = "usage") -> float:
-        """Record spend; returns the new trial total (every process's)."""
+    def add(self, call_id: str, usd: float, kind: str = "usage",
+            since: float | None = None) -> float:
+        """Record spend; returns the new total (every process's), or the
+        total since `since` (the month's, for the monthly cap)."""
         with self._locked():
             data = self._read()
             data["spent_usd"] = round(data["spent_usd"] + max(0.0, usd), 6)
@@ -276,7 +296,7 @@ class Ledger:
             except OSError as exc:
                 tmp.unlink(missing_ok=True)
                 raise LedgerError(f"trial ledger not written ({type(exc).__name__}): {self.path}") from None
-            return float(data["spent_usd"])
+            return self._total(data, since)
 
 
 # --- Cost guard: reserve before every paid operation --------------------------

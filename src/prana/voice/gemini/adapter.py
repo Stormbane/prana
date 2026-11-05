@@ -24,7 +24,7 @@ from livekit.plugins.google.realtime import realtime_api
 from prana.voice.gemini.core import (
     DEFAULT_MODEL, DEFAULT_VOICE, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger,
     LedgerError, NullSage, Pot, Sage, Transcript, estimate_tokens, instructions, pcm16_rms,
-    rates_for, trial_ledger_path,
+    month_start, rates_for, trial_ledger_path,
 )
 
 
@@ -51,9 +51,11 @@ IN_CALL_LOCK_TIMEOUT_S = 0.5
 LEGACY_LEDGER = OUTPUT / "gemini-ledger.json"
 MODEL = _env("MODEL", DEFAULT_MODEL)
 VOICE = _env("VOICE", DEFAULT_VOICE)
-# Interim caps from the plan until Suti sets his own: <= $0.50 a session, trials <= $5.
+# Suti's caps (2026-11-05): $0.50 a session, US$10 a calendar month, across
+# every Gemini caller (the worker, the lab, the smoke). The month replaced the
+# interim "trials <= $5" total.
 SESSION_CAP_USD = float(_env("SESSION_CAP_USD", "0.50"))
-TRIAL_CAP_USD = float(_env("TRIAL_CAP_USD", "5.00"))
+MONTH_CAP_USD = float(_env("MONTH_CAP_USD", "10.00"))
 IDLE_SECONDS = float(_env("IDLE_SECONDS", "45"))
 # Below Gemini's ~10-minute connection lifetime, so no GoAway reconnects.
 MAX_SECONDS = min(540.0, float(_env("MAX_SECONDS", "300")))
@@ -143,11 +145,12 @@ class GeminiTalker:
             if _UNRECORDED["usd"] > 0:  # an earlier call's spend comes first
                 self.ledger.add(call.id, _UNRECORDED["usd"], "late")
                 _UNRECORDED["usd"] = 0.0
-            trial_spent = self.ledger.spent()
+            self.since = month_start()
+            month_spent = self.ledger.spent(self.since)
         except LedgerError as exc:  # never read an untrustworthy total as $0
             raise BudgetRefused(f"Budget refused: {exc}") from None
-        self.trial = Pot("trial", TRIAL_CAP_USD, spent_usd=trial_spent)
-        self.budget = Budget([Pot("session", min(session_cap_usd, SESSION_CAP_USD)), self.trial])
+        self.month = Pot("month", MONTH_CAP_USD, spent_usd=month_spent)
+        self.budget = Budget([Pot("session", min(session_cap_usd, SESSION_CAP_USD)), self.month])
         self.guard = CostGuard(self.budget, self.rates, max_output_tokens=MAX_OUTPUT_TOKENS,
                                base_context_tokens=estimate_tokens(self.instructions),
                                on_stop=self._on_stop)
@@ -239,20 +242,20 @@ class GeminiTalker:
     def on_usage(self, gen_id: str | None, usage: dict) -> None:
         usd = self.guard.on_usage(usage, gen_id)
         if self._record(usd, "usage"):
-            # The trial total now includes any other process's spend; the
+            # The month's total now includes any other process's spend; the
             # next turn was reserved before that was known.
             self.guard.recheck()
         self.call.emit("provider_usage", api="gemini-live", gen_id=gen_id, usage=usage,
                        usd=round(usd, 6), budget=self.budget.snapshot())
 
     def _record(self, usd: float, kind: str) -> bool:
-        """Write spend to the shared ledger now, and take the trial total from
+        """Write spend to the shared ledger now, and take the month's total from
         it (another process's spend included). A ledger that can't be written
         stops the call: no unrecorded spending."""
         if usd <= 0:
             return True
         try:
-            self.trial.spent_usd = self.ledger.add(self.call.id, usd, kind)
+            self.month.spent_usd = self.ledger.add(self.call.id, usd, kind, since=self.since)
             return True
         except (LedgerError, OSError) as exc:
             # Kept, not dropped: close retries it (Codex review).
