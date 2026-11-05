@@ -30,7 +30,7 @@ if ($Uninstall) {
 $shim = Join-Path $PSScriptRoot 'run-hidden.vbs'
 $cronRun = Join-Path (Split-Path -Parent $PSScriptRoot) 'cron_run.py'
 $pranaRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$script = Join-Path $pranaRoot 'srcpranaedits.py'
+$script = Join-Path $pranaRoot 'src\prana\credits.py'
 $logDir = Join-Path $env:LOCALAPPDATA 'narada\logs\cron'
 $logPath = Join-Path $logDir "$name.log"
 
