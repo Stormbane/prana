@@ -81,15 +81,20 @@ facts), use web_search then read_page and ANSWER from what you read —
 naming websites the listener could visit is a non-answer."""
 
 
-def _check_env() -> None:
+def _check_env(surface: str = "box") -> None:
     load_dotenv(Path.home() / ".narada" / ".livekit.env")
     load_dotenv(Path.home() / ".narada" / ".voice.env")
+    # The Gemini key (W5a) lives with the other provider keys.
+    load_dotenv(Path.home() / ".narada" / ".keys.env")
     # LiveKit transport is always required.
     required = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
     # The brain key depends on the backend: pipeline runs on OpenRouter,
     # realtime needs a direct OpenAI key (OpenRouter can't proxy S2S).
     backend = os.environ.get("NARADA_VOICE_BACKEND", "realtime").lower()
     key = "OPENROUTER_API_KEY" if backend == "pipeline" else "OPENAI_API_KEY"
+    from prana.voice.prefs import is_gemini, read_prefs, selected_model
+    if surface == "phone" and is_gemini(selected_model(read_prefs())):
+        key = "GOOGLE_API_KEY"  # the phone's Gemini talker; the BOX stays on OpenAI
     required.append(key)
     missing = [k for k in required if not os.environ.get(k)]
     # a leftover placeholder counts as missing (only the key we need)

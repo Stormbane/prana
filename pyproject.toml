@@ -55,7 +55,9 @@ dependencies = [
 voice = [
     # Voice loop (component ships enabled:false, so extras are correct
     # here — flip requires deliberate setup incl. OPENAI_API_KEY)
-    "livekit-agents[openai]~=1.8.1",
+    # 1.8.10 with Google: the Gemini talker's hooks are pinned to it (W5a).
+    "livekit-agents[openai,google]~=1.8.10",
+    "google-genai>=2.34,<3",
     "livekit-wakeword>=0.2",
     "pyaudio>=0.2.14",   # WakeWordListener mic capture (standalone path)
     # livekit-agents 1.6 calls aiohttp.ClientSession(proxy=...), added in

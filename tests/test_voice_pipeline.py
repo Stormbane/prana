@@ -18,6 +18,11 @@ import prana.voice.{worker}
 from concurrent.futures import ThreadPoolExecutor
 def job():
     from prana.voice.pipeline import VoicePipeline
+    if {worker!r} == 'phone_worker':
+        try:
+            from livekit.plugins.google.realtime import realtime_api  # the Gemini talker's first import
+        except ImportError:
+            pass  # no Gemini in this environment
     return VoicePipeline.__name__
 with ThreadPoolExecutor(max_workers=1) as pool:
     assert pool.submit(job).result() == 'VoicePipeline'

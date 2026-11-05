@@ -58,7 +58,12 @@ class GeminiCall:
     worker): an id, an event log, and a way to end it. Events are logged
     without words: transcripts never go to the host log (as `_record`)."""
 
-    WORDS = ("text", "heard", "entries")
+    # Strings are kept only under these keys; every other string (any
+    # transcript field, now or later) is dropped (Codex review: the
+    # `generated` field carried the words). Numbers always pass.
+    LABELS = frozenset({"reason", "entry", "error", "error_type", "api", "gen_id",
+                        "call_id", "model", "voice", "transcript", "stage", "code",
+                        "kind", "state", "speaker", "status", "name", "path"})
 
     def __init__(self, call_id: str, end) -> None:
         self.id = call_id
@@ -66,9 +71,23 @@ class GeminiCall:
         self.reason = ""
         self._end = end
 
+    @classmethod
+    def scrub(cls, value, key: str = ""):
+        if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            return value if key in cls.LABELS else None
+        if isinstance(value, dict):
+            kept = {k: cls.scrub(v, str(k)) for k, v in value.items()}
+            return {k: v for k, v in kept.items() if v is not None}
+        if isinstance(value, (list, tuple)):
+            kept = [cls.scrub(v, key) for v in value]
+            return [v for v in kept if v is not None]
+        return None
+
     def emit(self, kind: str, **data) -> None:
-        fields = {k: v for k, v in data.items() if k not in self.WORDS}
-        logger.info("gemini %s %s", kind, json.dumps(fields, default=str)[:2000])
+        fields = self.scrub(data)
+        logger.info("gemini %s %s", kind, json.dumps(fields)[:2000])
 
     async def close(self, reason: str = "ended") -> None:
         if self.closed:

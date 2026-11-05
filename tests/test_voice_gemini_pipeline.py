@@ -101,9 +101,47 @@ async def test_call_events_are_logged_without_words(caplog):
     call, ended = _call()
     with caplog.at_level(logging.INFO, logger="narada-voice"):
         call.emit("played", text="private words", turn=3)
-        call.emit("talker_summary", heard="private words", cost_usd=0.01)
+        # The transcript's own events carry the words in other fields too
+        # (Codex review: `generated`); nothing but labels and numbers passes.
+        call.emit("played", seq=4, generated="private words", heard="private words",
+                  interrupted=True, entry={"generated": "private words", "seq": 4})
+        call.emit("talker_summary", heard="private words", cost_usd=0.01, reason="cap",
+                  entries=[{"text": "private words"}], budget={"session": {"cap_usd": 0.5}})
     assert "private words" not in caplog.text
-    assert "cost_usd" in caplog.text
+    assert "cost_usd" in caplog.text and '"reason": "cap"' in caplog.text
+    assert '"cap_usd": 0.5' in caplog.text
     await call.close("cap")
     await call.close("idle")
     assert ended == ["cap"] and call.reason == "cap"
+
+
+def test_the_talkers_limit_bounds_the_phone_call():
+    """Codex review: the talker's duration limit was never applied."""
+    from types import SimpleNamespace
+
+    from prana.voice.phone_worker import session_limit
+
+    assert session_limit(600.0, None) == 600.0
+    assert session_limit(600.0, SimpleNamespace(max_seconds=540.0)) == 540.0
+    assert session_limit(300.0, SimpleNamespace(max_seconds=540.0)) == 300.0
+
+
+def test_the_phone_needs_the_gemini_key_when_gemini_is_chosen(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from prana.voice import worker
+
+    (tmp_path / ".narada" / "brain").mkdir(parents=True)
+    (tmp_path / ".narada" / "brain" / "voice-prefs.json").write_text(
+        json.dumps({"model": "gemini-3.8-live"}), encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "OPENAI_API_KEY"):
+        monkeypatch.setenv(k, "test-value")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("NARADA_VOICE_BACKEND", raising=False)
+    with pytest.raises(SystemExit, match="GOOGLE_API_KEY"):
+        worker._check_env(surface="phone")
+    worker._check_env(surface="box")  # the BOX stays on OpenAI
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-a-key")
+    worker._check_env(surface="phone")

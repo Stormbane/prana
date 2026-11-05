@@ -26,6 +26,12 @@ import time
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions
 from livekit.plugins import openai as _openai_plugin  # noqa: F401 — registers on the main thread
+try:
+    # Gemini (W5a) likewise: a first import inside a job thread raises
+    # "Plugins must be registered on the main thread" (Codex review).
+    from livekit.plugins import google as _google_plugin  # noqa: F401
+except ImportError:  # a voice environment without Gemini; choosing it then fails plainly
+    _google_plugin = None
 
 from prana.voice import worker as box
 from prana.voice.budget import BudgetExceeded, BudgetUnavailable, VoiceBudget
@@ -107,6 +113,12 @@ BRIEF_NOTE = (
     "answer first and ask whether he wants the rest. Stay brief until he "
     "says otherwise or turns brief mode off."
 )
+
+
+def session_limit(cap_s: float, talker) -> float:
+    """The call's length: the voice budget's cap, or the Gemini talker's own
+    limit when that is shorter (it stays under Google's connection life)."""
+    return cap_s if talker is None else min(cap_s, talker.max_seconds)
 
 
 NUDGE_COOLDOWN_S = 3.0
@@ -486,8 +498,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # Never completes on its own — always cancelled with the rest.
             "reply-nudge": asyncio.ensure_future(_reply_nudge()),
         }
+        # Gemini's own limit (below Google's ~10-minute connection life)
+        # bounds the call too, when it is the shorter (Codex review).
+        limit = session_limit(budget.session_cap_s, pipeline.talker)
         done, pending = await asyncio.wait(
-            waiters.values(), timeout=budget.session_cap_s,
+            waiters.values(), timeout=limit,
             return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
@@ -540,7 +555,7 @@ def main() -> None:
     if result is not None:
         raise SystemExit(result)
     logging.basicConfig(level=logging.INFO)
-    box._check_env()
+    box._check_env(surface="phone")
     agent_name = os.environ.get("AKHADA_AGENT_NAME", DEFAULT_AGENT_NAME)
     if not agent_name:
         # Empty agent_name means AUTOMATIC dispatch to every room —
