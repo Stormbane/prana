@@ -374,3 +374,15 @@ def test_an_old_per_checkout_ledger_must_be_reconciled_first(out, monkeypatch):
     monkeypatch.setattr(gemini_adapter, "LEGACY_LEDGER", legacy)
     with pytest.raises(BudgetRefused, match="reconcile"):
         GeminiTalker(FakeCall())
+
+
+def test_instructions_never_change_mid_call(monkeypatch):
+    """Suti 2026-11-05: on the Gemini API the plugin sends new instructions as
+    a MODEL turn, so a per-reply refresh put the whole instruction text (his
+    typed chat, the food log) in Narada's mouth. The model declares them
+    immutable, and the plugin still honours that flag."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-a-key")
+    talker = GeminiTalker(FakeCall())
+    model = talker.model()
+    assert model.capabilities.mutable_instructions is False
+    assert "mutable_instructions" in inspect.getsource(realtime_api.RealtimeSession.update_instructions)

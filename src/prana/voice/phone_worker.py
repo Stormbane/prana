@@ -363,7 +363,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
         agent = pipeline.agent(
             instructions=instructions,
-            before_reply=_refresh_fitness,
+            # Gemini can't take new instructions mid-call (see
+            # gemini/adapter.MeteredModel): its briefing is the one at the
+            # call's start.
+            before_reply=None if pipeline.is_gemini else _refresh_fitness,
             tools=build_voice_tools(
                 tier=tier, session_id=ctx.job.id,
                 music=None, publish=_publish_activity, end_session=bye.set,
@@ -401,7 +404,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 asyncio.ensure_future(_publish_activity("narada.activity", phone_message(None)))
 
         from prana.voice.hooked import attach_refresh
-        attach_refresh(session, _refresh_fitness)
+        if not pipeline.is_gemini:
+            attach_refresh(session, _refresh_fitness)
 
         @session.on("user_input_transcribed")
         def _on_user_words(ev) -> None:

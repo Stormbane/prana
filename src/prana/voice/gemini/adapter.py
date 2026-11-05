@@ -12,6 +12,7 @@ NARADA_GEMINI_<NAME>, then the lab's VOICE_LAB_GEMINI_<NAME>.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -109,6 +110,12 @@ class MeteredModel(realtime_api.RealtimeModel):
     def __init__(self, talker: "GeminiTalker", **kwargs):
         super().__init__(**kwargs)
         self._talker = talker
+        # No mid-call instruction updates (Suti 2026-11-05, a call that "didn't
+        # know what I was saying"): on the Gemini API the plugin sends new
+        # instructions as a MODEL turn in the conversation, so every refresh
+        # put ~12k tokens of instructions in Narada's mouth, and he answered
+        # them. With this off, an update is kept for a reconnect, never sent.
+        self._capabilities = dataclasses.replace(self._capabilities, mutable_instructions=False)
 
     def session(self, *, turn_detection_disabled: bool = False) -> MeteredSession:
         if self._talker.guard.stopped:
