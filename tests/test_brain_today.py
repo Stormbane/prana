@@ -103,3 +103,40 @@ def test_a_tap_delivered_late_reports_on_the_day_it_was_made(client):
         "identity": "check", "kind": "check", "event_id": "late-1", "expected_revision": 0,
         "payload": {"food": "on_track", "trained": "rest", "at": "2026-10-12T23:58:00+10:00"}}).json()
     assert r["result"]["ok"] and r["result"]["day"] == "2026-10-12"
+
+
+def test_a_tap_on_yesterdays_page_answers_yesterdays_check_until_noon(client):
+    """Redesign L2a (Codex R1): the day page names the check it answers."""
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 9, 0, tzinfo=clock.TZ))
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "check", "kind": "check", "event_id": "late-1", "day": "2026-10-12",
+        "payload": {"food": "so_so", "trained": "rest"}}).json()
+    assert r["result"]["ok"] and r["result"]["day"] == "2026-10-12"
+    clock.set_fake_now(datetime(2026, 10, 13, 12, 5, tzinfo=clock.TZ))
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "check", "kind": "check", "event_id": "late-2", "day": "2026-10-12",
+        "payload": {"food": "so_so", "trained": "rest"}}).json()
+    assert r["result"]["ok"] is False and r["result"]["closed"] is True
+
+
+def test_other_asks_aimed_at_an_older_page_are_refused(client):
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 9, 0, tzinfo=clock.TZ))
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "vital:weight", "kind": "number", "event_id": "w-old", "day": "2026-10-12",
+        "payload": {"value": 80.4}}).json()
+    assert r["result"]["ok"] is False and "carried over to today" in r["result"]["error"]
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "vital:weight", "kind": "number", "event_id": "w-new", "day": "2026-10-13",
+        "payload": {"value": 80.4}}).json()
+    assert r["result"]["ok"]
+
+
+def test_an_offline_answer_delivered_after_the_turn_keeps_its_day(client):
+    from akhada import clock
+    clock.set_fake_now(datetime(2026, 10, 13, 5, 0, tzinfo=clock.TZ))
+    r = client.post("/api/today/answer", headers=H, json={
+        "identity": "vital:weight", "kind": "number", "event_id": "w-queued", "day": "2026-10-12",
+        "payload": {"value": 80.4, "at": "2026-10-12T23:58:00+10:00"}}).json()
+    assert r["result"]["ok"]

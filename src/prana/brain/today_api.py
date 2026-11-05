@@ -49,6 +49,23 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(400, "payload must be an object")
     common = {"event_id": event_id, "session_id": "app-tap", "source": "app"}
+    # The day page the tap came from (redesign L2a): the evening check is
+    # answered for that day (yesterday's until noon, akhada decides); every
+    # other ask carries over to today, so a tap aimed at an older page is
+    # refused rather than written to today by surprise.
+    day = body.get("day")
+    if day is not None and not isinstance(day, str):
+        raise HTTPException(400, "day must be a date string (YYYY-MM-DD)")
+    if day is not None and kind != "check":
+        from akhada import clock
+        today = asks.reporting_day(clock.now())
+        # The day the tap was made counts too: an answer queued offline at
+        # 23:58 and delivered after 04:00 still reports on its own day.
+        made = asks.reporting_day(clock.parse_at(payload.get("at"))) if payload.get("at") else today
+        if day not in (today, made):
+            msg = "this ask carried over to today; answer it on today's page"
+            return {"result": {"ok": False, "closed": True, "day": day, "error": msg, "spoken": msg},
+                    "today": asks.get_today(store)}
     try:
         if kind == "check":
             if identity != "check":
@@ -57,7 +74,7 @@ def _answer(body: dict[str, Any]) -> dict[str, Any]:
                 store, food=payload.get("food"), trained=payload.get("trained"),
                 mood=payload.get("mood"), note=payload.get("note"),
                 at=payload.get("at"), expected_revision=body.get("expected_revision"),
-                via="tap", **common)
+                via="tap", **({"day": day} if day is not None else {}), **common)
         elif kind == "number":
             value = payload.get("value")
             if not isinstance(value, (int, float)) or isinstance(value, bool):
