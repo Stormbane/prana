@@ -553,6 +553,12 @@ def create_app(config: BrainConfig, backend_factory,
     async def news(tier: str = Depends(require_tier)) -> dict:
         from prana import news as _news
         return await asyncio.to_thread(_news.latest)
+
+    # API credits, checked nightly (prana/credits.py): the Data tab's card.
+    @app.get("/api/credits")
+    async def credits(tier: str = Depends(require_tier)) -> dict:
+        from prana import credits as _credits
+        return await asyncio.to_thread(_credits.latest)
     from prana.brain.doctor_api import register_doctor
     register_doctor(app, require_tier)
 
