@@ -94,7 +94,10 @@ def _check_env(surface: str = "box") -> None:
     key = "OPENROUTER_API_KEY" if backend == "pipeline" else "OPENAI_API_KEY"
     from prana.voice.prefs import is_gemini, read_prefs, selected_model
     if surface == "phone" and is_gemini(selected_model(read_prefs())):
-        key = "GOOGLE_API_KEY"  # the phone's Gemini talker; the BOX stays on OpenAI
+        # The phone's Gemini talker (the BOX stays on OpenAI). Either name
+        # works, as in prana.voice.gemini.adapter.api_key (Codex recheck).
+        key = "GEMINI_API_KEY" if (os.environ.get("GEMINI_API_KEY")
+                                   and not os.environ.get("GOOGLE_API_KEY")) else "GOOGLE_API_KEY"
     required.append(key)
     missing = [k for k in required if not os.environ.get(k)]
     # a leftover placeholder counts as missing (only the key we need)

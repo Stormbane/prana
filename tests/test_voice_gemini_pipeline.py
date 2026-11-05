@@ -139,9 +139,13 @@ def test_the_phone_needs_the_gemini_key_when_gemini_is_chosen(tmp_path, monkeypa
     for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "OPENAI_API_KEY"):
         monkeypatch.setenv(k, "test-value")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("NARADA_VOICE_BACKEND", raising=False)
     with pytest.raises(SystemExit, match="GOOGLE_API_KEY"):
         worker._check_env(surface="phone")
     worker._check_env(surface="box")  # the BOX stays on OpenAI
+    monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")  # the adapter's other name
+    worker._check_env(surface="phone")
+    monkeypatch.delenv("GEMINI_API_KEY")
     monkeypatch.setenv("GOOGLE_API_KEY", "test-not-a-key")
     worker._check_env(surface="phone")
