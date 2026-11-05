@@ -67,10 +67,30 @@ def test_a_mirrored_chat_lands_on_disk_and_reads_back(brain):
     listed = client.get("/api/chats", headers={"Authorization": "Bearer tok-app"}).json()
     assert listed == [{"id": "conv-1", "title": "Back day", "updatedAt": 1700,
                        "mirrored_at": doc["mirrored_at"], "messages": 2}]
-    # last write wins, whole document
+    # the document's fields follow the last write; messages MERGE by id
+    # (redesign L2b): a shorter phone copy never erases what the brain has
     _put(client, "conv-1", {**body, "title": "Back day (renamed)", "messages": body["messages"][:1]})
     assert client.get("/api/chats/conv-1", headers={"Authorization": "Bearer tok-app"}).json()["title"] == "Back day (renamed)"
-    assert client.get("/api/chats", headers={"Authorization": "Bearer tok-app"}).json()[0]["messages"] == 1
+    assert client.get("/api/chats", headers={"Authorization": "Bearer tok-app"}).json()[0]["messages"] == 2
+
+
+def test_a_long_chat_keeps_its_history_when_the_phone_holds_only_the_end(brain):
+    """Codex R3: the phone keeps its last 60 messages; the brain must keep
+    the rest, take the phone's edits in place, and add what's new."""
+    client, _ = brain
+    msg = lambda i, text=None: {"id": f"m{i}", "role": "user", "text": text or f"line {i}", "status": "complete"}
+    _put(client, "long", {"title": "Long", "messages": [msg(i) for i in range(100)]})
+    # the phone now holds only 60..99, has edited m95, and added m100
+    phone = [msg(i) for i in range(60, 100)]
+    phone[35] = msg(95, "edited")
+    _put(client, "long", {"title": "Long", "messages": phone + [msg(100)]})
+    doc = client.get("/api/chats/long", headers={"Authorization": "Bearer tok-app"}).json()
+    ids = [m["id"] for m in doc["messages"]]
+    assert ids == [f"m{i}" for i in range(101)]
+    assert doc["messages"][95]["text"] == "edited"
+    # sending the same thing again changes nothing
+    _put(client, "long", {"title": "Long", "messages": phone + [msg(100)]})
+    assert len(client.get("/api/chats/long", headers={"Authorization": "Bearer tok-app"}).json()["messages"]) == 101
 
 
 def test_tiers_are_separate_and_ids_and_bodies_are_checked(brain):
@@ -85,3 +105,23 @@ def test_tiers_are_separate_and_ids_and_bodies_are_checked(brain):
     big = {"messages": [{"id": "m", "role": "user", "text": "x" * 1_100_000, "status": "complete"}]}
     assert _put(client, "conv-4", big).status_code == 413
     assert client.put("/api/chats/conv-5", content="{}").status_code == 401
+
+
+
+def test_odd_ids_never_break_the_mirror(brain):
+    """Review: a non-string id (from an old client, or already on disk) is
+    kept by value, never a 500, and never blocks later writes."""
+    client, _ = brain
+    r = _put(client, "odd", {"title": "Odd", "messages": [{"id": ["m1"], "text": "x"}, {"text": "no id"}]})
+    assert r.status_code == 200
+    r = _put(client, "odd", {"title": "Odd", "messages": [{"id": "m2", "text": "fine"}, {"text": "no id"}]})
+    assert r.status_code == 200 and r.json()["messages"] == 3
+
+
+def test_a_big_history_merges_quickly(brain):
+    import time
+    client, _ = brain
+    big = [{"id": f"m{i}", "role": "user", "text": "x"} for i in range(5000)]
+    start = time.perf_counter()
+    assert _put(client, "big", {"title": "Big", "messages": big}).status_code == 200
+    assert time.perf_counter() - start < 1.0
