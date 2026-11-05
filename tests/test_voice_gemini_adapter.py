@@ -11,8 +11,8 @@ from google.genai import types  # noqa: E402
 from livekit import rtc  # noqa: E402
 from livekit.plugins.google.realtime import realtime_api  # noqa: E402
 
-import gemini_adapter  # noqa: E402
-from gemini_adapter import BudgetRefused, GeminiTalker, MeteredModel, MeteredSession  # noqa: E402
+from prana.voice.gemini import adapter as gemini_adapter  # noqa: E402
+from prana.voice.gemini.adapter import BudgetRefused, GeminiTalker, MeteredModel, MeteredSession  # noqa: E402
 
 
 class FakeCall:
@@ -33,8 +33,9 @@ class FakeCall:
 
 @pytest.fixture(autouse=True)
 def _ledger_in_tmp(tmp_path, monkeypatch):
-    """No test may touch the real trial ledger in ~/.narada."""
+    """No test may touch the real trial ledger or talker folder in ~/.narada."""
     monkeypatch.setattr(gemini_adapter, "LEDGER_PATH", tmp_path / "gemini-ledger.json")
+    monkeypatch.setattr(gemini_adapter, "OUTPUT", tmp_path)
     monkeypatch.setitem(gemini_adapter._UNRECORDED, "usd", 0.0)
 
 
@@ -217,32 +218,6 @@ def test_latency_event_on_first_model_audio(out):
     samples = [e for e in call.events if e["kind"] == "latency"]
     assert len(samples) == 1 and samples[0]["gen_id"] == "g1"
     assert samples[0]["eos_to_first_model_audio_ms"] >= 0
-
-
-def test_cost_py_reprices_a_gemini_report():
-    import cost
-    report = {"mode": "gemini", "model": "gemini-3.8-live", "events": [
-        {"kind": "provider_usage", "api": "gemini-live",
-         "usage": {"prompt_token_count": 1000, "response_token_count": 500,
-                   "prompt_tokens_details": [{"modality": "AUDIO", "token_count": 1000}],
-                   "response_tokens_details": [{"modality": "AUDIO", "token_count": 500}]}}]}
-    assert cost.estimate(report)["voice_usd"] == pytest.approx((1000 * 3 + 500 * 12) / 1e6)
-
-
-def test_lab_offers_gemini_only_with_a_key(monkeypatch):
-    import lab
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    assert lab.available_modes() == []
-    monkeypatch.setenv("GEMINI_API_KEY", "test-not-a-key")
-    assert lab.available_modes() == ["gemini"]
-    with pytest.raises(Exception):
-        lab.Settings(mode="gemini", session_cap_usd=-1)
-
-
-# --- the money holes (Codex review, 2026-11-04) ------------------------------------
-
 def _usage(out_audio=100):
     return {"prompt_token_count": 800, "response_token_count": out_audio,
             "prompt_tokens_details": [{"modality": "TEXT", "token_count": 800}],

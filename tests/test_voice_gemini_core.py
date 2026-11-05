@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from gemini_talker import (
+from prana.voice.gemini.core import (
     INTERRUPTED, PLAYED, UNPLAYED, Budget, CostGuard, IdleWatchdog, LatencyMeter, Ledger, LedgerError, Pot,
     Rates, Transcript, estimate_tokens, instructions, pcm16_rms, price_usage, rates_for,
 )
