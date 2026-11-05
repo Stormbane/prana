@@ -546,6 +546,13 @@ def create_app(config: BrainConfig, backend_factory,
     # ── Questling v1: today's cards + tap answers (akhada asks) ──────
     from prana.brain.today_api import register_today
     register_today(app, require_tier)
+
+    # The News card (redesign L2d): the newest edition the news desk wrote,
+    # with whether it is stale and the last failure (prana/news.py).
+    @app.get("/api/news")
+    async def news(tier: str = Depends(require_tier)) -> dict:
+        from prana import news as _news
+        return await asyncio.to_thread(_news.latest)
     from prana.brain.doctor_api import register_doctor
     register_doctor(app, require_tier)
 
